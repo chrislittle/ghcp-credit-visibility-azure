@@ -205,9 +205,17 @@ resource "azurerm_windows_virtual_machine" "jumpbox" {
 
 # Lets the jump box write the GitHub PAT into Key Vault using its OWN identity (via
 # deploy.ps1's Azure Run Command path) — scoped to just this vault's secrets, nothing else.
+# try() guards against referencing azurerm_windows_virtual_machine.jumpbox[0].identity[0] when
+# that resource has ZERO instances (enable_jumpbox = false, the default) — without it, Terraform
+# errors at plan time ("Missing required argument") even though this resource itself correctly
+# evaluates count = 0 and would never actually be created.
+locals {
+  jumpbox_principal_id = try(azurerm_windows_virtual_machine.jumpbox[0].identity[0].principal_id, null)
+}
+
 resource "azurerm_role_assignment" "jumpbox_kv_secrets_officer" {
   count                = local.create_jumpbox ? 1 : 0
   scope                = azurerm_key_vault.kv.id
   role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = azurerm_windows_virtual_machine.jumpbox[0].identity[0].principal_id
+  principal_id         = local.jumpbox_principal_id
 }
