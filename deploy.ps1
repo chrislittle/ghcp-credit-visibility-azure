@@ -679,6 +679,31 @@ function Phase-SetPat {
   Write-Ok 'PAT stored in Key Vault. The app resolves it via its managed identity on the next snapshot.'
 }
 
+function Invoke-HealthCheckViaJumpbox([string]$ResourceGroup, [string]$VmName, [string]$Url) {
+  # Runs the health checks FROM the jump box (inside the VNet) instead of your workstation.
+  # On a private deployment the web app has public_network_access_enabled = false, so hitting
+  # its public hostname from outside the VNet returns a platform-level 403 (Azure denying the
+  # request at the front door, before Easy Auth or the app ever see it) — not a real health
+  # signal. The script always exits 0 and prints both status codes (even non-200 ones, e.g.
+  # while migrations are still warming up) so Phase-Status can report them accurately.
+  $script = @'
+param([string]$BaseUrl)
+$ErrorActionPreference = 'SilentlyContinue'
+function Get-Code([string]$Path) {
+  try { (Invoke-WebRequest -Uri "$BaseUrl$Path" -UseBasicParsing -TimeoutSec 20).StatusCode }
+  catch { if ($_.Exception.Response) { $_.Exception.Response.StatusCode.value__ } else { "no-response" } }
+}
+Write-Output "HEALTH_LIVE=$(Get-Code '/health/live')"
+Write-Output "HEALTH_READY=$(Get-Code '/health/ready')"
+Write-Output "HEALTH_CHECK_DONE"
+'@
+  $out = Invoke-JumpboxRunCommand -ResourceGroup $ResourceGroup -VmName $VmName -NamePrefix 'health-check' -ScriptBody $script `
+    -Parameters @("BaseUrl=$Url") -ProtectedParameters @() -SuccessMarker 'HEALTH_CHECK_DONE'
+  $live = if ($out -match 'HEALTH_LIVE=(\S+)') { $Matches[1] } else { 'unknown' }
+  $ready = if ($out -match 'HEALTH_READY=(\S+)') { $Matches[1] } else { 'unknown' }
+  return @{ Live = $live; Ready = $ready }
+}
+
 # ── PHASE: status / health ───────────────────────────────────────
 function Phase-Status {
   Write-Step 7 'Status + health'
@@ -686,7 +711,28 @@ function Phase-Status {
   if (-not $url) { Write-Warn 'web_app_url not available (infra not applied?).'; return }
   Write-Ok "URL: $url"
   $isPrivate = (Get-TfVar 'use_private_networking') -eq 'true'
-  $hint = if ($isPrivate) { '503 = still warming up: DNS/grant/migrations' } else { '503 = still warming up: grant/migrations (not DNS — this is the PUBLIC pattern)' }
+  $jumpboxVm = if ($isPrivate) { Get-TfOutput 'jumpbox_vm_name' } else { $null }
+
+  if ($isPrivate -and $jumpboxVm) {
+    Write-Info "Private networking detected — checking health from the jump box (your workstation would get a platform-level 403; public access to the app is disabled by design)."
+    try {
+      $health = Invoke-HealthCheckViaJumpbox -ResourceGroup (Get-TfOutput 'resource_group') -VmName $jumpboxVm -Url $url
+      foreach ($kv in @(@('/health/live', $health.Live), @('/health/ready', $health.Ready))) {
+        if ($kv[1] -eq '200') { Write-Ok "$($kv[0]) → 200" }
+        else { Write-Warn "$($kv[0]) → $($kv[1]) (still warming up: grant/migrations, or DNS if just deployed)" }
+      }
+    } catch {
+      Write-Warn "Couldn't run the health check via the jump box: $($_.Exception.Message)"
+    }
+    return
+  }
+  if ($isPrivate -and -not $jumpboxVm) {
+    Write-Warn "Private networking with no jump box (enable_jumpbox=false) — checking from your workstation will show a platform-level 403 (public access to the app is disabled by design), not a real health signal."
+    Write-Info 'Either set enable_jumpbox = true and re-apply, then re-run this task, or check from any other host on the VNet.'
+    return
+  }
+
+  $hint = '503 = still warming up: grant/migrations (not DNS — this is the PUBLIC pattern)'
   foreach ($p in '/health/live', '/health/ready') {
     try { $r = Invoke-WebRequest "$url$p" -UseBasicParsing -TimeoutSec 20; Write-Ok "$p → $($r.StatusCode)" }
     catch {

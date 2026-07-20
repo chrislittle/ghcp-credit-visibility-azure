@@ -44,12 +44,15 @@ enable_jumpbox = true
 
 This gives you (or a tester) a way to **RDP into the VNet through the portal via Bastion** — no VM
 public IP, no NSG hole open to the internet — and from there browse the private web app URL or
-resolve the private DNS names. You typically **won't need to RDP in just for the SQL grant or the
-PAT** though: `deploy.ps1 -Task grant-sql` and `-Task set-pat` detect a private deployment with a
-jump box and run those steps automatically via **Azure Run Command** (`az vm run-command`) —
-executing on the jump box over the ARM control plane, with the SQL token / PAT passed as
-`--protected-parameters` (never logged or persisted) — see
+resolve the private DNS names. You typically **won't need to RDP in just for the SQL grant, the
+PAT, or a health check** though: `deploy.ps1 -Task grant-sql`, `-Task set-pat`, and `-Task status`
+all detect a private deployment with a jump box and run those steps automatically via **Azure Run
+Command** (`az vm run-command`) — executing on the jump box over the ARM control plane, with the
+SQL token / PAT passed as `--protected-parameters` (never logged or persisted) — see
 [Post-deploy](#post-deploy) and [Going live against real GitHub data](#going-live-against-real-github-data).
+(`-Task status`'s health check has no secret to protect — it just needs to run from inside the
+VNet, since the web app's public access is disabled and a check from outside gets a platform-level
+403, not a real health signal.)
 
 Connect: Azure Portal → the `vm-jumpbox` VM → **Connect → Bastion** → sign in with
 `jumpbox_admin_username` / `terraform output -raw jumpbox_admin_password`. Tear it down again by
