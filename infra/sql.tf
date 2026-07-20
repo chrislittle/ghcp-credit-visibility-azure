@@ -30,6 +30,21 @@ resource "azurerm_mssql_server" "sql" {
   tags = var.tags
 }
 
+# Azure SQL has a well-documented race condition: a freshly-created (or just-updated) logical
+# server needs a few seconds before it's internally ready to accept firewall-rule changes, even
+# though Terraform's dependency graph already waited for the server resource's own apply to
+# report success — the ARM "creation succeeded" signal doesn't guarantee the SQL control plane
+# has finished propagating internally. Without this, the firewall rules below can intermittently
+# fail with "DenyPublicEndpointEnabled: Unable to create or modify firewall rules when public
+# network interface for the server is disabled" on a freshly-created server, even in PUBLIC mode
+# (public_network_access_enabled = true). Only relevant in public mode — private mode never
+# creates these firewall rules at all (see counts below).
+resource "time_sleep" "sql_server_ready" {
+  count           = var.use_private_networking ? 0 : 1
+  depends_on      = [azurerm_mssql_server.sql]
+  create_duration = "30s"
+}
+
 resource "azurerm_mssql_database" "db" {
   name        = "ghcpvisibility"
   server_id   = azurerm_mssql_server.sql.id
@@ -52,6 +67,7 @@ resource "azurerm_mssql_firewall_rule" "allow_azure" {
   server_id        = azurerm_mssql_server.sql.id
   start_ip_address = "0.0.0.0"
   end_ip_address   = "0.0.0.0"
+  depends_on       = [time_sleep.sql_server_ready]
 }
 
 # PUBLIC pattern: temporary rule opening the deployer's own IP so deploy.ps1's grant-sql
@@ -64,6 +80,7 @@ resource "azurerm_mssql_firewall_rule" "allow_admin_ip" {
   server_id        = azurerm_mssql_server.sql.id
   start_ip_address = var.admin_client_ip
   end_ip_address   = var.admin_client_ip
+  depends_on       = [time_sleep.sql_server_ready]
 }
 
 # Private endpoint for SQL (private pattern only).
