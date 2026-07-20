@@ -43,9 +43,13 @@ enable_jumpbox = true
 ```
 
 This gives you (or a tester) a way to **RDP into the VNet through the portal via Bastion** — no VM
-public IP, no NSG hole open to the internet — and from there browse the private web app URL,
-resolve the private DNS names, or run `az keyvault secret set` against a private-endpoint-only Key
-Vault (e.g. to seed the GitHub PAT — see [Going live against real GitHub data](#going-live-against-real-github-data)).
+public IP, no NSG hole open to the internet — and from there browse the private web app URL or
+resolve the private DNS names. You typically **won't need to RDP in just for the SQL grant or the
+PAT** though: `deploy.ps1 -Task grant-sql` and `-Task set-pat` detect a private deployment with a
+jump box and run those steps automatically via **Azure Run Command** (`az vm run-command`) —
+executing on the jump box over the ARM control plane, with the SQL token / PAT passed as
+`--protected-parameters` (never logged or persisted) — see
+[Post-deploy](#post-deploy) and [Going live against real GitHub data](#going-live-against-real-github-data).
 
 Connect: Azure Portal → the `vm-jumpbox` VM → **Connect → Bastion** → sign in with
 `jumpbox_admin_username` / `terraform output -raw jumpbox_admin_password`. Tear it down again by
@@ -241,13 +245,13 @@ For an **isolated demo** subscription with no central DNS/DINE policy, set `crea
 
 **`identity_mode = system_assigned` (customer/prod): both steps.**
 
-1. **Grant the web app's managed identity access to SQL.** Easiest: run **`./deploy.ps1 -Task grant-sql`** from the repo root — it reads the server/DB/app names from Terraform outputs, uses your `az login` (you must be the Entra SQL admin), and applies an idempotent grant (`db_ddladmin` + read/write) so the app can run its migrations. No manual SQL, no restart (the app retries migrations and picks it up within ~30s). *Manual alternative:* connect to the `ghcpvisibility` DB as the Entra SQL admin (e.g. Azure Portal → SQL database → Query editor) and run the T-SQL emitted by `terraform output post_deploy_sql_grant`. *(Skipped in self-admin mode — the output says "Not required".)*
+1. **Grant the web app's managed identity access to SQL.** Easiest: run **`./deploy.ps1 -Task grant-sql`** from the repo root — it reads the server/DB/app names from Terraform outputs, uses your `az login` (you must be the Entra SQL admin), and applies an idempotent grant (`db_ddladmin` + read/write) so the app can run its migrations. No manual SQL, no restart (the app retries migrations and picks it up within ~30s). **On a private deployment with `enable_jumpbox = true`**, your workstation can't reach the SQL private endpoint directly (public access is denied) — `deploy.ps1` detects this automatically and runs the grant *from the jump box* via **Azure Run Command** (`az vm run-command`) instead: your SQL access token is passed in as a `--protected-parameters` value (never logged or persisted in the run-command's history) and the grant executes inside the VNet, with no RDP session required. *Manual alternative (public mode, or no jump box):* connect to the `ghcpvisibility` DB as the Entra SQL admin (e.g. Azure Portal → SQL database → Query editor, or a host on the VNet) and run the T-SQL emitted by `terraform output post_deploy_sql_grant`. *(Skipped in self-admin mode — the output says "Not required".)*
 2. **Assign app roles / groups.** In Entra, assign bootstrap administrators to the app's `Admin` role, then use `/Admin/Mappings` to manage which Entra groups or users can see which cost centers.
 
 ## Going live against real GitHub data
 1. Set `use_mock_data = false` and `github_enterprise_slug = "<your-enterprise>"`.
 2. Provide the enterprise PAT as Key Vault secret **`github-pat`** (pick one):
-   - **Out-of-band (recommended):** run **`./deploy.ps1 -Task set-pat`** (prompts for the PAT, masked, and stores it in the `github-pat` secret), or `az keyvault secret set --vault-name <kv> --name github-pat --value <PAT>`. Writing a secret is a Key Vault **data-plane** op, so for a **private** vault run this from a host on the VNet (jumpbox / Bastion / VPN) — public data-plane access is disabled.
+   - **Out-of-band (recommended):** run **`./deploy.ps1 -Task set-pat`** (prompts for the PAT, masked, and stores it in the `github-pat` secret). Writing a secret is a Key Vault **data-plane** op, so for a **private** vault, public access is disabled — but on a deployment with `enable_jumpbox = true`, `deploy.ps1` detects this and sets the secret *from the jump box* via **Azure Run Command**, using the jump box's own managed identity (granted `Key Vault Secrets Officer` on just this vault) — the PAT is passed as a `--protected-parameters` value, and no RDP session is required. Without a jump box, run `az keyvault secret set --vault-name <kv> --name github-pat --value <PAT>` from any other host on the VNet (Bastion + a manual session, or VPN/ExpressRoute).
    - **Terraform-seeded (turnkey):** set `github_pat_secret_value` in `terraform.tfvars` before apply. Same private-vault caveat — the **apply host** must reach the private endpoint.
 3. The app's **`GitHub__Token`** app setting is a Key Vault reference to `github-pat` — **wired automatically whenever `use_mock_data = false`** (independent of how the secret was seeded) — resolved at runtime by the app's managed identity (`Key Vault Secrets User`). The secret value never lands in app settings or Terraform state.
 

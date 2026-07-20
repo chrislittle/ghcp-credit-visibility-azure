@@ -90,6 +90,110 @@ function AskChoice([string]$p, [string[]]$opts, [int]$d = 1) {
   $n = 0; if ([int]::TryParse($a, [ref]$n) -and $n -ge 1 -and $n -le $opts.Count) { $n } else { $d }
 }
 function Get-TfOutput([string]$n) { try { $v = (terraform -chdir="$infra" output -raw $n 2>$null); if ($LASTEXITCODE -eq 0 -and $v) { return $v.Trim() } } catch {}; return $null }
+
+# ── Azure Run Command helpers (private-networking path) ──────────
+# Both helpers execute a small script ON the jump-box VM via `az vm run-command create`. This
+# runs over the ARM control plane (no VNet reachability needed from wherever deploy.ps1 itself
+# is running) but the SCRIPT executes inside the VNet — so it resolves the SQL/Key Vault private
+# endpoints normally. Secrets (the SQL access token / the PAT) are passed via
+# `--protected-parameters`, which Azure does NOT persist/return in the run-command resource or
+# its history — unlike `--parameters`, which would leak them into `az vm run-command show`.
+# The run-command resource is deleted again immediately after reading its result.
+function Invoke-JumpboxRunCommand([string]$ResourceGroup, [string]$VmName, [string]$NamePrefix, [string]$ScriptBody, [string[]]$Parameters, [string[]]$ProtectedParameters, [string]$SuccessMarker) {
+  $rcName = "$NamePrefix-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+  $scriptPath = Join-Path ([System.IO.Path]::GetTempPath()) "$rcName.ps1"
+  Set-Content -Path $scriptPath -Value $ScriptBody -Encoding UTF8 -NoNewline
+  try {
+    $argList = @('vm', 'run-command', 'create', '--resource-group', $ResourceGroup, '--vm-name', $VmName, '--name', $rcName, '--script', "@$scriptPath", '--output', 'none')
+    if ($Parameters.Count -gt 0) { $argList += '--parameters'; $argList += $Parameters }
+    if ($ProtectedParameters.Count -gt 0) { $argList += '--protected-parameters'; $argList += $ProtectedParameters }
+    & az @argList
+    if ($LASTEXITCODE -ne 0) { throw "az vm run-command create failed (exit $LASTEXITCODE) — see above for the Azure error." }
+
+    $json = az vm run-command show --resource-group $ResourceGroup --vm-name $VmName --run-command-name $rcName --instance-view -o json
+    $result = $json | ConvertFrom-Json
+    $out = ($result.instanceView.output -join "`n")
+    $err = ($result.instanceView.error -join "`n")
+    $exitCode = $result.instanceView.exitCode
+
+    if ($exitCode -eq 0 -and $out -match [regex]::Escape($SuccessMarker)) {
+      return $out
+    }
+    Write-Err "Run Command on $VmName did not report success (exit code: $exitCode)."
+    if ($err) { Write-Host "  $err" -ForegroundColor DarkGray }
+    if ($out) { Write-Host "  $out" -ForegroundColor DarkGray }
+    throw "Azure Run Command '$rcName' on $VmName did not succeed."
+  } finally {
+    Remove-Item $scriptPath -ErrorAction SilentlyContinue
+    az vm run-command delete --resource-group $ResourceGroup --vm-name $VmName --run-command-name $rcName --yes --output none 2>$null
+  }
+}
+
+function Invoke-SqlGrantViaJumpbox([string]$ResourceGroup, [string]$VmName, [string]$Server, [string]$Database, [string]$AppName) {
+  Write-Info "Fetching a SQL access token for your identity ($($script:Acct.user.name))..."
+  $token = (az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv)
+  if (-not $token) { throw "Could not acquire a SQL access token — are you signed in as the Entra SQL admin (or in the admin group)?" }
+
+  # Raw ADO.NET (built into Windows' .NET Framework) instead of Invoke-Sqlcmd/the SqlServer
+  # module — avoids needing to install anything on a bare jump-box VM, which may have no
+  # outbound internet path to the PowerShell Gallery.
+  $script = @'
+param([string]$SqlServer, [string]$SqlDatabase, [string]$AppName, [string]$AccessToken)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Data
+$safeApp = $AppName.Replace("'", "''")
+$tsql = @"
+DECLARE @app sysname = N'$safeApp';
+DECLARE @q sysname = QUOTENAME(@app);
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = @app)
+    EXEC('CREATE USER ' + @q + ' FROM EXTERNAL PROVIDER;');
+IF IS_ROLEMEMBER('db_datareader', @app) = 0 EXEC('ALTER ROLE db_datareader ADD MEMBER ' + @q + ';');
+IF IS_ROLEMEMBER('db_datawriter', @app) = 0 EXEC('ALTER ROLE db_datawriter ADD MEMBER ' + @q + ';');
+IF IS_ROLEMEMBER('db_ddladmin',  @app) = 0 EXEC('ALTER ROLE db_ddladmin  ADD MEMBER ' + @q + ';');
+"@
+$conn = New-Object System.Data.SqlClient.SqlConnection
+$conn.ConnectionString = "Server=tcp:$SqlServer,1433;Database=$SqlDatabase;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;"
+$conn.AccessToken = $AccessToken
+$conn.Open()
+$cmd = $conn.CreateCommand()
+$cmd.CommandText = $tsql
+$cmd.ExecuteNonQuery() | Out-Null
+$conn.Close()
+Write-Output "GRANT_OK"
+'@
+
+  Write-Info "Running the grant on $VmName via Azure Run Command (token passed as a protected parameter — never logged or returned)..."
+  Invoke-JumpboxRunCommand -ResourceGroup $ResourceGroup -VmName $VmName -NamePrefix 'grant-sql' -ScriptBody $script `
+    -Parameters @("SqlServer=$Server", "SqlDatabase=$Database", "AppName=$AppName") `
+    -ProtectedParameters @("AccessToken=$token") `
+    -SuccessMarker 'GRANT_OK' | Out-Null
+  Write-Ok 'SQL grant applied via the jump box — the app picks it up within ~30s (migrations retry). No RDP needed.'
+}
+
+function Invoke-PatSetViaJumpbox([string]$ResourceGroup, [string]$VmName, [string]$VaultName, [string]$PatValue) {
+  # Uses the jump box's OWN system-assigned managed identity (via the Instance Metadata Service)
+  # rather than your identity — Terraform grants it Key Vault Secrets Officer scoped to just this
+  # vault. No az CLI / Az PowerShell module install needed: pure REST calls built into PowerShell.
+  $script = @'
+param([string]$VaultName, [string]$SecretValue)
+$ErrorActionPreference = 'Stop'
+$idResp = Invoke-RestMethod -Method Get -Headers @{Metadata = "true" } `
+  -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net"
+$body = @{ value = $SecretValue } | ConvertTo-Json
+Invoke-RestMethod -Method Put -Headers @{Authorization = "Bearer $($idResp.access_token)" } `
+  -Uri "https://$VaultName.vault.azure.net/secrets/github-pat?api-version=7.4" `
+  -Body $body -ContentType "application/json" | Out-Null
+Write-Output "PAT_SET_OK"
+'@
+
+  Write-Info "Setting the PAT via $VmName's own managed identity (value passed as a protected parameter — never logged or returned)..."
+  Invoke-JumpboxRunCommand -ResourceGroup $ResourceGroup -VmName $VmName -NamePrefix 'set-pat' -ScriptBody $script `
+    -Parameters @("VaultName=$VaultName") `
+    -ProtectedParameters @("SecretValue=$PatValue") `
+    -SuccessMarker 'PAT_SET_OK' | Out-Null
+  Write-Ok "GitHub PAT stored in Key Vault ($VaultName/github-pat) via the jump box. No RDP needed."
+}
+
 function Get-TfVar([string]$n) {
   if (-not (Test-Path $tfvars)) { return $null }
   $line = Select-String -Path $tfvars -Pattern "^\s*$n\s*=" | Select-Object -First 1
@@ -461,6 +565,21 @@ function Phase-GrantSql {
   Write-Info "You must be the Entra SQL admin (or in the admin group) for this to succeed ($($script:Acct.user.name))."
   if (-not (AskYesNo 'Apply the SQL grant now?' $true)) { Write-Warn "Skipped. Later: ./deploy.ps1 -Task grant-sql"; return }
 
+  $private = (Get-TfVar 'use_private_networking') -eq 'true'
+  $jumpboxVm = if ($private) { Get-TfOutput 'jumpbox_vm_name' } else { $null }
+
+  if ($private -and $jumpboxVm) {
+    Write-Info "Private networking detected — your workstation can't reach the SQL private endpoint directly."
+    if ($DryRun) { Write-Host "  DRYRUN> az vm run-command create ... (SQL grant via jump box $jumpboxVm)" -ForegroundColor DarkGray; return }
+    Invoke-SqlGrantViaJumpbox -ResourceGroup (Get-TfOutput 'resource_group') -VmName $jumpboxVm -Server $server -Database $db -AppName $app
+    return
+  }
+  if ($private -and -not $jumpboxVm) {
+    Write-Warn "Private networking with no jump box (enable_jumpbox=false) — this workstation can't reach the SQL private endpoint."
+    Write-Info 'Either set enable_jumpbox = true and re-apply, then re-run this task, or run the T-SQL from any other host on the VNet (see `terraform output post_deploy_sql_grant`).'
+    return
+  }
+
   # PUBLIC pattern only: the SQL server firewall blocks your workstation by default. Detect your
   # current public IP and apply the AllowDeployerIP rule (infra/sql.tf) before running T-SQL.
   if ((Get-TfVar 'use_private_networking') -ne 'true') {
@@ -526,12 +645,32 @@ function Phase-SetPat {
   $kv = Get-TfOutput 'key_vault_name'
   if (-not $kv) { Write-Warn 'key_vault_name output not available (infra not applied?). Skipping.'; return }
   Write-Info "Key Vault: $kv  (secret name: github-pat)"
-  Write-Info 'Note: writing a secret is a data-plane op — for a PRIVATE vault, run this from a host on the VNet.'
   if (-not (AskYesNo 'Set the GitHub PAT secret now?' $true)) { Write-Warn "Skipped. Later: ./deploy.ps1 -Task set-pat  (or az keyvault secret set)"; return }
-  if ($DryRun) { Write-Host "  DRYRUN> az keyvault secret set --vault-name $kv --name github-pat --value <PAT>" -ForegroundColor DarkGray; return }
+
+  $private = (Get-TfVar 'use_private_networking') -eq 'true'
+  $jumpboxVm = if ($private) { Get-TfOutput 'jumpbox_vm_name' } else { $null }
+
+  if ($private -and -not $jumpboxVm) {
+    Write-Warn "Private networking with no jump box (enable_jumpbox=false) — this workstation can't reach the Key Vault private endpoint."
+    Write-Info 'Either set enable_jumpbox = true and re-apply, then re-run this task, or set the secret from any other host on the VNet: az keyvault secret set --vault-name <name> --name github-pat --value <PAT>'
+    return
+  }
+  if ($DryRun) {
+    if ($private) { Write-Host "  DRYRUN> az vm run-command create ... (set PAT via jump box $jumpboxVm)" -ForegroundColor DarkGray }
+    else { Write-Host "  DRYRUN> az keyvault secret set --vault-name $kv --name github-pat --value <PAT>" -ForegroundColor DarkGray }
+    return
+  }
+
   $sec = Read-Host '  Paste the GitHub PAT (input hidden)' -AsSecureString
   $pat = [System.Net.NetworkCredential]::new('', $sec).Password
   if ([string]::IsNullOrWhiteSpace($pat)) { Write-Warn 'Empty PAT — skipped.'; return }
+
+  if ($private -and $jumpboxVm) {
+    Write-Info "Private networking detected — your workstation can't reach the Key Vault private endpoint directly."
+    Invoke-PatSetViaJumpbox -ResourceGroup (Get-TfOutput 'resource_group') -VmName $jumpboxVm -VaultName $kv -PatValue $pat
+    return
+  }
+
   az keyvault secret set --vault-name $kv --name github-pat --value $pat --only-show-errors | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Failed to set the secret (permissions or private-network reachability?)." }
   Write-Ok 'PAT stored in Key Vault. The app resolves it via its managed identity on the next snapshot.'

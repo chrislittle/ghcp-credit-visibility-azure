@@ -181,6 +181,13 @@ resource "azurerm_windows_virtual_machine" "jumpbox" {
   ]
   tags = var.tags
 
+  # System-assigned identity so the jump box can authenticate to Key Vault itself (via the
+  # Instance Metadata Service) when deploy.ps1 seeds the GitHub PAT through Azure Run Command —
+  # avoids needing an interactive RDP session for that step on a private deployment.
+  identity {
+    type = "SystemAssigned"
+  }
+
   os_disk {
     caching              = "ReadWrite"
     storage_account_type = "StandardSSD_LRS"
@@ -194,4 +201,13 @@ resource "azurerm_windows_virtual_machine" "jumpbox" {
     sku       = "2022-datacenter-azure-edition"
     version   = "latest"
   }
+}
+
+# Lets the jump box write the GitHub PAT into Key Vault using its OWN identity (via
+# deploy.ps1's Azure Run Command path) — scoped to just this vault's secrets, nothing else.
+resource "azurerm_role_assignment" "jumpbox_kv_secrets_officer" {
+  count                = local.create_jumpbox ? 1 : 0
+  scope                = azurerm_key_vault.kv.id
+  role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = azurerm_windows_virtual_machine.jumpbox[0].identity[0].principal_id
 }
