@@ -42,7 +42,7 @@ use_private_networking = true
 #   DEFAULT (create_private_dns_zones = false) is enterprise/CAF-safe — this stack does NOT create
 #   private DNS zones. The landing zone wires DNS centrally (hub zones + DeployIfNotExists policy),
 #   or you pass hub zone IDs below. Leave as-is for a real customer/landing-zone deployment.
-#   ONLY set true for an isolated demo subscription that has NO central DNS/DINE policy, so this
+#   ONLY set true when there's NO central DNS/DINE policy in this subscription, so this
 #   stack creates its own local zones:
 # create_private_dns_zones = true
 #

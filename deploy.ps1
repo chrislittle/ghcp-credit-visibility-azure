@@ -208,31 +208,14 @@ Write-Output "PAT_SET_OK"
 # phases in the SAME run depend on this one having completed) — set by the 'all' dispatcher case.
 $script:InAllSequence = $false
 
-# Cross-platform TCP reachability probe (works identically on Windows/macOS/Linux PowerShell 7 —
-# deliberately NOT using Test-NetConnection, which is Windows-only and would break this script's
-# #requires -Version 7.0 cross-platform intent on other OSes).
-function Test-TcpPortReachable([string]$HostName, [int]$Port, [int]$TimeoutMs = 3000) {
-  try {
-    $client = [System.Net.Sockets.TcpClient]::new()
-    $connectTask = $client.ConnectAsync($HostName, $Port)
-    $ok = $connectTask.Wait($TimeoutMs) -and $client.Connected
-    $client.Close()
-    return $ok
-  } catch { return $false }
-}
-
-# Polls with backoff rather than a single attempt — private DNS (especially the "central DINE
-# policy" model documented in infra/README.md) can lag ~1-2 min after a fresh apply, so a single
-# failed probe right after `terraform apply` shouldn't be treated as "no path exists at all".
-function Wait-ForPrivateReachability([string]$HostName, [int]$Port, [int]$Attempts = 5, [int]$DelaySeconds = 15) {
-  Write-Info "Checking direct reachability to ${HostName}:${Port} ..."
-  for ($i = 1; $i -le $Attempts; $i++) {
-    if (Test-TcpPortReachable -HostName $HostName -Port $Port) { return $true }
-    if ($i -lt $Attempts) { Write-Info "Attempt $i/$Attempts failed — private DNS may still be propagating. Retrying in ${DelaySeconds}s..."; Start-Sleep -Seconds $DelaySeconds }
-    else { Write-Warn "Attempt $i/$Attempts failed." }
-  }
-  return $false
-}
+# NOTE: an earlier version of this file had a TCP-port reachability probe here, used to decide
+# whether "Direct" access would work before attempting anything. Removed: Azure SQL's gateway,
+# Key Vault's front-end, and App Service's front-end all accept the TCP/TLS connection and deny
+# access at a HIGHER protocol layer (SQL login handshake / HTTP 403) when public access is
+# disabled — a bare port-open check gives a false "reachable" result for all three (confirmed
+# live: SQL returns "Deny Public Network Access" only during login, not connection; Key Vault and
+# App Service both return HTTP 403 after completing TLS). The correct approach, used everywhere
+# below, is to just attempt the real operation and interpret the actual result.
 
 # Presents the access-mode menu; returns 'Direct' | 'JumpBox' | 'TempPublic' | 'Manual'.
 # The JumpBox option only appears in the list at all when a jump box actually exists.
@@ -255,7 +238,7 @@ function Select-PrivateAccessMode([bool]$JumpboxAvailable) {
 # it's already-paid-for standing infra, simplest to reuse), then TempPublic as the universal
 # escape hatch, then fall through to Manual. Each step is opt-in — never silently escalates.
 function Resolve-DirectAccessFallback([bool]$JumpboxAvailable) {
-  Write-Warn "No direct path found from this workstation after polling."
+  Write-Warn "No direct path found from this workstation."
   if ($JumpboxAvailable -and (AskYesNo 'A jump box is available. Use it instead?' $true)) { return 'JumpBox' }
   if (AskYesNo 'Temporarily allow public access to complete this instead?' $false) { return 'TempPublic' }
   return 'Manual'
@@ -324,8 +307,8 @@ IF IS_ROLEMEMBER('db_ddladmin',  @app) = 0 EXEC('ALTER ROLE db_ddladmin  ADD MEM
 
 function Invoke-PatSetDirect([string]$VaultName, [string]$PatValue) {
   if ($DryRun) { Write-Host "  DRYRUN> az keyvault secret set --vault-name $VaultName --name github-pat --value <PAT>" -ForegroundColor DarkGray; return }
-  az keyvault secret set --vault-name $VaultName --name github-pat --value $PatValue --only-show-errors | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Failed to set the secret." }
+  $errOutput = az keyvault secret set --vault-name $VaultName --name github-pat --value $PatValue --only-show-errors 2>&1 | Out-String
+  if ($LASTEXITCODE -ne 0) { throw "Failed to set the secret: $($errOutput.Trim())" }
   Write-Ok 'PAT stored in Key Vault. The app resolves it via its managed identity on the next snapshot.'
 }
 
@@ -608,7 +591,7 @@ function Phase-Configure {
   $vnetSpace = ''; $subnetPe = ''; $subnetApp = ''
   $existingVnetRg = ''; $existingVnetName = ''; $existingSubnetPe = ''; $existingSubnetApp = ''
   if ($private) {
-    $createZones = AskYesNo 'Isolated demo sub with NO central DNS policy? (Yes = create local DNS zones)' $false
+    $createZones = AskYesNo 'No central DNS/DINE policy in this subscription? (Yes = this stack creates its own local DNS zones)' $false
     $netMode = @('simple', 'advanced', 'byo')[(AskChoice 'VNet/subnet source' @(
           'This stack creates a VNet + subnets using sensible defaults (simplest — no IPAM dependency)',
           'This stack creates a VNet + subnets, but you choose the IP ranges (advanced — fits your IPAM plan)',
@@ -799,14 +782,24 @@ function Phase-GrantSql {
   $mode = Select-PrivateAccessMode -JumpboxAvailable:([bool]$jumpboxVm)
 
   if ($mode -eq 'Direct') {
-    if (-not $DryRun -and -not (Wait-ForPrivateReachability -HostName $server -Port 1433)) {
-      $mode = Resolve-DirectAccessFallback -JumpboxAvailable:([bool]$jumpboxVm)
-    }
-    else {
-      if (-not $DryRun) { Write-Ok 'Reachable — running the grant directly from here.' }
-      if (-not (Ensure-SqlServerModule)) { return }
+    if (-not (Ensure-SqlServerModule)) { return }
+    if ($DryRun) { Invoke-SqlGrantDirect -Server $server -Database $db -AppName $app; return }
+    # Don't pre-check reachability with a TCP probe: Azure SQL's gateway accepts the TCP
+    # connection and denies at the login/wire-protocol layer when public access is disabled
+    # (same category as Key Vault/App Service — confirmed live in this environment: "Connection
+    # was denied because Deny Public Network Access is set to Yes"), so a bare port-open check
+    # would give a false "reachable" result. Attempt the real thing and interpret the outcome.
+    Write-Info 'Trying direct access...'
+    try {
       Invoke-SqlGrantDirect -Server $server -Database $db -AppName $app
       return
+    } catch {
+      if ($_.Exception.Message -match 'Deny Public Network Access|network-related|instance-specific') {
+        Write-Warn "Direct access didn't work: public access is disabled and there's no path from here ($($_.Exception.Message))"
+      } else {
+        Write-Warn "Direct access failed: $($_.Exception.Message)"
+      }
+      $mode = Resolve-DirectAccessFallback -JumpboxAvailable:([bool]$jumpboxVm)
     }
   }
 
@@ -851,18 +844,26 @@ function Phase-SetPat {
   $rg = Get-TfOutput 'resource_group'
   $jumpboxVm = Get-TfOutput 'jumpbox_vm_name'
   $mode = Select-PrivateAccessMode -JumpboxAvailable:([bool]$jumpboxVm)
+  $pat = $null
 
   if ($mode -eq 'Direct') {
-    if (-not $DryRun -and -not (Wait-ForPrivateReachability -HostName "$kv.vault.azure.net" -Port 443)) {
-      $mode = Resolve-DirectAccessFallback -JumpboxAvailable:([bool]$jumpboxVm)
-    }
-    else {
-      if (-not $DryRun) { Write-Ok 'Reachable — running this directly from here.' }
-      if ($DryRun) { Invoke-PatSetDirect -VaultName $kv -PatValue '<PAT>'; return }
-      $pat = Read-PatSecurely
-      if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return }
+    if ($DryRun) { Invoke-PatSetDirect -VaultName $kv -PatValue '<PAT>'; return }
+    # Same reasoning as the SQL grant: Key Vault's shared front-end accepts the TCP/TLS
+    # connection and denies at the HTTP layer (403) when public access is disabled — a bare
+    # port-open check can't detect that, so attempt the real write and interpret the outcome.
+    $pat = Read-PatSecurely
+    if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return }
+    Write-Info 'Trying direct access...'
+    try {
       Invoke-PatSetDirect -VaultName $kv -PatValue $pat
       return
+    } catch {
+      if ($_.Exception.Message -match 'Public network access is disabled|Forbidden|403') {
+        Write-Warn "Direct access didn't work: public access is disabled and there's no path from here ($($_.Exception.Message))"
+      } else {
+        Write-Warn "Direct access failed: $($_.Exception.Message)"
+      }
+      $mode = Resolve-DirectAccessFallback -JumpboxAvailable:([bool]$jumpboxVm)
     }
   }
 
@@ -870,14 +871,12 @@ function Phase-SetPat {
     'JumpBox' {
       if (-not $jumpboxVm) { Write-Warn 'No jump box available (enable_jumpbox=false).'; Show-ManualInstructionsAndMaybePause $manualInstructions; return }
       if ($DryRun) { Write-Host "  DRYRUN> az vm run-command create ... (set PAT via jump box $jumpboxVm)" -ForegroundColor DarkGray; return }
-      $pat = Read-PatSecurely
-      if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return }
+      if (-not $pat) { $pat = Read-PatSecurely; if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return } }
       Invoke-PatSetViaJumpbox -ResourceGroup $rg -VmName $jumpboxVm -VaultName $kv -PatValue $pat -IdentityClientId (Get-TfOutput 'jumpbox_identity_client_id')
     }
     'TempPublic' {
       if ($DryRun) { Invoke-PatSetViaTempPublicAccess -ResourceGroup $rg -VaultName $kv -PatValue '<PAT>'; return }
-      $pat = Read-PatSecurely
-      if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return }
+      if (-not $pat) { $pat = Read-PatSecurely; if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return } }
       Invoke-PatSetViaTempPublicAccess -ResourceGroup $rg -VaultName $kv -PatValue $pat
     }
     'Manual' {
@@ -920,19 +919,27 @@ function Phase-Status {
   $isPrivate = (Get-TfVar 'use_private_networking') -eq 'true'
 
   if ($isPrivate) {
-    # Status is read-only and run casually/repeatedly during development, unlike the one-shot
-    # grant-sql/set-pat operations — use a quick 2-attempt probe (not the full 5x15s poll) so a
-    # repeated `-Task status` doesn't sit waiting a full minute every time there's no direct path.
-    # No Option C here: briefly opening public access just to check health isn't worth the (even
-    # short) exposure window for a read-only convenience check.
-    $hostName = ([Uri]$url).Host
-    if (Wait-ForPrivateReachability -HostName $hostName -Port 443 -Attempts 2 -DelaySeconds 5) {
+    # IMPORTANT: unlike SQL/Key Vault (which genuinely REFUSE the TCP connection when public
+    # access is disabled — a raw TCP probe correctly detects that), Azure's front-end for
+    # *.azurewebsites.net always accepts the TCP/TLS connection globally regardless of the app's
+    # own public-access setting. The "disabled" enforcement happens one layer higher, at the HTTP
+    # level — it returns a platform 403 instead of refusing the connection. A TCP-only probe would
+    # therefore report "reachable" even when it isn't really usable — so for the web app
+    # specifically we have to attempt the actual HTTP request and treat a 403 as NOT reachable.
+    Write-Info "Checking direct reachability to $url ..."
+    $directCode = $null
+    try { $directCode = (Invoke-WebRequest -Uri "$url/health/live" -UseBasicParsing -TimeoutSec 10).StatusCode }
+    catch { if ($_.Exception.Response) { $directCode = $_.Exception.Response.StatusCode.value__ } }
+
+    if ($directCode -and $directCode -ne 403) {
       Write-Ok 'Reachable directly — checking from here.'
     }
     else {
+      if ($directCode -eq 403) { Write-Info "Got a platform-level 403 from here (expected — public access to the app is disabled by design in private mode; this is not a real health check result)." }
+      else { Write-Info 'No direct response from here.' }
       $jumpboxVm = Get-TfOutput 'jumpbox_vm_name'
       if ($jumpboxVm) {
-        Write-Info "No direct path — checking health from the jump box instead (your workstation would otherwise get a platform-level 403; public access to the app is disabled by design)."
+        Write-Info "Checking health from the jump box instead."
         try {
           $health = Invoke-HealthCheckViaJumpbox -ResourceGroup (Get-TfOutput 'resource_group') -VmName $jumpboxVm -Url $url
           foreach ($check in @(@('/health/live', $health.Live), @('/health/ready', $health.Ready))) {
@@ -944,8 +951,9 @@ function Phase-Status {
         }
         return
       }
-      Write-Warn "No direct path and no jump box (enable_jumpbox=false) — checking from your workstation would show a platform-level 403 (public access disabled by design), not a real health signal."
-      Write-Info 'Either set enable_jumpbox = true and re-apply, or check from any other host on the VNet.'
+      Write-Warn "Can't verify health from here — no direct path and no jump box (enable_jumpbox=false)."
+      Write-Info "This is NOT a health verdict — it doesn't mean anything is wrong. It just means this workstation has no network path to check (public access to the app is disabled by design in private mode, so a 403 from here is expected and tells you nothing about the app's real state)."
+      Write-Info 'To actually verify: temporarily set enable_jumpbox = true and re-apply, then re-run `-Task status` (it will route through the jump box automatically) — or check from any other host that already has a path into the VNet (VPN/ExpressRoute/existing bastion).'
       return
     }
   }

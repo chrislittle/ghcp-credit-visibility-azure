@@ -215,7 +215,7 @@ variable "admin_client_ip" {
 
 variable "create_private_dns_zones" {
   type        = bool
-  description = "Whether THIS deployment creates the private DNS zones. Default FALSE = enterprise/CAF-safe: in landing zones the platform owns DNS (hub zones + DeployIfNotExists remediation) and typically DENIES zone creation, so we create bare private endpoints and let the central policy wire DNS (or pass hub IDs via existing_private_dns_zone_ids). Set TRUE only for an isolated demo subscription with NO central DNS/DINE policy, where this stack must create its own local zones. Only relevant when use_private_networking=true."
+  description = "Whether THIS deployment creates the private DNS zones. Default FALSE = enterprise/CAF-safe: in landing zones the platform owns DNS (hub zones + DeployIfNotExists remediation) and typically DENIES zone creation, so we create bare private endpoints and let the central policy wire DNS (or pass hub IDs via existing_private_dns_zone_ids). Set TRUE only when there is NO central DNS/DINE policy in this subscription, so this stack must create its own local zones. Only relevant when use_private_networking=true."
   default     = false
 }
 

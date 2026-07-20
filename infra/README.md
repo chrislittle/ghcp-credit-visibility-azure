@@ -68,7 +68,7 @@ see [Cost notes](#cost-notes)).
 | Web app | Public access **disabled**, VNet-integrated, reached via **inbound private endpoint** | Public access **enabled** — internet-reachable, still **Entra/Easy-Auth gated** and browsable |
 | Key Vault / SQL | Public access disabled, **private endpoints**, private DNS | Public access enabled; SQL gets an **AllowAzureServices firewall rule**; KV network ACL allows (RBAC still gates) |
 | VNet / subnets / PEs | Created | **Not created** |
-| Private DNS zones | **Not created by default** (landing zone/DINE owns DNS); created only if `create_private_dns_zones = true` for an isolated demo | **Not created** |
+| Private DNS zones | **Not created by default** (landing zone/DINE owns DNS); created only if `create_private_dns_zones = true` when there's no central DNS/DINE policy | **Not created** |
 | Plan size | ~22–25 resources (varies with DNS zone creation) | ~17 resources |
 
 Use **public** in a personal tenant to validate Easy Auth end-to-end (you can browse the site), then deploy **private** to the customer environment. Verified: `terraform plan` resolves cleanly in both modes.
@@ -86,7 +86,7 @@ Only relevant when `use_private_networking = true`. `custom_network_mode` picks 
 
 Minimum subnet sizes: the private-endpoint subnet needs at least a `/27` (this stack places three private endpoints — app, Key Vault, SQL — one IP each, plus Azure reserves 5 per subnet); the App Service delegated subnet needs at least a `/27` per Azure's VNet-integration requirements. `deploy.ps1`'s interactive configure step asks for both modes; for a non-interactive/scripted setup, set the variables directly in `terraform.tfvars` (see `terraform.tfvars.example`).
 
-> **Private DNS default (important):** `create_private_dns_zones` defaults to **`false`** — the enterprise/CAF-safe choice. A private deployment does **not** create private DNS zones; the landing zone wires DNS centrally (hub zones + DeployIfNotExists), or you supply hub zone IDs. For an **isolated demo** subscription with no central DNS policy, set `create_private_dns_zones = true` so the stack creates its own local zones. See *Reusing a centralized Private DNS* below.
+> **Private DNS default (important):** `create_private_dns_zones` defaults to **`false`** — the enterprise/CAF-safe choice. A private deployment does **not** create private DNS zones; the landing zone wires DNS centrally (hub zones + DeployIfNotExists), or you supply hub zone IDs. When there's **no central DNS/DINE policy** in this subscription, set `create_private_dns_zones = true` so the stack creates its own local zones. See *Reusing a centralized Private DNS* below.
 
 ## Identity model (flip switch): `identity_mode`
 
@@ -174,7 +174,7 @@ Test flow with a peer:
 | Resource | Notes |
 |---|---|
 | VNet + 2 subnets | `snet-pe` (private endpoints), `snet-app` (App Service VNet integration, delegated) — **only when `custom_network_mode = false`** (default). Set `custom_network_mode = true` to use your own existing VNet/subnets instead — see [VNet source](#vnet-source--this-stack-creates-one-or-bring-your-own) above |
-| Private DNS zones | `vaultcore`, `database.windows.net`, `azurewebsites.net` — **only when `create_private_dns_zones = true`** (isolated demo). Default is to reuse a hub / DINE — see below |
+| Private DNS zones | `vaultcore`, `database.windows.net`, `azurewebsites.net` — **only when `create_private_dns_zones = true`** (no central DNS/DINE policy). Default is to reuse a hub / DINE — see below |
 | App Service Plan (Premium v3) + Linux Web App (container) | Public access **disabled**, VNet-integrated, **inbound private endpoint**, **Easy Auth (Entra)** |
 | Entra app registration | App Roles `Admin`/`Manager`/`Viewer`, group claims, Easy Auth redirect URI |
 | Key Vault | RBAC, **public access disabled**, private endpoint; optional `github-pat` secret |
@@ -227,7 +227,7 @@ existing_private_dns_zone_ids = {
   sites = "/subscriptions/.../privatelink.azurewebsites.net"
 }
 ```
-For an **isolated demo** subscription with no central DNS/DINE policy, set `create_private_dns_zones = true` to create local zones (with matching VNet links) so name resolution works without a hub.
+When there's **no central DNS/DINE policy** in this subscription, set `create_private_dns_zones = true` to create local zones (with matching VNet links) so name resolution works without a hub.
 
 > **Timing / warm-up (Option A):** DINE remediation is **asynchronous** — after `terraform apply` creates the
 > private endpoints, there's a short window (usually ~1–2 min, occasionally longer if a remediation task must run)
@@ -249,18 +249,18 @@ For an **isolated demo** subscription with no central DNS/DINE policy, set `crea
 **`identity_mode = system_assigned` (customer/prod): both steps.**
 
 1. **Grant the web app's managed identity access to SQL.** Run **`./deploy.ps1 -Task grant-sql`** from the repo root — it reads the server/DB/app names from Terraform outputs, uses your `az login` (you must be the Entra SQL admin), and applies an idempotent grant (`db_ddladmin` + read/write) so the app can run its migrations. No manual SQL needed if you don't want it, no restart (the app retries migrations and picks it up within ~30s). **On a private deployment**, the SQL server's public access is disabled, so your workstation may not have a path to it — `deploy.ps1` walks you through **how** to run the grant:
-   - **Try direct access** — works if you're already on the VNet somehow (VPN/ExpressRoute/peering, common in real landing-zone environments). A quick reachability probe (with a short poll/retry, since private DNS can lag right after a fresh apply) checks this before falling back.
+   - **Try direct access** — works if you're already on the VNet somehow (VPN/ExpressRoute/peering, common in real landing-zone environments). Rather than a separate network probe (Azure SQL's gateway accepts the TCP connection either way and only denies access during the login handshake, so a bare port check can't tell you in advance whether this will work), `deploy.ps1` just attempts the grant directly and interprets the real result.
    - **Use the jump box** (only offered when `enable_jumpbox = true`) — via **Azure Run Command**, no RDP needed. Your SQL access token is passed in as a `--protected-parameters` value (never logged or persisted), and the grant executes inside the VNet.
    - **Temporarily allow public access** — an explicit, opt-in escape hatch: briefly re-enables the SQL server's public endpoint with a firewall rule scoped to your IP, runs the grant, then reverts and verifies. Even if the revert step itself somehow failed, the next `terraform apply` re-asserts `public_network_access_enabled = false` for private mode regardless, so this can't silently leave the door open long-term.
    - **Skip — do it manually** — prints the T-SQL (`terraform output post_deploy_sql_grant`) for you to run from wherever you do have access (an existing bastion, a self-hosted CI/CD agent already in the VNet, etc.). When run as part of the full `./deploy.ps1` sequence, this pauses (Enter to continue) since later steps assume the grant is done — but never blocks under `-Yes`/`-DryRun` or when run standalone (`-Task grant-sql`).
 
-   If Direct access fails after polling, `deploy.ps1` offers the jump box (if one exists) as the first fallback, then the temporary-public-access escape hatch, before falling through to manual. The temporary-public-access option is also directly selectable from the menu on its own, without trying Direct first.
+   If Direct access fails, `deploy.ps1` offers the jump box (if one exists) as the first fallback, then the temporary-public-access escape hatch, before falling through to manual. The temporary-public-access option is also directly selectable from the menu on its own, without trying Direct first.
 2. **Assign app roles / groups.** In Entra, assign bootstrap administrators to the app's `Admin` role, then use `/Admin/Mappings` to manage which Entra groups or users can see which cost centers.
 
 ## Going live against real GitHub data
 1. Set `use_mock_data = false` and `github_enterprise_slug = "<your-enterprise>"`.
 2. Provide the enterprise PAT as Key Vault secret **`github-pat`** (pick one):
-   - **Out-of-band (recommended):** run **`./deploy.ps1 -Task set-pat`** (prompts for the PAT, masked, and stores it in the `github-pat` secret). On a **private** vault, `deploy.ps1` offers the same four access-mode choices as the SQL grant above: try direct access (with the same reachability poll), use the jump box (its own managed identity, granted `Key Vault Secrets Officer` on just this vault — no RDP), temporarily allow public access (an IP-scoped network rule, auto-reverted), or skip and set it manually from wherever you have access. The PAT value itself is only requested once you've picked a mode that actually needs it — the manual option never asks this script to hold it at all.
+   - **Out-of-band (recommended):** run **`./deploy.ps1 -Task set-pat`** (prompts for the PAT, masked, and stores it in the `github-pat` secret). On a **private** vault, `deploy.ps1` offers the same four access-mode choices as the SQL grant above: try direct access (attempts the write directly — Key Vault's front-end also accepts the TLS connection either way and only denies at the HTTP layer, so it's interpreted from the real result rather than a separate probe), use the jump box (its own managed identity, granted `Key Vault Secrets Officer` on just this vault — no RDP), temporarily allow public access (an IP-scoped network rule, auto-reverted), or skip and set it manually from wherever you have access. The PAT value itself is only requested once you've picked a mode that actually needs it — the manual option never asks this script to hold it at all.
    - **Terraform-seeded (turnkey):** set `github_pat_secret_value` in `terraform.tfvars` before apply. Same private-vault caveat — the **apply host** must reach the private endpoint.
 3. The app's **`GitHub__Token`** app setting is a Key Vault reference to `github-pat` — **wired automatically whenever `use_mock_data = false`** (independent of how the secret was seeded) — resolved at runtime by the app's managed identity (`Key Vault Secrets User`). The secret value never lands in app settings or Terraform state.
 
