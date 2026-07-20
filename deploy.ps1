@@ -453,6 +453,7 @@ function Phase-Preflight {
   foreach ($loc in $regions) {
     Write-Host "  ── region: $loc ──" -ForegroundColor Cyan
     $appOk = $false; $availTiers = @(); $wantLimit = 0
+    $totalVmsLimit = $null; $totalVmsCurrent = 0
     try {
       $uErr = $null
       $u = az rest --method get --uri "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$loc/usages?api-version=2023-12-01" 2>&1 | Tee-Object -Variable uRaw | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ConvertFrom-Json -ErrorAction SilentlyContinue
@@ -462,10 +463,23 @@ function Phase-Preflight {
           $t = $e.name.localizedValue; if (-not $t) { $t = $e.name.value }
           $lim = [int]$e.limit; $cur = [int]$e.currentValue
           if (-not $byTier.ContainsKey($t) -or $lim -gt $byTier[$t].Limit) { $byTier[$t] = @{ Limit = $lim; Current = $cur } }
+          # "Total VMs" is a SEPARATE quota bucket from the per-tier core quota above — it caps the
+          # total number of App Service Plan worker instances (VMs) across the WHOLE subscription
+          # in this region, regardless of tier. A tier showing plenty of cores can still fail to
+          # deploy if this bucket is exhausted (confirmed live: preflight reported "Premium v3 has
+          # quota (360 cores)" while the actual apply failed with "Current Limit (Total VMs): 0").
+          # Matched on the stable name.value (not the localized display string, which can vary).
+          if ($e.name.value -eq 'TotalVMs') { $totalVmsLimit = $lim; $totalVmsCurrent = $cur }
         }
         $availTiers = ($byTier.GetEnumerator() | Where-Object { $_.Value.Limit -gt 0 } | ForEach-Object { $_.Key })
         $wantLimit = if ($byTier.ContainsKey($wantTier)) { $byTier[$wantTier].Limit } else { 0 }
-        if ($wantLimit -gt 0) { $appOk = $true; Write-Ok "App Service tier '$wantTier' has quota ($wantLimit cores)" }
+        if ($wantLimit -gt 0) {
+          Write-Ok "App Service tier '$wantTier' has quota ($wantLimit cores)"
+          if ($null -ne $totalVmsLimit -and $totalVmsCurrent -ge $totalVmsLimit) {
+            Write-Err "But 'Total VMs' quota is exhausted in $loc ($totalVmsCurrent of $totalVmsLimit used) — this caps App Service Plan instances subscription-wide in this region, regardless of tier. Request an increase at https://aka.ms/antquotahelp or try another region."
+          }
+          else { $appOk = $true }
+        }
       }
       else {
         $uErrLine = ($uRaw | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | Select-Object -First 1)
@@ -477,18 +491,20 @@ function Phase-Preflight {
       # Legacy Microsoft.Web usages showed 0/no data for the tier bucket — this can lag behind, or
       # simply not surface, an approved per-SKU grant made via the newer Microsoft.Quota API (the
       # "Accepted" quota request you see in the Activity Log for .../Microsoft.Quota/quotas/<SKU>).
-      # Cross-check that API directly for the exact SKU name before declaring no quota.
+      # Cross-check that API directly for the exact SKU name before declaring no quota. NOTE: this
+      # fallback only covers the per-tier/per-SKU quota — it can't see the "Total VMs" bucket above,
+      # so if that's what's actually exhausted, this won't rescue $appOk (correctly so).
       $qLimit = 0
       try {
         $qRaw = $null
         $q = az rest --method get --uri "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$loc/providers/Microsoft.Quota/quotas/$resolvedSku`?api-version=2023-02-01" 2>&1 | Tee-Object -Variable qRaw | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ConvertFrom-Json -ErrorAction SilentlyContinue
         if ($q.properties.limit.value) { $qLimit = [int]$q.properties.limit.value }
       } catch {}
-      if ($qLimit -gt 0) {
+      if ($qLimit -gt 0 -and -not ($null -ne $totalVmsLimit -and $totalVmsCurrent -ge $totalVmsLimit)) {
         $appOk = $true
         Write-Ok "App Service SKU '$resolvedSku' has quota via Microsoft.Quota ($qLimit) — legacy usages API hasn't caught up yet"
       }
-      else {
+      elseif ($wantLimit -le 0) {
         Write-Warn "App Service: no usages data for $loc; confirm in portal (Subscription > Usage + quotas)."
         Write-Err "App Service tier '$wantTier' has 0 quota in $loc"
         if ($availTiers) { Write-Warn "Tiers WITH quota: $($availTiers -join ', ') — set app_service_sku to one of these" }
