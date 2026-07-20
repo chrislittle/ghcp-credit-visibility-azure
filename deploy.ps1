@@ -76,7 +76,12 @@ function Write-Err($t)  { Write-Host "  ✗ $t" -ForegroundColor Red }
 function Invoke-OrEcho($cmd) {
   if ($DryRun) { Write-Host "  DRYRUN> $cmd" -ForegroundColor DarkGray; return '' }
   Write-Host "  > $cmd" -ForegroundColor DarkGray
-  $out = Invoke-Expression $cmd
+  # Merge stderr into the captured output (2>&1) so callers can inspect the actual error text
+  # afterwards (e.g. to recognize Azure's RequestDisallowedByPolicy signature — see
+  # Invoke-TerraformApply) — this doesn't change what streams to the console live, only what
+  # ends up available in $script:LastCommandOutput for pattern-matching after the fact.
+  $out = Invoke-Expression "$cmd 2>&1"
+  $script:LastCommandOutput = ($out | Out-String)
   if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) { throw "Command failed (exit $LASTEXITCODE): $cmd" }
   return $out
 }
@@ -396,6 +401,7 @@ function Set-TfVar([string]$n, [string]$v) {
 # ── shared: az context + signed-in user ──────────────────────────
 $script:Acct = $null
 $script:Me = $null
+$script:LastCommandOutput = ''
 function Ensure-Az {
   if (-not (Get-Command az -ErrorAction SilentlyContinue)) { throw "Azure CLI (az) not found. Install it, then run: az login" }
   $script:Acct = (az account show 2>$null | ConvertFrom-Json)
@@ -601,6 +607,7 @@ function Phase-Configure {
         'user_assigned_selfadmin  — TEST: app identity is its own SQL admin (no grant)',
         'system_assigned          — CUSTOMER/PROD: external Entra SQL admin + one-time grant') 1) - 1]
 
+  Write-Info 'Note: public mode may be blocked by Azure Policy in governed/enterprise tenants (a Deny-effect policy disallowing public network access is common in landing zones) — if this is a managed corporate subscription, private mode is usually safer.'
   $private = AskYesNo 'Private networking (VNet + private endpoints)? No = public (browsable)' $false
   $createZones = $false
   $customNetwork = $false
@@ -726,7 +733,26 @@ function Invoke-TerraformApply([string]$extraArgs = '') {
     Write-Host ''
     if (-not (AskYesNo 'Apply the plan shown above?' $true)) { Remove-Item -Path $planFile -ErrorAction SilentlyContinue; throw 'Aborted by user before terraform apply.' }
   }
-  Invoke-OrEcho "terraform apply -input=false $planFile"
+  try {
+    Invoke-OrEcho "terraform apply -input=false $planFile"
+  } catch {
+    # Azure's Policy engine denies a resource with a consistent, resource-agnostic signature
+    # (403 RequestDisallowedByPolicy) regardless of which resource/policy triggered it — this is
+    # a reliable signal that the PUBLIC networking pattern can never succeed here, because a
+    # Deny-effect policy (common in governed/landing-zone tenants) blocks public network access
+    # on one or more resources (SQL/Key Vault/App Service/etc.). Reacting to the actual error
+    # (rather than trying to predict every possible policy assignment beforehand) means this
+    # can't miss a policy we didn't know to look for, and can't false-positive on an unrelated
+    # failure.
+    if ($script:LastCommandOutput -match 'RequestDisallowedByPolicy') {
+      Write-Err 'Azure Policy blocked this deployment (RequestDisallowedByPolicy).'
+      Write-Info 'Your tenant enforces a policy that denies public network access for one or more resources (SQL/Key Vault/App Service/etc.) — common in governed/landing-zone tenants.'
+      Write-Info 'The PUBLIC networking pattern (use_private_networking = false) can never succeed here.'
+      Write-Info 'Fix: set use_private_networking = true in terraform.tfvars (see infra/README.md) and re-run — this satisfies the policy and is the intended pattern for governed tenants anyway.'
+      throw "Azure Policy blocked deployment (RequestDisallowedByPolicy) — see guidance above. Original error: $($_.Exception.Message)"
+    }
+    throw
+  }
   Remove-Item -Path $planFile -ErrorAction SilentlyContinue
 }
 
@@ -995,6 +1021,7 @@ trap {
   Write-Host "  - App Service quota = 0     → https://aka.ms/antquotahelp, or ./deploy.ps1 -Task preflight -Location <region> -Sku <sku>"
   Write-Host "  - Azure SQL disabled in region → re-run with -Location <other-region>"
   Write-Host "  - Easy Auth SP/secret 403  → deploy where you're tenant admin, or set enable_easy_auth=false"
+  Write-Host "  - Policy blocks public network access (RequestDisallowedByPolicy) → set use_private_networking = true and re-run (common in governed/landing-zone tenants)"
   break
 }
 

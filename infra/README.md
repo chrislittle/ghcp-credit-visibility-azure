@@ -73,6 +73,17 @@ see [Cost notes](#cost-notes)).
 
 Use **public** in a personal tenant to validate Easy Auth end-to-end (you can browse the site), then deploy **private** to the customer environment. Verified: `terraform plan` resolves cleanly in both modes.
 
+> **Governed/landing-zone tenants: public mode may be blocked by Azure Policy.** Many enterprise
+> tenants enforce **Deny**-effect policies like *"Azure SQL Database should have Deny public
+> network access set to Yes"*, *"Storage accounts should disable public network access"*, or
+> equivalents for Key Vault/App Service — often assigned at the subscription or management-group
+> level, outside this stack's control. If such a policy applies, **public mode can never succeed**:
+> `terraform apply` will fail with a `403 RequestDisallowedByPolicy` error the moment it tries to
+> create the first resource that policy covers. `deploy.ps1` detects this exact error signature and
+> tells you plainly what happened — the fix is simply to set `use_private_networking = true` and
+> re-apply, which satisfies the policy (and is almost certainly the pattern your governance team
+> expects anyway in a tenant that enforces this).
+
 ## VNet source — this stack creates one, or bring your own
 
 Only relevant when `use_private_networking = true`. `custom_network_mode` picks the source:
