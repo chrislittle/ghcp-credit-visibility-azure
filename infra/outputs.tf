@@ -47,6 +47,11 @@ output "jumpbox_vm_name" {
   value       = one(azurerm_windows_virtual_machine.jumpbox[*].name)
 }
 
+output "jumpbox_identity_client_id" {
+  description = "Only present when enable_jumpbox = true. Client ID of the jump box's user-assigned identity — needed to disambiguate which identity to use in an IMDS token request (a VM's IMDS endpoint requires client_id/object_id/mi_res_id when more than a system-assigned identity could apply). Used by deploy.ps1's Azure Run Command PAT-set step."
+  value       = one(azurerm_user_assigned_identity.jumpbox[*].client_id)
+}
+
 output "jumpbox_private_ip" {
   description = "Only present when enable_jumpbox = true. Private IP of the jump-box NIC (informational — Bastion doesn't require it to connect)."
   value       = one(azurerm_network_interface.jumpbox[*].private_ip_address)

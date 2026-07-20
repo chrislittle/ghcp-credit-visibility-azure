@@ -167,6 +167,23 @@ resource "azurerm_network_interface" "jumpbox" {
   }
 }
 
+# Standalone user-assigned identity for the jump box — a top-level resource with its own
+# principal_id attribute, rather than a SystemAssigned identity nested inside the VM resource.
+# This sidesteps a real Terraform/azurerm quirk: referencing a nested computed block
+# (identity[0].principal_id) through a direct or splatted index on a resource that ITSELF has a
+# conditional count reliably fails at plan time with "Missing required argument" for a brand-new
+# resource — even when the count resolves to 1. A standalone identity resource's principal_id is
+# a top-level attribute (same shape as azurerm_user_assigned_identity.app[0].principal_id, already
+# used successfully elsewhere in this codebase for the user_assigned_selfadmin path), which avoids
+# the nested-block-through-count problem entirely.
+resource "azurerm_user_assigned_identity" "jumpbox" {
+  count               = local.create_jumpbox ? 1 : 0
+  name                = "id-jumpbox-${local.base}"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  tags                = var.tags
+}
+
 resource "azurerm_windows_virtual_machine" "jumpbox" {
   count               = local.create_jumpbox ? 1 : 0
   name                = "vm-jumpbox"
@@ -181,11 +198,12 @@ resource "azurerm_windows_virtual_machine" "jumpbox" {
   ]
   tags = var.tags
 
-  # System-assigned identity so the jump box can authenticate to Key Vault itself (via the
-  # Instance Metadata Service) when deploy.ps1 seeds the GitHub PAT through Azure Run Command —
-  # avoids needing an interactive RDP session for that step on a private deployment.
+  # User-assigned identity (see azurerm_user_assigned_identity.jumpbox above) so the jump box
+  # can authenticate to Key Vault itself (via the Instance Metadata Service) when deploy.ps1
+  # seeds the GitHub PAT through Azure Run Command — avoids needing an interactive RDP session.
   identity {
-    type = "SystemAssigned"
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.jumpbox[0].id]
   }
 
   os_disk {
@@ -205,19 +223,9 @@ resource "azurerm_windows_virtual_machine" "jumpbox" {
 
 # Lets the jump box write the GitHub PAT into Key Vault using its OWN identity (via
 # deploy.ps1's Azure Run Command path) — scoped to just this vault's secrets, nothing else.
-# Splat + one() (not a direct [0][0] double-index) — the established pattern this codebase
-# already uses for this same resource in outputs.tf. Directly indexing
-# azurerm_windows_virtual_machine.jumpbox[0].identity[0].principal_id fails at plan time with
-# "Missing required argument" because Terraform can't safely resolve a nested computed block
-# (identity[0]) through a direct index into a resource that itself has a conditional count —
-# even when that count resolves to 1. Splatting first avoids the problem entirely.
-locals {
-  jumpbox_principal_id = one(azurerm_windows_virtual_machine.jumpbox[*].identity[0].principal_id)
-}
-
 resource "azurerm_role_assignment" "jumpbox_kv_secrets_officer" {
   count                = local.create_jumpbox ? 1 : 0
   scope                = azurerm_key_vault.kv.id
   role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = local.jumpbox_principal_id
+  principal_id         = one(azurerm_user_assigned_identity.jumpbox[*].principal_id)
 }

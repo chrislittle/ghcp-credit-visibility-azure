@@ -170,17 +170,20 @@ Write-Output "GRANT_OK"
   Write-Ok 'SQL grant applied via the jump box — the app picks it up within ~30s (migrations retry). No RDP needed.'
 }
 
-function Invoke-PatSetViaJumpbox([string]$ResourceGroup, [string]$VmName, [string]$VaultName, [string]$PatValue) {
-  # Uses the jump box's OWN system-assigned managed identity (via the Instance Metadata Service)
+function Invoke-PatSetViaJumpbox([string]$ResourceGroup, [string]$VmName, [string]$VaultName, [string]$PatValue, [string]$IdentityClientId) {
+  # Uses the jump box's OWN user-assigned managed identity (via the Instance Metadata Service)
   # rather than your identity — Terraform grants it Key Vault Secrets Officer scoped to just this
   # vault. No az CLI / Az PowerShell module install needed: pure REST calls built into PowerShell.
+  # client_id is required in the IMDS token request for a user-assigned identity (unlike
+  # system-assigned, IMDS can't infer which identity to use without it).
   $script = @'
-param([string]$VaultName, [string]$SecretValue)
+param([string]$VaultName, [string]$SecretValue, [string]$ClientId)
 $ErrorActionPreference = 'Stop'
 $idResp = Invoke-RestMethod -Method Get -Headers @{Metadata = "true" } `
-  -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net"
+  -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net&client_id=$ClientId"
 $body = @{ value = $SecretValue } | ConvertTo-Json
-Invoke-RestMethod -Method Put -Headers @{Authorization = "Bearer $($idResp.access_token)" } `
+$authHeader = "Bearer " + $idResp.access_token
+Invoke-RestMethod -Method Put -Headers @{Authorization = $authHeader } `
   -Uri "https://$VaultName.vault.azure.net/secrets/github-pat?api-version=7.4" `
   -Body $body -ContentType "application/json" | Out-Null
 Write-Output "PAT_SET_OK"
@@ -188,7 +191,7 @@ Write-Output "PAT_SET_OK"
 
   Write-Info "Setting the PAT via $VmName's own managed identity (value passed as a protected parameter — never logged or returned)..."
   Invoke-JumpboxRunCommand -ResourceGroup $ResourceGroup -VmName $VmName -NamePrefix 'set-pat' -ScriptBody $script `
-    -Parameters @("VaultName=$VaultName") `
+    -Parameters @("VaultName=$VaultName", "ClientId=$IdentityClientId") `
     -ProtectedParameters @("SecretValue=$PatValue") `
     -SuccessMarker 'PAT_SET_OK' | Out-Null
   Write-Ok "GitHub PAT stored in Key Vault ($VaultName/github-pat) via the jump box. No RDP needed."
@@ -667,7 +670,7 @@ function Phase-SetPat {
 
   if ($private -and $jumpboxVm) {
     Write-Info "Private networking detected — your workstation can't reach the Key Vault private endpoint directly."
-    Invoke-PatSetViaJumpbox -ResourceGroup (Get-TfOutput 'resource_group') -VmName $jumpboxVm -VaultName $kv -PatValue $pat
+    Invoke-PatSetViaJumpbox -ResourceGroup (Get-TfOutput 'resource_group') -VmName $jumpboxVm -VaultName $kv -PatValue $pat -IdentityClientId (Get-TfOutput 'jumpbox_identity_client_id')
     return
   }
 
