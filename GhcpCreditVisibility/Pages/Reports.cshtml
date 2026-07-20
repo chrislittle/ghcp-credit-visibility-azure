@@ -1,0 +1,291 @@
+@page
+@model ReportsModel
+@using static GhcpCreditVisibility.Services.UsageQueryService
+@{
+    ViewData["Title"] = "Reports";
+
+    string[] palette = { "#2563eb", "#7c3aed", "#0d9488", "#d9822b", "#0f9d58", "#d93025", "#0ea5e9", "#db2777", "#64748b" };
+    string ColorAt(int i) => palette[i % palette.Length];
+
+    var series = Model.SeriesList;
+    var buckets = Model.Buckets;                 // x-axis labels (day/week/month)
+    var ranked = series.OrderByDescending(s => s.Total).ToList();
+    var colorByKey = new Dictionary<string, string>();
+    for (int i = 0; i < ranked.Count; i++) colorByKey[ranked[i].Key] = ColorAt(i);
+    string ColorKey(string k) => colorByKey.TryGetValue(k, out var c) ? c : "#66707d";
+
+    // ── Distribution donut (aggregated over the window, by dimension) ──
+    double Circ = 2 * Math.PI * 15.9;
+    var donut = new System.Text.StringBuilder();
+    donut.Append("<circle cx='21' cy='21' r='15.9' fill='none' stroke='#eef1f6' stroke-width='6'></circle>");
+    if (Model.GrandTotal > 0)
+    {
+        double off = 0;
+        foreach (var s in ranked)
+        {
+            double len = (double)(s.Total / Model.GrandTotal) * Circ;
+            donut.Append($"<circle cx='21' cy='21' r='15.9' fill='none' stroke='{ColorKey(s.Key)}' stroke-width='6' stroke-dasharray='{len.ToString("F2")} {(Circ - len).ToString("F2")}' stroke-dashoffset='{(-off).ToString("F2")}' transform='rotate(-90 21 21)'></circle>");
+            off += len;
+        }
+    }
+    donut.Append($"<text x='21' y='20' text-anchor='middle' font-size='6' font-weight='700' fill='#141a22'>${Model.GrandTotal.ToString("N0")}</text>");
+    donut.Append("<text x='21' y='26' text-anchor='middle' font-size='3' fill='#66707d'>total</text>");
+
+    // ── Trend (multi-series lines over buckets) ──
+    decimal maxVal = series.Count > 0 ? series.SelectMany(s => s.Points).Select(p => p.NetAmount).DefaultIfEmpty(0m).Max() : 0m;
+    if (maxVal <= 0) maxVal = 1m;
+    int n = buckets.Count;
+    const int W = 980, H = 300, padL = 60, padR = 20, padT = 24, padB = 40;
+    int plotW = W - padL - padR, plotH = H - padT - padB;
+    int X(int i) => n <= 1 ? padL + plotW / 2 : padL + (int)((double)i / (n - 1) * plotW);
+    int Y(decimal v) => padT + (int)((1 - (double)(v / maxVal)) * plotH);
+    int labelStep = Math.Max(1, (int)Math.Ceiling(n / 12.0)); // thin x-axis labels to ~12
+    var chart = new System.Text.StringBuilder();
+    for (int g = 0; g <= 4; g++)
+    {
+        int yy = padT + (int)((double)g / 4 * plotH);
+        decimal val = maxVal * (4 - g) / 4;
+        chart.Append($"<line x1='{padL}' y1='{yy}' x2='{padL + plotW}' y2='{yy}' stroke='#eef1f6' stroke-width='1'></line>");
+        chart.Append($"<text x='{padL - 8}' y='{yy + 4}' text-anchor='end' font-size='11' fill='#98a2b3'>{val.ToString("N0")}</text>");
+    }
+    for (int i = 0; i < n; i++)
+    {
+        if (i % labelStep != 0 && i != n - 1) continue;
+        chart.Append($"<text x='{X(i)}' y='{H - 14}' text-anchor='middle' font-size='10' fill='#98a2b3'>{System.Net.WebUtility.HtmlEncode(buckets[i])}</text>");
+    }
+    bool showDots = n <= 60;
+    foreach (var s in ranked)
+    {
+        var col = ColorKey(s.Key);
+        var line = string.Join(" ", s.Points.Select((p, i) => $"{X(i)},{Y(p.NetAmount)}"));
+        chart.Append($"<polyline fill='none' stroke='{col}' stroke-width='2.5' points='{line}'></polyline>");
+        if (showDots)
+            for (int i = 0; i < s.Points.Count; i++)
+                chart.Append($"<circle cx='{X(i)}' cy='{Y(s.Points[i].NetAmount)}' r='2.5' fill='{col}'></circle>");
+    }
+
+    string Q(string dim, string gran, int range, string? fu, string? fm, string? fc, string view)
+        => $"?Dim={dim}&Gran={gran}&Range={range}&FilterUser={Uri.EscapeDataString(fu ?? "")}&FilterModel={Uri.EscapeDataString(fm ?? "")}&FilterCostCenter={Uri.EscapeDataString(fc ?? "")}&View={view}";
+
+    var pins = new List<string>();
+    if (!string.IsNullOrEmpty(Model.FilterUser)) pins.Add($"user {Model.Options.Users.FirstOrDefault(u => u.Login == Model.FilterUser)?.Name ?? Model.FilterUser}");
+    if (!string.IsNullOrEmpty(Model.FilterModel)) pins.Add($"model {Model.FilterModel}");
+    if (!string.IsNullOrEmpty(Model.FilterCostCenter)) pins.Add($"cost center {Model.Options.CostCenters.FirstOrDefault(c => c.CostCenterId == Model.FilterCostCenter)?.CostCenterName ?? Model.FilterCostCenter}");
+}
+
+<div class="gh-pagehead">
+    <div>
+        <h1>Reports</h1>
+        <div class="sub">GitHub Copilot AI-credit reporting — break spend down by cost center, user or model, by day, week or month</div>
+    </div>
+    <div class="gh-headtools">
+        <span class="gh-scope"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
+    </div>
+</div>
+
+<!-- FILTER BAR -->
+<div class="gh-card">
+    <div class="ch"><h2>Build a report</h2><span class="hint">break down by a dimension, then optionally filter on the others</span></div>
+    <div class="gh-cardbody">
+        <form method="get" class="gh-filters">
+            <div class="fld">
+                <label>Break down by</label>
+                <select name="Dim" onchange="this.form.submit()">
+                    <option value="costcenter" selected="@(Model.Dim == "costcenter")">Cost center</option>
+                    <option value="user" selected="@(Model.Dim == "user")">User</option>
+                    <option value="model" selected="@(Model.Dim == "model")">Model</option>
+                    <option value="total" selected="@(Model.Dim == "total")">Total (trend only)</option>
+                </select>
+            </div>
+            <div class="fld">
+                <label>Granularity</label>
+                <select name="Gran" onchange="this.form.submit()">
+                    <option value="day" selected="@(Model.Gran == "day")">Daily</option>
+                    <option value="week" selected="@(Model.Gran == "week")">Weekly</option>
+                    <option value="month" selected="@(Model.Gran == "month")">Monthly</option>
+                </select>
+            </div>
+            <div class="fld">
+                <label>Range</label>
+                <select name="Range" onchange="this.form.submit()">
+                    @foreach (var r in Model.RangeOptions)
+                    {
+                        <option value="@r.Value" selected="@(Model.Range == r.Value)">@r.Label</option>
+                    }
+                </select>
+            </div>
+            @if (Model.ShowUserFilter)
+            {
+                <div class="fld">
+                    <label>User</label>
+                    <select name="FilterUser" onchange="this.form.submit()">
+                        <option value="">Any user</option>
+                        @foreach (var u in Model.Options.Users)
+                        {
+                            <option value="@u.Login" selected="@(Model.FilterUser == u.Login)">@(u.Name ?? u.Login)</option>
+                        }
+                    </select>
+                </div>
+            }
+            @if (Model.ShowModelFilter)
+            {
+                <div class="fld">
+                    <label>Model</label>
+                    <select name="FilterModel" onchange="this.form.submit()">
+                        <option value="">Any model</option>
+                        @foreach (var m in Model.Options.Models)
+                        {
+                            <option value="@m" selected="@(Model.FilterModel == m)">@m</option>
+                        }
+                    </select>
+                </div>
+            }
+            @if (Model.ShowCostCenterFilter)
+            {
+                <div class="fld">
+                    <label>Cost center</label>
+                    <select name="FilterCostCenter" onchange="this.form.submit()">
+                        <option value="">Any cost center</option>
+                        @foreach (var c in Model.Options.CostCenters)
+                        {
+                            <option value="@c.CostCenterId" selected="@(Model.FilterCostCenter == c.CostCenterId)">@(c.CostCenterName ?? c.CostCenterId)</option>
+                        }
+                    </select>
+                </div>
+            }
+            <input type="hidden" name="View" value="@Model.View" />
+            <a class="btn btn-sm btn-outline-secondary" href="?">Reset</a>
+        </form>
+        <div class="gh-note mt-2">
+            @if (pins.Count > 0)
+            {
+                <text>Filtered to @string.Join(", ", pins). </text>
+            }
+            Filters that would collapse the breakdown (e.g. a single user when breaking down by cost center) are hidden by design.
+        </div>
+    </div>
+</div>
+
+@if (series.Count == 0 || Model.GrandTotal <= 0)
+{
+    <div class="gh-card"><div class="gh-cardbody"><p style="text-align:center;color:#66707d;margin:0;padding:18px 0;">No data for this selection.</p></div></div>
+}
+else
+{
+    @if (!Model.IsTotal)
+    {
+    <!-- BREAKDOWN (ranked) + DISTRIBUTION (donut) -->
+    <div class="gh-grid">
+        <div>
+            <div class="gh-card">
+                <div class="ch">
+                    <h2>Breakdown by @Model.DimLabel</h2>
+                    <span class="hint">@Model.PeriodLabel · @ranked.Count @(ranked.Count == 1 ? "series" : "series")@(pins.Count > 0 ? " · % of the filtered total" : "")</span>
+                </div>
+                <table>
+                    <thead>
+                        <tr><th>@(Model.DimLabel.Substring(0,1).ToUpper() + Model.DimLabel.Substring(1))</th><th style="width:34%" title="Bar length = share of the (filtered) total — matches the % of total column.">Share</th><th class="num">% of total</th><th class="num">Net&nbsp;($)</th></tr>
+                    </thead>
+                    <tbody>
+                        @foreach (var s in ranked)
+                        {
+                            var col = ColorKey(s.Key);
+                            var sharePct = Model.GrandTotal > 0 ? (double)(s.Total / Model.GrandTotal) * 100 : 0;
+                            var barW = sharePct.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
+                            <tr>
+                                <td><span class="gh-ccpill" style="background:@(col)1a;color:@col">@s.Key</span></td>
+                                <td class="gh-barcell"><div class="gh-bar" title="Share of the (filtered) total — matches the % of total column."><i style="width:@(barW)%;background:@col"></i></div></td>
+                                <td class="num">@sharePct.ToString("N1")%</td>
+                                <td class="num">@s.Total.ToString("N2")</td>
+                            </tr>
+                        }
+                    </tbody>
+                    <tfoot>
+                        <tr><td colspan="3">Total — @ranked.Count @Model.DimLabel@(ranked.Count == 1 ? "" : "s")</td><td class="num">$@Model.GrandTotal.ToString("N2")</td></tr>
+                    </tfoot>
+                </table>
+            </div>
+        </div>
+        <div>
+            <div class="gh-card">
+                <div class="ch"><h2>Distribution</h2><span class="hint">@Model.PeriodLabel</span></div>
+                <div style="display:flex;align-items:center;gap:16px;padding:18px;flex-wrap:wrap;">
+                    <svg width="132" height="132" viewBox="0 0 42 42" role="img" aria-label="Spend distribution by @Model.DimLabel">
+                        @Html.Raw(donut.ToString())
+                    </svg>
+                    <div class="gh-legend" style="flex:1;min-width:150px;">
+                        @foreach (var s in ranked)
+                        {
+                            <div class="row"><span class="sw" style="background:@ColorKey(s.Key)"></span> @s.Key <span class="amt">$@s.Total.ToString("N2")</span></div>
+                        }
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    }
+
+    <!-- TREND -->
+    <div class="gh-card">
+        <div class="ch">
+            <h2>@(Model.IsTotal ? "Total spend trend" : $"Trend by {Model.DimLabel}") <span class="hint" style="font-weight:500">· per @Model.GranLabel</span></h2>
+            <div style="display:flex;gap:14px;align-items:center;">
+                <span class="hint">@Model.PeriodLabel · total $@Model.GrandTotal.ToString("N2")</span>
+                <div class="gh-chips">
+                    <a class="@(Model.View == "chart" ? "on" : "")" href="@Q(Model.Dim, Model.Gran, Model.Range, Model.FilterUser, Model.FilterModel, Model.FilterCostCenter, "chart")">Chart</a>
+                    <a class="@(Model.View == "table" ? "on" : "")" href="@Q(Model.Dim, Model.Gran, Model.Range, Model.FilterUser, Model.FilterModel, Model.FilterCostCenter, "table")">Table</a>
+                </div>
+            </div>
+        </div>
+        @if (n == 0)
+        {
+            <div class="gh-cardbody"><p style="text-align:center;color:#66707d;margin:0;">No history for this selection.</p></div>
+        }
+        else if (Model.View == "table")
+        {
+            <table>
+                <thead>
+                    <tr>
+                        <th>@(Model.GranLabel.Substring(0,1).ToUpper() + Model.GranLabel.Substring(1))</th>
+                        @foreach (var s in ranked) { <th class="num">@s.Key</th> }
+                        @if (ranked.Count > 1) { <th class="num">Total</th> }
+                    </tr>
+                </thead>
+                <tbody>
+                    @for (int i = 0; i < n; i++)
+                    {
+                        <tr>
+                            <td>@buckets[i]</td>
+                            @foreach (var s in ranked) { <td class="num">@s.Points[i].NetAmount.ToString("N2")</td> }
+                            @if (ranked.Count > 1) { <td class="num">@ranked.Sum(s => s.Points[i].NetAmount).ToString("N2")</td> }
+                        </tr>
+                    }
+                </tbody>
+                <tfoot>
+                    <tr>
+                        <td>Total</td>
+                        @foreach (var s in ranked) { <td class="num">@s.Total.ToString("N2")</td> }
+                        @if (ranked.Count > 1) { <td class="num">@Model.GrandTotal.ToString("N2")</td> }
+                    </tr>
+                </tfoot>
+            </table>
+        }
+        else
+        {
+            <div style="padding:16px 12px 4px;">
+                <svg viewBox="0 0 @W @H" width="100%" height="@H" role="img" aria-label="Spend trend by @Model.DimLabel" style="max-width:100%;">
+                    @Html.Raw(chart.ToString())
+                </svg>
+            </div>
+            @if (ranked.Count > 1 || Model.Dim != "total")
+            {
+                <div class="gh-serieslegend">
+                    @foreach (var s in ranked)
+                    {
+                        <div class="row"><span class="sw" style="background:@ColorKey(s.Key)"></span> @s.Key <span style="color:#98a2b3;font-weight:500">$@s.Total.ToString("N0")</span></div>
+                    }
+                </div>
+            }
+        }
+    </div>
+}

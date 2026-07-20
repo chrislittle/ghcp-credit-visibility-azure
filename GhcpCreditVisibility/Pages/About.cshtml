@@ -1,0 +1,126 @@
+@page
+@model AboutModel
+@{
+    ViewData["Title"] = "About";
+}
+
+<div class="gh-pagehead">
+    <div>
+        <h1>About this app</h1>
+        <div class="sub">What GitHub Copilot Credit Visibility does, and how to read the numbers in GitHub's own terms.</div>
+    </div>
+</div>
+
+<!-- What is this -->
+<div class="gh-card">
+    <div class="ch"><h2>What is this?</h2></div>
+    <div class="gh-cardbody">
+        <p>
+            <strong>GitHub Copilot Credit Visibility</strong> reports your organization's spend on
+            <strong>GitHub Copilot</strong> — the AI pair-programmer in the IDE, on github.com and in the CLI.
+            It shows <strong>AI-credit / premium-request usage</strong> per user, per model and per cost center, with month-over-month
+            trends and budget alerts.
+        </p>
+        <p class="mb-0" style="padding:10px 14px;background:#eef4ff;border:1px solid #dbe6ff;border-radius:10px;">
+            ⚠️ <strong>This is GitHub Copilot — not Microsoft 365 Copilot.</strong> The two are separate products with separate billing.
+            All figures here come from GitHub's billing platform (the 🐙 octocat mark in the header denotes GitHub), and reflect
+            Copilot <em>premium request</em> / metered usage — not Microsoft 365 Copilot seats or Azure spend.
+        </p>
+    </div>
+</div>
+
+<!-- What each page shows -->
+<div class="gh-grid">
+    <div>
+        <div class="gh-card">
+            <div class="ch"><h2>Usage</h2></div>
+            <div class="gh-cardbody">
+                <p class="mb-0">
+                    The <a asp-page="/Index">Usage</a> page shows a chosen month: headline KPIs (total spend, active users,
+                    cost centers, average per user), per-user net spend with ranked bars, the split by cost center and by model,
+                    and <strong>budget alerts</strong>.
+                </p>
+            </div>
+        </div>
+        <div class="gh-card">
+            <div class="ch"><h2>Reports</h2></div>
+            <div class="gh-cardbody">
+                <p class="mb-0">
+                    The <a asp-page="/Reports">Reports</a> page is the trend workbench. Group spend by <strong>total, user, model
+                    or cost center</strong>, bucket it by <strong>day, week or month</strong>, then pin optional filters that
+                    <em>compose</em> — e.g. one user broken down by model over the last 90 days — as a chart or a table.
+                </p>
+            </div>
+        </div>
+    </div>
+    <div>
+        <div class="gh-card">
+            <div class="ch"><h2>Cost centers</h2></div>
+            <div class="gh-cardbody">
+                <p class="mb-0">
+                    Cost centers group spend by team, department or budget line. On the <a asp-page="/Reports">Reports</a> page choose
+                    <strong>Group by → Cost center</strong> to see spend and trends per cost center; the Usage page also shows the
+                    current-month cost-center split.
+                </p>
+            </div>
+        </div>
+        <div class="gh-card">
+            <div class="ch"><h2>Admin</h2></div>
+            <div class="gh-cardbody">
+                <p class="mb-0">
+                    The <strong>Admin</strong> console (admins only) sets the organization name, maps Entra groups/users to GitHub cost
+                    centers (who sees what), designates administrators, and manages <strong>budgets &amp; alert thresholds</strong>.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Understanding the data (GitHub terms + verified links) -->
+<div class="gh-card">
+    <div class="ch"><h2>Understanding the data — in GitHub's terms</h2><span class="hint">links open official GitHub Docs</span></div>
+    <div class="gh-cardbody">
+        <dl style="margin:0;display:grid;grid-template-columns:auto 1fr;gap:10px 18px;">
+            <dt><strong>Premium requests / AI credits</strong></dt>
+            <dd style="margin:0">
+                Copilot includes a monthly allowance of <em>premium requests</em>; usage beyond the allowance (or with premium models)
+                is metered and billed. That metered spend is what this app reports.
+                <a href="https://docs.github.com/en/copilot/concepts/billing/copilot-requests" target="_blank" rel="noopener">Requests in GitHub Copilot ↗</a>
+            </dd>
+
+            <dt><strong>Per-user usage</strong></dt>
+            <dd style="margin:0">
+                GitHub's detailed usage report breaks spend down by user, product, SKU, model and unit type, including a cost-center field.
+                <a href="https://docs.github.com/en/billing/reference/billing-reports" target="_blank" rel="noopener">Billing reports reference ↗</a>
+            </dd>
+
+            <dt><strong>Cost centers</strong></dt>
+            <dd style="margin:0">
+                Cost centers group organizations/users so spend can be attributed to a team, department or budget line.
+                <a href="https://docs.github.com/en/enterprise-cloud@@latest/billing/concepts/cost-centers" target="_blank" rel="noopener">Cost centers ↗</a>
+            </dd>
+
+            <dt><strong>Budgets &amp; alerts</strong></dt>
+            <dd style="margin:0">
+                GitHub supports budgets with alert thresholds at the enterprise, organization, cost-center and user levels. The budgets on
+                the Usage dashboard mirror this model.
+                <a href="https://docs.github.com/en/enterprise-cloud@@latest/billing/concepts/budgets-and-alerts" target="_blank" rel="noopener">Budgets &amp; alerts ↗</a> ·
+                <a href="https://docs.github.com/en/copilot/concepts/billing/budgets-for-usage-based-billing" target="_blank" rel="noopener">Copilot usage-based budgets ↗</a>
+            </dd>
+
+            <dt><strong>Plans &amp; product billing</strong></dt>
+            <dd style="margin:0">
+                <a href="https://docs.github.com/en/copilot/get-started/plans" target="_blank" rel="noopener">Copilot plans ↗</a> ·
+                <a href="https://docs.github.com/en/billing/concepts/product-billing/github-copilot" target="_blank" rel="noopener">Copilot product billing ↗</a>
+            </dd>
+
+            <dt><strong>Data source (API)</strong></dt>
+            <dd style="margin:0">
+                Usage and budgets are read from the GitHub billing REST API, persisted to a database, and served here (the UI never calls
+                GitHub live per page-load).
+                <a href="https://docs.github.com/en/rest/billing?apiVersion=2022-11-28" target="_blank" rel="noopener">Billing REST API ↗</a> ·
+                <a href="https://docs.github.com/en/rest/billing/budgets" target="_blank" rel="noopener">Budgets REST API ↗</a>
+            </dd>
+        </dl>
+    </div>
+</div>

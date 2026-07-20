@@ -1,0 +1,72 @@
+subscription_id      = "<subscription-guid>"
+location             = "eastus2"
+name_prefix          = "ghcpcv"
+
+# ── Identity model (the flip switch) ──
+# system_assigned        = CUSTOMER / prod: normal App Service system-assigned MI
+#                          + external Entra SQL admin (below) + one-time grant.
+# user_assigned_selfadmin = TEST in a hybrid/shared tenant: a user-assigned MI is
+#                          both the app identity and the SQL admin; app self-provisions, no grant.
+identity_mode = "system_assigned"
+
+# Networking pattern: true = private (VNet + private endpoints, public access off);
+# false = public (public endpoints + firewall, browsable — good for Easy Auth testing).
+use_private_networking = true
+
+# VNet/subnet source (only when use_private_networking = true):
+#   DEFAULT (custom_network_mode = false) — this stack creates its own VNet + two subnets,
+#   sized from vnet_address_space/subnet_pe_prefix/subnet_app_prefix below. Simplest option,
+#   good for a standalone subscription with no central IPAM.
+# custom_network_mode = false
+# vnet_address_space  = "10.60.0.0/24"
+# subnet_pe_prefix    = "10.60.0.0/26"   # private endpoints (Key Vault, SQL, web app inbound)
+# subnet_app_prefix   = "10.60.0.64/26"  # App Service VNet integration (delegated)
+#
+#   BRING YOUR OWN VNET (custom_network_mode = true) — use when your organization's IPAM/
+#   landing zone controls VNet creation and address space assignment. Both subnets must
+#   already exist: the PE subnet empty/non-delegated, the app subnet delegated to
+#   Microsoft.Web/serverFarms. This stack does not create or modify either subnet.
+# custom_network_mode               = true
+# existing_vnet_resource_group_name = "rg-network-hub"
+# existing_vnet_name                = "vnet-corp-eastus2"
+# existing_subnet_pe_name           = "snet-privateendpoints"
+# existing_subnet_app_name          = "snet-appservice-delegated"
+
+#   Jump box + Bastion (only valid with the self-created VNet above, custom_network_mode = false) —
+#   lets you RDP into the private VNet via Azure Bastion to test the private app/KeyVault/SQL endpoints:
+# enable_jumpbox = true
+# jumpbox_vm_size        = "Standard_D2s_v6"   # default
+# jumpbox_admin_password = ""                  # default: auto-generated — `terraform output -raw jumpbox_admin_password`
+
+# Private DNS (only when use_private_networking = true):
+#   DEFAULT (create_private_dns_zones = false) is enterprise/CAF-safe — this stack does NOT create
+#   private DNS zones. The landing zone wires DNS centrally (hub zones + DeployIfNotExists policy),
+#   or you pass hub zone IDs below. Leave as-is for a real customer/landing-zone deployment.
+#   ONLY set true for an isolated demo subscription that has NO central DNS/DINE policy, so this
+#   stack creates its own local zones:
+# create_private_dns_zones = true
+#
+# Attach specific hub zones instead of relying on DINE (optional):
+# existing_private_dns_zone_ids = {
+#   vault = "/subscriptions/.../privatelink.vaultcore.azure.net"
+#   sql   = "/subscriptions/.../privatelink.database.windows.net"
+#   sites = "/subscriptions/.../privatelink.azurewebsites.net"
+# }
+
+# Azure SQL Entra administrator (REQUIRED for identity_mode=system_assigned; group recommended).
+# Leave blank for identity_mode=user_assigned_selfadmin.
+sql_admin_group_name = "SG-GHCP-SQL-Admins"
+sql_admin_object_id  = "<entra-group-or-user-object-id>"
+
+# App behaviour
+use_mock_data        = true          # no PAT / GitHub Copilot needed while true
+retention_months     = 6             # >= 3
+
+# Optional
+# create_acr             = false         # true only for the in-cloud `az acr build` test flow
+# container_image        = "myregistry.azurecr.io/ghcp-visibility:latest"
+# github_enterprise_slug = "your-enterprise"
+# admin_principal_object_id = "<your user object ID, or an Entra group object ID, for the Admin role>"
+# app_service_sku        = "S1"          # production default (Standard) — supports autoscale
+# autoscale_min          = 1
+# autoscale_max          = 3

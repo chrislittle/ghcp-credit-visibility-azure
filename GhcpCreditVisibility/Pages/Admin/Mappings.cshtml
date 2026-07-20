@@ -1,0 +1,240 @@
+@page
+@model GhcpCreditVisibility.Pages.Admin.MappingsModel
+@{
+    ViewData["Title"] = "Admin — Access & Settings";
+}
+
+<div class="gh-pagehead">
+    <div>
+        <h1>Admin — Access &amp; Settings</h1>
+        <div class="sub">
+            Entra owns <strong>who is in a group</strong> (membership). This console owns <strong>what a group or user can see</strong>
+            — the mapping to one or more GitHub Copilot cost centers. A principal can be an Entra <strong>security group</strong> or an
+            individual <strong>user</strong> (e.g. a lone manager with no dedicated group), and can be mapped to <strong>any number of
+            cost centers</strong> — e.g. an executive group that needs a single top-down view spanning several cost centers.
+            Changes take effect on next page load — no re-login.
+        </div>
+    </div>
+</div>
+
+@if (!string.IsNullOrEmpty(Model.Message))
+{
+    <div class="alert alert-success py-2">@Model.Message</div>
+}
+@if (!string.IsNullOrEmpty(Model.Error))
+{
+    <div class="alert alert-danger py-2">@Model.Error</div>
+}
+
+<!-- Organization settings -->
+<div class="gh-card">
+    <div class="ch"><h2>Organization</h2><span class="hint">shown in the header &amp; page title</span></div>
+    <div class="gh-cardbody">
+        <form method="post" asp-page-handler="SaveSettings" class="row g-2 align-items-end">
+            <div class="col-md-6">
+                <label class="form-label mb-0 gh-note">Organization display name</label>
+                <input name="orgDisplayName" class="form-control form-control-sm" value="@Model.OrgDisplayName" placeholder="e.g. Contoso Enterprise" />
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-sm btn-primary w-100" type="submit">Save</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Principal -> Cost Center mappings -->
+<div class="gh-card">
+    <div class="ch">
+        <h2>Access mappings</h2>
+        <span class="hint">principal → one or more cost centers</span>
+    </div>
+    <table>
+        <thead><tr><th>Type</th><th>Principal</th><th>Object ID</th><th>Cost centers</th><th>Last updated</th><th></th></tr></thead>
+        <tbody>
+            @{
+                // Group rows by principal so it's obvious at a glance that one group/user can see
+                // MULTIPLE cost centers (e.g. an exec who needs a top-down, cross-cost-center view).
+                var grouped = Model.Mappings
+                    .GroupBy(m => (m.PrincipalType, m.PrincipalObjectId))
+                    .OrderBy(g => g.First().PrincipalDisplayName ?? g.Key.PrincipalObjectId);
+            }
+            @foreach (var g in grouped)
+            {
+                var first = g.First();
+                <tr>
+                    <td>@(first.PrincipalType == "User" ? "👤 User" : "👥 Group")</td>
+                    <td>@(first.PrincipalDisplayName ?? "—")</td>
+                    <td style="color:#66707d"><code>@first.PrincipalObjectId</code></td>
+                    <td>
+                        @foreach (var m in g.OrderBy(x => x.CostCenterName ?? x.CostCenterId))
+                        {
+                            <span class="badge rounded-pill text-bg-light border me-1 mb-1" style="font-weight:500;">
+                                @(m.CostCenterName ?? m.CostCenterId)
+                                <form method="post" asp-page-handler="DeleteMapping" style="display:inline" onsubmit="return confirm('Remove access to @(m.CostCenterName ?? m.CostCenterId) for @(first.PrincipalDisplayName ?? first.PrincipalObjectId)?');">
+                                    <input type="hidden" name="id" value="@m.Id" />
+                                    <button type="submit" class="btn btn-sm p-0 border-0" style="color:#d1242f;background:none;line-height:1;" title="Remove this cost center">&times;</button>
+                                </form>
+                            </span>
+                        }
+                    </td>
+                    <td style="color:#66707d">@g.Max(x => x.UpdatedUtc).ToString("yyyy-MM-dd")</td>
+                    <td></td>
+                </tr>
+            }
+            @if (Model.Mappings.Count == 0)
+            {
+                <tr><td colspan="6" style="text-align:center;color:#66707d;padding:22px 0;">No mappings yet. Add one below.</td></tr>
+            }
+        </tbody>
+    </table>
+    <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);background:#fafbff;">
+        <form method="post" asp-page-handler="AddMapping" class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label mb-0 gh-note">Type</label>
+                <select name="principalType" class="form-select form-select-sm">
+                    <option value="Group">👥 Group</option>
+                    <option value="User">👤 User</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-0 gh-note">Object ID</label>
+                <input name="principalObjectId" class="form-control form-control-sm" placeholder="00000000-0000-0000-0000-000000000000" required />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-0 gh-note">Name (label)</label>
+                <input name="principalName" class="form-control form-control-sm" placeholder="SG-Finance / Dana Manager" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label mb-0 gh-note">Cost center(s)</label>
+                <select name="costCenterIds" class="form-select form-select-sm" multiple size="3" required>
+                    @foreach (var c in Model.CostCenters)
+                    {
+                        <option value="@c.Id">@(c.Name ?? c.Id)</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-sm btn-primary w-100" type="submit">Add mapping</button>
+            </div>
+        </form>
+        @if (Model.CostCenters.Count == 0)
+        {
+            <div class="gh-note mt-2" style="color:#d9822b">No cost centers discovered yet — the snapshot job must run at least once (mock data seeds on startup).</div>
+        }
+        <div class="gh-note mt-2">
+            Use <strong>User</strong> for an individual (e.g. a single manager who should see one cost center and has no dedicated group).
+            <strong>Ctrl/Cmd-click</strong> (or shift-click for a range) to select several cost centers at once — a group or user
+            can be granted <strong>any number</strong> of cost centers, so an exec can get a single top-down view across the whole org.
+            Remove one cost center at a time with the <strong>&times;</strong> on its badge above.
+        </div>
+    </div>
+</div>
+
+<!-- Admin principals -->
+<div class="gh-card">
+    <div class="ch"><h2>Administrators</h2><span class="hint">group or user — see all data + manage this console</span></div>
+    <table>
+        <thead><tr><th>Type</th><th>Principal</th><th>Object ID</th><th></th></tr></thead>
+        <tbody>
+            @foreach (var a in Model.AdminPrincipals)
+            {
+                <tr>
+                    <td>@(a.PrincipalType == "User" ? "👤 User" : "👥 Group")</td>
+                    <td>@(a.PrincipalDisplayName ?? "—")</td>
+                    <td style="color:#66707d"><code>@a.PrincipalObjectId</code></td>
+                    <td style="text-align:right">
+                        <form method="post" asp-page-handler="DeleteAdmin" onsubmit="return confirm('Remove this administrator?');">
+                            <input type="hidden" name="id" value="@a.Id" />
+                            <button class="btn btn-sm btn-outline-danger" type="submit">Remove</button>
+                        </form>
+                    </td>
+                </tr>
+            }
+            @if (Model.AdminPrincipals.Count == 0)
+            {
+                <tr><td colspan="4" style="text-align:center;color:#66707d;padding:22px 0;">No admin principals. (The Entra "Admin" app role also grants admin.)</td></tr>
+            }
+        </tbody>
+    </table>
+    <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);background:#fafbff;">
+        <form method="post" asp-page-handler="AddAdmin" class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label mb-0 gh-note">Type</label>
+                <select name="principalType" class="form-select form-select-sm">
+                    <option value="Group">👥 Group</option>
+                    <option value="User">👤 User</option>
+                </select>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label mb-0 gh-note">Object ID</label>
+                <input name="principalObjectId" class="form-control form-control-sm" placeholder="00000000-0000-0000-0000-000000000000" required />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-0 gh-note">Name (label)</label>
+                <input name="principalName" class="form-control form-control-sm" placeholder="SG-GHCP-Admins" />
+            </div>
+            <div class="col-md-3">
+                <button class="btn btn-sm btn-primary w-100" type="submit">Add administrator</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Budgets (governed in GitHub) -->
+<div class="gh-card">
+    <div class="ch"><h2>Budgets</h2><span class="hint">governed in GitHub — read-only here</span></div>
+    <div class="gh-cardbody">
+        <p class="mb-2">
+            Budgets are <strong>configured and enforced in GitHub</strong> (enterprise / organization / cost-center budgets),
+            and GitHub sends the budget <strong>alert emails</strong>. This app does not create or edit budgets — the snapshot job
+            reads them from GitHub and the <a asp-page="/Index">Usage</a> dashboard shows each budget's current-month utilization.
+        </p>
+        <p class="gh-note mb-0">
+            Manage budgets in GitHub:
+            <a href="https://docs.github.com/en/enterprise-cloud@@latest/billing/concepts/budgets-and-alerts" target="_blank" rel="noopener">Budgets &amp; alerts ↗</a> ·
+            <a href="https://docs.github.com/en/copilot/concepts/billing/budgets-for-usage-based-billing" target="_blank" rel="noopener">Copilot usage-based budgets ↗</a>
+        </p>
+    </div>
+</div>
+
+<!-- Helper: your own identifiers -->
+<div class="gh-card">
+    <div class="ch"><h2>Your identifiers</h2><span class="hint">from your sign-in token — handy for adding yourself</span></div>
+        <div class="gh-cardbody">
+        <div class="mb-2">👤 <strong>Your user object ID:</strong> @if (string.IsNullOrEmpty(Model.MyUserObjectId)) { <span style="color:#66707d">not present in token</span> } else { <code>@Model.MyUserObjectId</code> }</div>
+        👥 <strong>Your group object IDs:</strong>
+        @if (Model.MyGroups.Count == 0)
+        {
+            <span style="color:#66707d">none in token (you may hold the Entra "Admin" app role, or your groups exceed the token limit).</span>
+        }
+        else
+        {
+            @foreach (var g in Model.MyGroups)
+            {
+                <div><code>@g</code></div>
+            }
+        }
+    </div>
+</div>
+
+<!-- Runtime configuration (admin-only) -->
+<div class="gh-card">
+    <div class="ch"><h2>Configuration</h2><span class="hint">current runtime settings (read-only)</span></div>
+    <table>
+        <tbody>
+            <tr><td><strong>Organization display name</strong></td><td>@(string.IsNullOrWhiteSpace(Model.OrgDisplayName) ? "— not set — (set it above)" : Model.OrgDisplayName)</td></tr>
+            <tr><td><strong>Data source</strong></td><td>@(Model.UseMock ? "Mock data (demo — no GitHub token required)" : "Live GitHub billing API")</td></tr>
+            <tr><td><strong>GitHub enterprise</strong></td><td><code>@(string.IsNullOrWhiteSpace(Model.Enterprise) ? "not configured" : Model.Enterprise)</code></td></tr>
+            <tr><td><strong>Access model</strong></td><td>@Model.ScopingStrategyLabel <span style="color:#98a2b3">(<code>@Model.ScopingStrategy</code>)</span></td></tr>
+            <tr><td><strong>History retained</strong></td><td>@Model.RetentionMonths months</td></tr>
+            <tr><td><strong>Persistence</strong></td><td>@(Model.UsingSqlServer ? "Azure SQL (managed identity)" : "In-memory (local preview)")</td></tr>
+            <tr><td><strong>App version</strong></td><td>v@(GhcpCreditVisibility.AppInfo.Version)</td></tr>
+        </tbody>
+    </table>
+    <div class="gh-cardbody">
+        <div class="gh-note mb-0">
+            These are set at deploy time (<code>appsettings.json</code> / Terraform) except the organization name (edited above).
+            Data source switches to the live GitHub API when <code>GitHub:UseMock=false</code> and a token is provided.
+        </div>
+    </div>
+</div>
