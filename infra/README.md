@@ -45,14 +45,14 @@ enable_jumpbox = true
 This gives you (or a tester) a way to **RDP into the VNet through the portal via Bastion** — no VM
 public IP, no NSG hole open to the internet — and from there browse the private web app URL or
 resolve the private DNS names. You typically **won't need to RDP in just for the SQL grant, the
-PAT, or a health check** though: `deploy.ps1 -Task grant-sql`, `-Task set-pat`, and `-Task status`
-all detect a private deployment with a jump box and run those steps automatically via **Azure Run
-Command** (`az vm run-command`) — executing on the jump box over the ARM control plane, with the
-SQL token / PAT passed as `--protected-parameters` (never logged or persisted) — see
-[Post-deploy](#post-deploy) and [Going live against real GitHub data](#going-live-against-real-github-data).
-(`-Task status`'s health check has no secret to protect — it just needs to run from inside the
-VNet, since the web app's public access is disabled and a check from outside gets a platform-level
-403, not a real health signal.)
+PAT, or a health check** though: `deploy.ps1 -Task grant-sql` and `-Task set-pat` offer the jump
+box as just *one* of several access-mode choices (alongside trying direct access, if you're
+already on the VNet some other way, and a temporary-public-access escape hatch) — see
+[Post-deploy](#post-deploy) and [Going live against real GitHub data](#going-live-against-real-github-data)
+for the full menu. `-Task status`'s health check tries a direct connection first and falls back
+to the jump box automatically if one exists (no menu — it's read-only, so there's no
+temporary-public-access option for it; checking from outside the VNet would otherwise show a
+platform-level 403, since the web app's public access is disabled by design, not a real signal).
 
 Connect: Azure Portal → the `vm-jumpbox` VM → **Connect → Bastion** → sign in with
 `jumpbox_admin_username` / `terraform output -raw jumpbox_admin_password`. Tear it down again by
@@ -248,13 +248,19 @@ For an **isolated demo** subscription with no central DNS/DINE policy, set `crea
 
 **`identity_mode = system_assigned` (customer/prod): both steps.**
 
-1. **Grant the web app's managed identity access to SQL.** Easiest: run **`./deploy.ps1 -Task grant-sql`** from the repo root — it reads the server/DB/app names from Terraform outputs, uses your `az login` (you must be the Entra SQL admin), and applies an idempotent grant (`db_ddladmin` + read/write) so the app can run its migrations. No manual SQL, no restart (the app retries migrations and picks it up within ~30s). **On a private deployment with `enable_jumpbox = true`**, your workstation can't reach the SQL private endpoint directly (public access is denied) — `deploy.ps1` detects this automatically and runs the grant *from the jump box* via **Azure Run Command** (`az vm run-command`) instead: your SQL access token is passed in as a `--protected-parameters` value (never logged or persisted in the run-command's history) and the grant executes inside the VNet, with no RDP session required. *Manual alternative (public mode, or no jump box):* connect to the `ghcpvisibility` DB as the Entra SQL admin (e.g. Azure Portal → SQL database → Query editor, or a host on the VNet) and run the T-SQL emitted by `terraform output post_deploy_sql_grant`. *(Skipped in self-admin mode — the output says "Not required".)*
+1. **Grant the web app's managed identity access to SQL.** Run **`./deploy.ps1 -Task grant-sql`** from the repo root — it reads the server/DB/app names from Terraform outputs, uses your `az login` (you must be the Entra SQL admin), and applies an idempotent grant (`db_ddladmin` + read/write) so the app can run its migrations. No manual SQL needed if you don't want it, no restart (the app retries migrations and picks it up within ~30s). **On a private deployment**, the SQL server's public access is disabled, so your workstation may not have a path to it — `deploy.ps1` walks you through **how** to run the grant:
+   - **Try direct access** — works if you're already on the VNet somehow (VPN/ExpressRoute/peering, common in real landing-zone environments). A quick reachability probe (with a short poll/retry, since private DNS can lag right after a fresh apply) checks this before falling back.
+   - **Use the jump box** (only offered when `enable_jumpbox = true`) — via **Azure Run Command**, no RDP needed. Your SQL access token is passed in as a `--protected-parameters` value (never logged or persisted), and the grant executes inside the VNet.
+   - **Temporarily allow public access** — an explicit, opt-in escape hatch: briefly re-enables the SQL server's public endpoint with a firewall rule scoped to your IP, runs the grant, then reverts and verifies. Even if the revert step itself somehow failed, the next `terraform apply` re-asserts `public_network_access_enabled = false` for private mode regardless, so this can't silently leave the door open long-term.
+   - **Skip — do it manually** — prints the T-SQL (`terraform output post_deploy_sql_grant`) for you to run from wherever you do have access (an existing bastion, a self-hosted CI/CD agent already in the VNet, etc.). When run as part of the full `./deploy.ps1` sequence, this pauses (Enter to continue) since later steps assume the grant is done — but never blocks under `-Yes`/`-DryRun` or when run standalone (`-Task grant-sql`).
+
+   If Direct access fails after polling, `deploy.ps1` offers the jump box (if one exists) as the first fallback, then the temporary-public-access escape hatch, before falling through to manual. The temporary-public-access option is also directly selectable from the menu on its own, without trying Direct first.
 2. **Assign app roles / groups.** In Entra, assign bootstrap administrators to the app's `Admin` role, then use `/Admin/Mappings` to manage which Entra groups or users can see which cost centers.
 
 ## Going live against real GitHub data
 1. Set `use_mock_data = false` and `github_enterprise_slug = "<your-enterprise>"`.
 2. Provide the enterprise PAT as Key Vault secret **`github-pat`** (pick one):
-   - **Out-of-band (recommended):** run **`./deploy.ps1 -Task set-pat`** (prompts for the PAT, masked, and stores it in the `github-pat` secret). Writing a secret is a Key Vault **data-plane** op, so for a **private** vault, public access is disabled — but on a deployment with `enable_jumpbox = true`, `deploy.ps1` detects this and sets the secret *from the jump box* via **Azure Run Command**, using the jump box's own managed identity (granted `Key Vault Secrets Officer` on just this vault) — the PAT is passed as a `--protected-parameters` value, and no RDP session is required. Without a jump box, run `az keyvault secret set --vault-name <kv> --name github-pat --value <PAT>` from any other host on the VNet (Bastion + a manual session, or VPN/ExpressRoute).
+   - **Out-of-band (recommended):** run **`./deploy.ps1 -Task set-pat`** (prompts for the PAT, masked, and stores it in the `github-pat` secret). On a **private** vault, `deploy.ps1` offers the same four access-mode choices as the SQL grant above: try direct access (with the same reachability poll), use the jump box (its own managed identity, granted `Key Vault Secrets Officer` on just this vault — no RDP), temporarily allow public access (an IP-scoped network rule, auto-reverted), or skip and set it manually from wherever you have access. The PAT value itself is only requested once you've picked a mode that actually needs it — the manual option never asks this script to hold it at all.
    - **Terraform-seeded (turnkey):** set `github_pat_secret_value` in `terraform.tfvars` before apply. Same private-vault caveat — the **apply host** must reach the private endpoint.
 3. The app's **`GitHub__Token`** app setting is a Key Vault reference to `github-pat` — **wired automatically whenever `use_mock_data = false`** (independent of how the secret was seeded) — resolved at runtime by the app's managed identity (`Key Vault Secrets User`). The secret value never lands in app settings or Terraform state.
 

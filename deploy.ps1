@@ -197,6 +197,201 @@ Write-Output "PAT_SET_OK"
   Write-Ok "GitHub PAT stored in Key Vault ($VaultName/github-pat) via the jump box. No RDP needed."
 }
 
+# ── Private-networking access patterns (shared by grant-sql + set-pat) ───────
+# Four ways to reach a resource whose public network access is disabled:
+#   1. Direct     — you're already on the VNet somehow (VPN/ExpressRoute/peering) — zero extra infra.
+#   2. JumpBox     — only offered when enable_jumpbox=true — via Azure Run Command (see above).
+#   3. TempPublic  — briefly re-enable public access + an IP allow rule, do the thing, revert. No
+#                    standing infra, but a real (if short) reduction in network posture — opt-in only.
+#   4. Manual      — print instructions; the operator does it themselves from wherever they have access.
+# $script:InAllSequence controls whether "Manual" blocks waiting for Enter (only useful when later
+# phases in the SAME run depend on this one having completed) — set by the 'all' dispatcher case.
+$script:InAllSequence = $false
+
+# Cross-platform TCP reachability probe (works identically on Windows/macOS/Linux PowerShell 7 —
+# deliberately NOT using Test-NetConnection, which is Windows-only and would break this script's
+# #requires -Version 7.0 cross-platform intent on other OSes).
+function Test-TcpPortReachable([string]$HostName, [int]$Port, [int]$TimeoutMs = 3000) {
+  try {
+    $client = [System.Net.Sockets.TcpClient]::new()
+    $connectTask = $client.ConnectAsync($HostName, $Port)
+    $ok = $connectTask.Wait($TimeoutMs) -and $client.Connected
+    $client.Close()
+    return $ok
+  } catch { return $false }
+}
+
+# Polls with backoff rather than a single attempt — private DNS (especially the "central DINE
+# policy" model documented in infra/README.md) can lag ~1-2 min after a fresh apply, so a single
+# failed probe right after `terraform apply` shouldn't be treated as "no path exists at all".
+function Wait-ForPrivateReachability([string]$HostName, [int]$Port, [int]$Attempts = 5, [int]$DelaySeconds = 15) {
+  Write-Info "Checking direct reachability to ${HostName}:${Port} ..."
+  for ($i = 1; $i -le $Attempts; $i++) {
+    if (Test-TcpPortReachable -HostName $HostName -Port $Port) { return $true }
+    if ($i -lt $Attempts) { Write-Info "Attempt $i/$Attempts failed — private DNS may still be propagating. Retrying in ${DelaySeconds}s..."; Start-Sleep -Seconds $DelaySeconds }
+    else { Write-Warn "Attempt $i/$Attempts failed." }
+  }
+  return $false
+}
+
+# Presents the access-mode menu; returns 'Direct' | 'JumpBox' | 'TempPublic' | 'Manual'.
+# The JumpBox option only appears in the list at all when a jump box actually exists.
+function Select-PrivateAccessMode([bool]$JumpboxAvailable) {
+  $opts = [System.Collections.Generic.List[string]]::new()
+  $opts.Add('Try direct access from here (works if you are already on the VNet — VPN/ExpressRoute/peering)')
+  if ($JumpboxAvailable) { $opts.Add('Use the jump box (via Azure Run Command — no RDP needed)') }
+  $opts.Add('Temporarily allow public access just for this operation, then revert automatically')
+  $opts.Add("Skip — I'll handle it manually")
+  $choice = AskChoice 'How do you want to run this?' $opts.ToArray() 1
+
+  $idx = 1
+  if ($choice -eq $idx) { return 'Direct' }; $idx++
+  if ($JumpboxAvailable) { if ($choice -eq $idx) { return 'JumpBox' }; $idx++ }
+  if ($choice -eq $idx) { return 'TempPublic' }
+  return 'Manual'
+}
+
+# When Direct access fails after polling, escalate: offer the jump box first (if one exists —
+# it's already-paid-for standing infra, simplest to reuse), then TempPublic as the universal
+# escape hatch, then fall through to Manual. Each step is opt-in — never silently escalates.
+function Resolve-DirectAccessFallback([bool]$JumpboxAvailable) {
+  Write-Warn "No direct path found from this workstation after polling."
+  if ($JumpboxAvailable -and (AskYesNo 'A jump box is available. Use it instead?' $true)) { return 'JumpBox' }
+  if (AskYesNo 'Temporarily allow public access to complete this instead?' $false) { return 'TempPublic' }
+  return 'Manual'
+}
+
+# Manual fallback: always show the instructions; only BLOCK waiting for Enter when (a) we're in
+# the middle of the 'all' sequence where later phases depend on this one, AND (b) we're actually
+# interactive (never hangs under -Yes or -DryRun, which both imply unattended/non-blocking use).
+function Show-ManualInstructionsAndMaybePause([string]$Instructions) {
+  Write-Warn 'Manual step selected.'
+  Write-Host $Instructions -ForegroundColor DarkGray
+  if ($Yes -or $DryRun -or -not $script:InAllSequence) {
+    Write-Info 'Continuing without waiting — re-run the relevant -Task later (or -Task status) once this is done.'
+    return
+  }
+  Write-Host ''
+  Read-Host "  Press Enter once you've completed this step (or Ctrl+C to stop here and resume later)" | Out-Null
+}
+
+# Shared by both the "myworkstation is doing this directly" path (Direct) and the TempPublic
+# escape hatch (which also runs directly, just after briefly opening a network path).
+function Get-MyPublicIp {
+  $myIp = $null
+  try { $myIp = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 10).ip } catch {}
+  if (-not $myIp) { try { $myIp = (Invoke-RestMethod -Uri 'https://ifconfig.me/ip' -TimeoutSec 10).Trim() } catch {} }
+  return $myIp
+}
+
+# Used by every path that actually needs the PAT value in-hand (Direct, JumpBox, TempPublic) —
+# NOT needed for Manual, since in that case the operator sets the secret themselves and this
+# script never needs to hold the value at all.
+function Read-PatSecurely {
+  $sec = Read-Host '  Paste the GitHub PAT (input hidden)' -AsSecureString
+  $pat = [System.Net.NetworkCredential]::new('', $sec).Password
+  if ([string]::IsNullOrWhiteSpace($pat)) { return $null }
+  return $pat
+}
+
+function Ensure-SqlServerModule {
+  if (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue) { return $true }
+  if ($DryRun) { Write-Host '  DRYRUN> Install-Module SqlServer -Scope CurrentUser' -ForegroundColor DarkGray; return $true }
+  if (AskYesNo 'This needs the SqlServer PowerShell module (Invoke-Sqlcmd) to run the grant locally. Install it now?' $true) {
+    Install-Module SqlServer -Scope CurrentUser -Force -AllowClobber
+    Import-Module SqlServer
+    return $true
+  }
+  Write-Warn 'Without the SqlServer module, run the T-SQL from `terraform output post_deploy_sql_grant` via Portal Query editor instead.'
+  return $false
+}
+
+function Invoke-SqlGrantDirect([string]$Server, [string]$Database, [string]$AppName) {
+  $tsql = @"
+DECLARE @app sysname = N'$($AppName.Replace("'","''"))';
+DECLARE @q sysname = QUOTENAME(@app);
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = @app)
+    EXEC('CREATE USER ' + @q + ' FROM EXTERNAL PROVIDER;');
+IF IS_ROLEMEMBER('db_datareader', @app) = 0 EXEC('ALTER ROLE db_datareader ADD MEMBER ' + @q + ';');
+IF IS_ROLEMEMBER('db_datawriter', @app) = 0 EXEC('ALTER ROLE db_datawriter ADD MEMBER ' + @q + ';');
+IF IS_ROLEMEMBER('db_ddladmin',  @app) = 0 EXEC('ALTER ROLE db_ddladmin  ADD MEMBER ' + @q + ';');
+"@
+  if ($DryRun) { Write-Host "  DRYRUN> Invoke-Sqlcmd against $Server/$Database with idempotent grant" -ForegroundColor DarkGray; Write-Host $tsql -ForegroundColor DarkGray; return }
+  $token = (az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv)
+  Invoke-Sqlcmd -ServerInstance $Server -Database $Database -AccessToken $token -Query $tsql -ErrorAction Stop
+  Write-Ok 'SQL grant applied — the app picks it up within ~30s (migrations retry).'
+}
+
+function Invoke-PatSetDirect([string]$VaultName, [string]$PatValue) {
+  if ($DryRun) { Write-Host "  DRYRUN> az keyvault secret set --vault-name $VaultName --name github-pat --value <PAT>" -ForegroundColor DarkGray; return }
+  az keyvault secret set --vault-name $VaultName --name github-pat --value $PatValue --only-show-errors | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Failed to set the secret." }
+  Write-Ok 'PAT stored in Key Vault. The app resolves it via its managed identity on the next snapshot.'
+}
+
+# Temporarily re-enables the SQL server's public network access + an IP-scoped firewall rule,
+# runs the grant directly, then reverts — regardless of success/failure (finally). Even if the
+# revert step itself somehow failed, the NEXT `terraform apply` re-asserts
+# public_network_access_enabled = false for private mode, so this can't silently leave the door
+# open long-term — worth telling the operator, since it's a real safety net for this exact case.
+function Invoke-SqlGrantViaTempPublicAccess([string]$ResourceGroup, [string]$SqlServerName, [string]$Server, [string]$Database, [string]$AppName) {
+  if (-not (Ensure-SqlServerModule)) { return }
+  $myIp = Get-MyPublicIp
+  if (-not $myIp) { throw "Couldn't auto-detect your public IP — required to scope the temporary firewall rule." }
+  $ruleName = 'TempDeployerAccess'
+  Write-Info "Current state: public network access = Disabled. Will re-disable when finished."
+  Write-Info "Enabling public access + adding a firewall rule for your IP ($myIp)..."
+  if ($DryRun) {
+    Write-Host "  DRYRUN> az sql server update -g $ResourceGroup -n $SqlServerName --enable-public-network true" -ForegroundColor DarkGray
+    Write-Host "  DRYRUN> az sql server firewall-rule create -g $ResourceGroup -s $SqlServerName -n $ruleName --start-ip-address $myIp --end-ip-address $myIp" -ForegroundColor DarkGray
+    Invoke-SqlGrantDirect -Server $Server -Database $Database -AppName $AppName
+    return
+  }
+  az sql server update -g $ResourceGroup -n $SqlServerName --enable-public-network true --only-show-errors | Out-Null
+  az sql server firewall-rule create -g $ResourceGroup -s $SqlServerName -n $ruleName --start-ip-address $myIp --end-ip-address $myIp --only-show-errors | Out-Null
+  try {
+    Write-Ok 'Public access temporarily enabled. Waiting ~20s for the rule to propagate...'
+    Start-Sleep -Seconds 20
+    Invoke-SqlGrantDirect -Server $Server -Database $Database -AppName $AppName
+  } finally {
+    Write-Info 'Reverting: removing your firewall rule and disabling public access again...'
+    az sql server firewall-rule delete -g $ResourceGroup -s $SqlServerName -n $ruleName --yes --only-show-errors 2>$null | Out-Null
+    az sql server update -g $ResourceGroup -n $SqlServerName --enable-public-network false --only-show-errors 2>$null | Out-Null
+    $state = az sql server show -g $ResourceGroup -n $SqlServerName --query publicNetworkAccess -o tsv 2>$null
+    if ($state -eq 'Disabled') { Write-Ok 'Public access confirmed back to Disabled.' }
+    else { Write-Warn "Couldn't confirm public access was re-disabled (state: $state) — the next `terraform apply` will re-assert this regardless." }
+  }
+}
+
+# Same idea as the SQL version, but for Key Vault: adds a scoped network-rule IP allow instead of
+# flipping the whole default_action to Allow (keeps the exposure window as narrow as possible).
+function Invoke-PatSetViaTempPublicAccess([string]$ResourceGroup, [string]$VaultName, [string]$PatValue) {
+  $myIp = Get-MyPublicIp
+  if (-not $myIp) { throw "Couldn't auto-detect your public IP — required to scope the temporary network rule." }
+  Write-Info "Current state: public network access = Disabled. Will re-disable when finished."
+  Write-Info "Enabling public access + adding a network rule for your IP ($myIp)..."
+  if ($DryRun) {
+    Write-Host "  DRYRUN> az keyvault update -n $VaultName --public-network-access Enabled" -ForegroundColor DarkGray
+    Write-Host "  DRYRUN> az keyvault network-rule add -n $VaultName --ip-address $myIp" -ForegroundColor DarkGray
+    Invoke-PatSetDirect -VaultName $VaultName -PatValue $PatValue
+    return
+  }
+  az keyvault update -n $VaultName --public-network-access Enabled --only-show-errors | Out-Null
+  az keyvault network-rule add -n $VaultName --ip-address $myIp --only-show-errors | Out-Null
+  try {
+    Write-Ok 'Public access temporarily enabled. Waiting ~20s for the rule to propagate...'
+    Start-Sleep -Seconds 20
+    Invoke-PatSetDirect -VaultName $VaultName -PatValue $PatValue
+  } finally {
+    Write-Info 'Reverting: removing your network rule and disabling public access again...'
+    az keyvault network-rule remove -n $VaultName --ip-address $myIp --only-show-errors 2>$null | Out-Null
+    az keyvault update -n $VaultName --public-network-access Disabled --only-show-errors 2>$null | Out-Null
+    $state = az keyvault show -n $VaultName --query properties.publicNetworkAccess -o tsv 2>$null
+    if ($state -eq 'Disabled') { Write-Ok 'Public access confirmed back to Disabled.' }
+    else { Write-Warn "Couldn't confirm public access was re-disabled (state: $state) — the next `terraform apply` will re-assert this regardless." }
+  }
+}
+
 function Get-TfVar([string]$n) {
   if (-not (Test-Path $tfvars)) { return $null }
   $line = Select-String -Path $tfvars -Pattern "^\s*$n\s*=" | Select-Object -First 1
@@ -568,75 +763,65 @@ function Phase-GrantSql {
   Write-Info "You must be the Entra SQL admin (or in the admin group) for this to succeed ($($script:Acct.user.name))."
   if (-not (AskYesNo 'Apply the SQL grant now?' $true)) { Write-Warn "Skipped. Later: ./deploy.ps1 -Task grant-sql"; return }
 
-  $private = (Get-TfVar 'use_private_networking') -eq 'true'
-  $jumpboxVm = if ($private) { Get-TfOutput 'jumpbox_vm_name' } else { $null }
+  $manualInstructions = "Run this against the $db DB as the Entra SQL admin (Portal -> SQL database -> Query editor, or any host with a path to the private endpoint):`n`n$(Get-TfOutput 'post_deploy_sql_grant')"
 
-  if ($private -and $jumpboxVm) {
-    Write-Info "Private networking detected — your workstation can't reach the SQL private endpoint directly."
-    if ($DryRun) { Write-Host "  DRYRUN> az vm run-command create ... (SQL grant via jump box $jumpboxVm)" -ForegroundColor DarkGray; return }
-    Invoke-SqlGrantViaJumpbox -ResourceGroup (Get-TfOutput 'resource_group') -VmName $jumpboxVm -Server $server -Database $db -AppName $app
-    return
-  }
-  if ($private -and -not $jumpboxVm) {
-    Write-Warn "Private networking with no jump box (enable_jumpbox=false) — this workstation can't reach the SQL private endpoint."
-    Write-Info 'Either set enable_jumpbox = true and re-apply, then re-run this task, or run the T-SQL from any other host on the VNet (see `terraform output post_deploy_sql_grant`).'
-    return
-  }
-
-  # PUBLIC pattern only: the SQL server firewall blocks your workstation by default. Detect your
-  # current public IP and apply the AllowDeployerIP rule (infra/sql.tf) before running T-SQL.
+  # PUBLIC pattern: unchanged — the SQL firewall blocks your workstation by default; open the
+  # AllowDeployerIP rule (persisted so later applies don't revert it), then run the grant directly.
   if ((Get-TfVar 'use_private_networking') -ne 'true') {
-    $myIp = $null
-    try { $myIp = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 10).ip } catch {}
-    if (-not $myIp) { try { $myIp = (Invoke-RestMethod -Uri 'https://ifconfig.me/ip' -TimeoutSec 10).Trim() } catch {} }
+    $myIp = Get-MyPublicIp
     if ($myIp) {
       Write-Info "Opening SQL firewall for your current IP ($myIp) — AllowDeployerIP rule"
-      # Persist to an .auto.tfvars file (same pattern as image.auto.tfvars) so this rule
-      # SURVIVES any later `terraform apply` run by other tasks (image/provision/all).
-      # Passing it only as an ephemeral -var here meant the very next unrelated apply
-      # (e.g. `-Task image`) would silently revert admin_client_ip to its default ("")
-      # and destroy the firewall rule out from under you.
       $adminIpTfvars = Join-Path $infra 'adminip.auto.tfvars'
       if ($DryRun) { Write-Host "  DRYRUN> write $adminIpTfvars : admin_client_ip = `"$myIp`"" -ForegroundColor DarkGray }
       else { Set-Content -Path $adminIpTfvars -Value "admin_client_ip = `"$myIp`"" -NoNewline; Write-Ok "wrote $adminIpTfvars" }
       Push-Location $infra
       try { Invoke-TerraformApply "-var `"location=$Location`"" } finally { Pop-Location }
-      if (-not $DryRun) {
-        Write-Ok "Firewall rule applied for $myIp"
-        Write-Info 'Waiting ~20s for the firewall rule to take effect...'
-        Start-Sleep -Seconds 20
-      }
+      if (-not $DryRun) { Write-Ok "Firewall rule applied for $myIp"; Write-Info 'Waiting ~20s for the firewall rule to take effect...'; Start-Sleep -Seconds 20 }
     }
     else { Write-Warn "Couldn't auto-detect your public IP — if the grant fails with a firewall error, add your IP via Portal or: terraform apply -var admin_client_ip=<your.ip.here>" }
-  }
 
-
-  if (-not (Get-Command Invoke-Sqlcmd -ErrorAction SilentlyContinue)) {
-    if ($DryRun) { Write-Host '  DRYRUN> Install-Module SqlServer -Scope CurrentUser' -ForegroundColor DarkGray }
-    elseif (AskYesNo 'Install the SqlServer PowerShell module (needed to run the grant)?' $true) { Install-Module SqlServer -Scope CurrentUser -Force -AllowClobber; Import-Module SqlServer }
-    else { Write-Warn 'Without SqlServer module, run the T-SQL from `terraform output post_deploy_sql_grant` via Portal Query editor.'; return }
-  }
-  $tsql = @"
-DECLARE @app sysname = N'$($app.Replace("'","''"))';
-DECLARE @q sysname = QUOTENAME(@app);
-IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = @app)
-    EXEC('CREATE USER ' + @q + ' FROM EXTERNAL PROVIDER;');
-IF IS_ROLEMEMBER('db_datareader', @app) = 0 EXEC('ALTER ROLE db_datareader ADD MEMBER ' + @q + ';');
-IF IS_ROLEMEMBER('db_datawriter', @app) = 0 EXEC('ALTER ROLE db_datawriter ADD MEMBER ' + @q + ';');
-IF IS_ROLEMEMBER('db_ddladmin',  @app) = 0 EXEC('ALTER ROLE db_ddladmin  ADD MEMBER ' + @q + ';');
-"@
-  if ($DryRun) { Write-Host "  DRYRUN> Invoke-Sqlcmd against $server/$db with idempotent grant" -ForegroundColor DarkGray; Write-Host $tsql -ForegroundColor DarkGray; return }
-  $token = (az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv)
-  try {
-    Invoke-Sqlcmd -ServerInstance $server -Database $db -AccessToken $token -Query $tsql -ErrorAction Stop
-    Write-Ok 'SQL grant applied — the app picks it up within ~30s (migrations retry). No restart needed.'
-  } catch {
-    Write-Err "Grant failed: $($_.Exception.Message)"
-    if ($_.Exception.Message -match 'is not allowed to access the server') {
-      Write-Info "Firewall rule may not have propagated yet — wait a minute and re-run: ./deploy.ps1 -Task grant-sql"
+    if (-not (Ensure-SqlServerModule)) { return }
+    if ($DryRun) { Invoke-SqlGrantDirect -Server $server -Database $db -AppName $app; return }
+    try { Invoke-SqlGrantDirect -Server $server -Database $db -AppName $app }
+    catch {
+      Write-Err "Grant failed: $($_.Exception.Message)"
+      if ($_.Exception.Message -match 'is not allowed to access the server') { Write-Info "Firewall rule may not have propagated yet — wait a minute and re-run: ./deploy.ps1 -Task grant-sql" }
+      else { Write-Info 'Usually means the signed-in identity is not the Entra SQL admin. Sign in as that admin and retry, or use Portal Query editor.' }
+      throw
     }
-    else { Write-Info 'Usually means the signed-in identity is not the Entra SQL admin. Sign in as that admin and retry, or use Portal Query editor.' }
-    throw
+    return
+  }
+
+  # PRIVATE pattern: offer the four access modes.
+  $rg = Get-TfOutput 'resource_group'
+  $sqlServerName = Get-TfOutput 'sql_server_name'
+  $jumpboxVm = Get-TfOutput 'jumpbox_vm_name'
+  $mode = Select-PrivateAccessMode -JumpboxAvailable:([bool]$jumpboxVm)
+
+  if ($mode -eq 'Direct') {
+    if (-not $DryRun -and -not (Wait-ForPrivateReachability -HostName $server -Port 1433)) {
+      $mode = Resolve-DirectAccessFallback -JumpboxAvailable:([bool]$jumpboxVm)
+    }
+    else {
+      if (-not $DryRun) { Write-Ok 'Reachable — running the grant directly from here.' }
+      if (-not (Ensure-SqlServerModule)) { return }
+      Invoke-SqlGrantDirect -Server $server -Database $db -AppName $app
+      return
+    }
+  }
+
+  switch ($mode) {
+    'JumpBox' {
+      if (-not $jumpboxVm) { Write-Warn 'No jump box available (enable_jumpbox=false).'; Show-ManualInstructionsAndMaybePause $manualInstructions; return }
+      if ($DryRun) { Write-Host "  DRYRUN> az vm run-command create ... (SQL grant via jump box $jumpboxVm)" -ForegroundColor DarkGray; return }
+      Invoke-SqlGrantViaJumpbox -ResourceGroup $rg -VmName $jumpboxVm -Server $server -Database $db -AppName $app
+    }
+    'TempPublic' {
+      Invoke-SqlGrantViaTempPublicAccess -ResourceGroup $rg -SqlServerName $sqlServerName -Server $server -Database $db -AppName $app
+    }
+    'Manual' {
+      Show-ManualInstructionsAndMaybePause $manualInstructions
+    }
   }
 }
 
@@ -650,33 +835,55 @@ function Phase-SetPat {
   Write-Info "Key Vault: $kv  (secret name: github-pat)"
   if (-not (AskYesNo 'Set the GitHub PAT secret now?' $true)) { Write-Warn "Skipped. Later: ./deploy.ps1 -Task set-pat  (or az keyvault secret set)"; return }
 
-  $private = (Get-TfVar 'use_private_networking') -eq 'true'
-  $jumpboxVm = if ($private) { Get-TfOutput 'jumpbox_vm_name' } else { $null }
+  $manualInstructions = "Run this from any host with a path to the Key Vault private endpoint:`n`n  az keyvault secret set --vault-name $kv --name github-pat --value <PAT>"
 
-  if ($private -and -not $jumpboxVm) {
-    Write-Warn "Private networking with no jump box (enable_jumpbox=false) — this workstation can't reach the Key Vault private endpoint."
-    Write-Info 'Either set enable_jumpbox = true and re-apply, then re-run this task, or set the secret from any other host on the VNet: az keyvault secret set --vault-name <name> --name github-pat --value <PAT>'
-    return
-  }
-  if ($DryRun) {
-    if ($private) { Write-Host "  DRYRUN> az vm run-command create ... (set PAT via jump box $jumpboxVm)" -ForegroundColor DarkGray }
-    else { Write-Host "  DRYRUN> az keyvault secret set --vault-name $kv --name github-pat --value <PAT>" -ForegroundColor DarkGray }
+  # PUBLIC pattern: unchanged.
+  if ((Get-TfVar 'use_private_networking') -ne 'true') {
+    if ($DryRun) { Invoke-PatSetDirect -VaultName $kv -PatValue '<PAT>'; return }
+    $pat = Read-PatSecurely
+    if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return }
+    Invoke-PatSetDirect -VaultName $kv -PatValue $pat
     return
   }
 
-  $sec = Read-Host '  Paste the GitHub PAT (input hidden)' -AsSecureString
-  $pat = [System.Net.NetworkCredential]::new('', $sec).Password
-  if ([string]::IsNullOrWhiteSpace($pat)) { Write-Warn 'Empty PAT — skipped.'; return }
+  # PRIVATE pattern: offer the four access modes BEFORE asking for the PAT value — Manual doesn't
+  # need this script to hold the value at all.
+  $rg = Get-TfOutput 'resource_group'
+  $jumpboxVm = Get-TfOutput 'jumpbox_vm_name'
+  $mode = Select-PrivateAccessMode -JumpboxAvailable:([bool]$jumpboxVm)
 
-  if ($private -and $jumpboxVm) {
-    Write-Info "Private networking detected — your workstation can't reach the Key Vault private endpoint directly."
-    Invoke-PatSetViaJumpbox -ResourceGroup (Get-TfOutput 'resource_group') -VmName $jumpboxVm -VaultName $kv -PatValue $pat -IdentityClientId (Get-TfOutput 'jumpbox_identity_client_id')
-    return
+  if ($mode -eq 'Direct') {
+    if (-not $DryRun -and -not (Wait-ForPrivateReachability -HostName "$kv.vault.azure.net" -Port 443)) {
+      $mode = Resolve-DirectAccessFallback -JumpboxAvailable:([bool]$jumpboxVm)
+    }
+    else {
+      if (-not $DryRun) { Write-Ok 'Reachable — running this directly from here.' }
+      if ($DryRun) { Invoke-PatSetDirect -VaultName $kv -PatValue '<PAT>'; return }
+      $pat = Read-PatSecurely
+      if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return }
+      Invoke-PatSetDirect -VaultName $kv -PatValue $pat
+      return
+    }
   }
 
-  az keyvault secret set --vault-name $kv --name github-pat --value $pat --only-show-errors | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Failed to set the secret (permissions or private-network reachability?)." }
-  Write-Ok 'PAT stored in Key Vault. The app resolves it via its managed identity on the next snapshot.'
+  switch ($mode) {
+    'JumpBox' {
+      if (-not $jumpboxVm) { Write-Warn 'No jump box available (enable_jumpbox=false).'; Show-ManualInstructionsAndMaybePause $manualInstructions; return }
+      if ($DryRun) { Write-Host "  DRYRUN> az vm run-command create ... (set PAT via jump box $jumpboxVm)" -ForegroundColor DarkGray; return }
+      $pat = Read-PatSecurely
+      if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return }
+      Invoke-PatSetViaJumpbox -ResourceGroup $rg -VmName $jumpboxVm -VaultName $kv -PatValue $pat -IdentityClientId (Get-TfOutput 'jumpbox_identity_client_id')
+    }
+    'TempPublic' {
+      if ($DryRun) { Invoke-PatSetViaTempPublicAccess -ResourceGroup $rg -VaultName $kv -PatValue '<PAT>'; return }
+      $pat = Read-PatSecurely
+      if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return }
+      Invoke-PatSetViaTempPublicAccess -ResourceGroup $rg -VaultName $kv -PatValue $pat
+    }
+    'Manual' {
+      Show-ManualInstructionsAndMaybePause $manualInstructions
+    }
+  }
 }
 
 function Invoke-HealthCheckViaJumpbox([string]$ResourceGroup, [string]$VmName, [string]$Url) {
@@ -711,28 +918,39 @@ function Phase-Status {
   if (-not $url) { Write-Warn 'web_app_url not available (infra not applied?).'; return }
   Write-Ok "URL: $url"
   $isPrivate = (Get-TfVar 'use_private_networking') -eq 'true'
-  $jumpboxVm = if ($isPrivate) { Get-TfOutput 'jumpbox_vm_name' } else { $null }
 
-  if ($isPrivate -and $jumpboxVm) {
-    Write-Info "Private networking detected — checking health from the jump box (your workstation would get a platform-level 403; public access to the app is disabled by design)."
-    try {
-      $health = Invoke-HealthCheckViaJumpbox -ResourceGroup (Get-TfOutput 'resource_group') -VmName $jumpboxVm -Url $url
-      foreach ($kv in @(@('/health/live', $health.Live), @('/health/ready', $health.Ready))) {
-        if ($kv[1] -eq '200') { Write-Ok "$($kv[0]) → 200" }
-        else { Write-Warn "$($kv[0]) → $($kv[1]) (still warming up: grant/migrations, or DNS if just deployed)" }
-      }
-    } catch {
-      Write-Warn "Couldn't run the health check via the jump box: $($_.Exception.Message)"
+  if ($isPrivate) {
+    # Status is read-only and run casually/repeatedly during development, unlike the one-shot
+    # grant-sql/set-pat operations — use a quick 2-attempt probe (not the full 5x15s poll) so a
+    # repeated `-Task status` doesn't sit waiting a full minute every time there's no direct path.
+    # No Option C here: briefly opening public access just to check health isn't worth the (even
+    # short) exposure window for a read-only convenience check.
+    $hostName = ([Uri]$url).Host
+    if (Wait-ForPrivateReachability -HostName $hostName -Port 443 -Attempts 2 -DelaySeconds 5) {
+      Write-Ok 'Reachable directly — checking from here.'
     }
-    return
-  }
-  if ($isPrivate -and -not $jumpboxVm) {
-    Write-Warn "Private networking with no jump box (enable_jumpbox=false) — checking from your workstation will show a platform-level 403 (public access to the app is disabled by design), not a real health signal."
-    Write-Info 'Either set enable_jumpbox = true and re-apply, then re-run this task, or check from any other host on the VNet.'
-    return
+    else {
+      $jumpboxVm = Get-TfOutput 'jumpbox_vm_name'
+      if ($jumpboxVm) {
+        Write-Info "No direct path — checking health from the jump box instead (your workstation would otherwise get a platform-level 403; public access to the app is disabled by design)."
+        try {
+          $health = Invoke-HealthCheckViaJumpbox -ResourceGroup (Get-TfOutput 'resource_group') -VmName $jumpboxVm -Url $url
+          foreach ($check in @(@('/health/live', $health.Live), @('/health/ready', $health.Ready))) {
+            if ($check[1] -eq '200') { Write-Ok "$($check[0]) → 200" }
+            else { Write-Warn "$($check[0]) → $($check[1]) (still warming up: grant/migrations, or DNS if just deployed)" }
+          }
+        } catch {
+          Write-Warn "Couldn't run the health check via the jump box: $($_.Exception.Message)"
+        }
+        return
+      }
+      Write-Warn "No direct path and no jump box (enable_jumpbox=false) — checking from your workstation would show a platform-level 403 (public access disabled by design), not a real health signal."
+      Write-Info 'Either set enable_jumpbox = true and re-apply, or check from any other host on the VNet.'
+      return
+    }
   }
 
-  $hint = '503 = still warming up: grant/migrations (not DNS — this is the PUBLIC pattern)'
+  $hint = if ($isPrivate) { '503 = still warming up: grant/migrations' } else { '503 = still warming up: grant/migrations (not DNS — this is the PUBLIC pattern)' }
   foreach ($p in '/health/live', '/health/ready') {
     try { $r = Invoke-WebRequest "$url$p" -UseBasicParsing -TimeoutSec 20; Write-Ok "$p → $($r.StatusCode)" }
     catch {
@@ -775,6 +993,7 @@ switch ($Task) {
   'set-pat'   { Ensure-Az; Phase-SetPat }
   'status'    { Phase-Status }
   'all' {
+    $script:InAllSequence = $true
     Phase-Prereqs
     # Configure FIRST — collects the real region/SKU/settings choices — so the gating preflight
     # check below reflects what was actually chosen, not a stale/default param on a fresh machine.

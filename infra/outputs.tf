@@ -23,6 +23,11 @@ output "sql_server_fqdn" {
   value = azurerm_mssql_server.sql.fully_qualified_domain_name
 }
 
+output "sql_server_name" {
+  description = "Short server name (not the FQDN) — needed for az sql server/firewall-rule commands, e.g. the private-networking temporary-public-access escape hatch in deploy.ps1."
+  value       = azurerm_mssql_server.sql.name
+}
+
 output "sql_database_name" {
   value = azurerm_mssql_database.db.name
 }

@@ -165,7 +165,7 @@ Key deployment choices, all one Terraform variable each:
 |---|---|---|
 | Networking | `use_private_networking` | `true` (VNet + private endpoints, no public access — production) / `false` (public endpoints, still Entra-gated — quick pilots, personal-tenant testing) |
 | VNet source | `custom_network_mode` | `false` (this stack creates the VNet) / `true` (bring your own existing VNet/subnets — enterprise IPAM/landing zone) |
-| Test the private path | `enable_jumpbox` | `true` adds a Windows jump-box VM + Azure Bastion inside the VNet (self-created-VNet path only) so you can RDP in and browse the private app/Key Vault/SQL endpoints — `deploy.ps1` also uses it automatically to run the SQL grant and PAT set-up via Azure Run Command, no RDP needed |
+| Test the private path | `enable_jumpbox` | `true` adds a Windows jump-box VM + Azure Bastion inside the VNet (self-created-VNet path only) so you can RDP in and browse the private app/Key Vault/SQL endpoints — it's also one of several access modes `deploy.ps1` offers for the SQL grant/PAT set-up (see below), alongside direct access and a temporary-public-access escape hatch |
 | Data source | `use_mock_data` | `true` (synthetic demo data, default, no PAT needed) / `false` (real GitHub billing data — needs an enterprise PAT in Key Vault) |
 | SQL/identity model | `identity_mode` | `system_assigned` (customer/prod default) / `user_assigned_selfadmin` (testing in a hybrid/shared tenant where your identity can't be the SQL admin) |
 
@@ -208,10 +208,10 @@ identical for mock vs. real data: **[docs/DEMO_DATA.md](docs/DEMO_DATA.md)**.
 1. Set `use_mock_data = false` and `github_enterprise_slug = "<your-enterprise>"`.
 2. Provide an enterprise PAT as the Key Vault secret `github-pat` — run `./deploy.ps1 -Task set-pat`,
    or seed it at apply time via `github_pat_secret_value` in `terraform.tfvars`. For a **private**
-   Key Vault, `deploy.ps1` automatically routes the set-pat step through the optional
-   [jump box + Bastion](infra/README.md#jump-box--azure-bastion-test-the-private-network-end-to-end)
-   via Azure Run Command (the jump box's own managed identity writes the secret — no RDP needed);
-   without a jump box, run `az keyvault secret set ...` from any other host on the VNet.
+   Key Vault, `deploy.ps1` walks you through how: try direct access (if you're already on the VNet),
+   use the optional [jump box + Bastion](infra/README.md#jump-box--azure-bastion-test-the-private-network-end-to-end)
+   (its own managed identity writes the secret — no RDP needed), temporarily allow public access
+   just for this operation (auto-reverted), or set it manually yourself from any host on the VNet.
 3. The app's `GitHub__Token` setting is a Key Vault reference wired automatically whenever
    `use_mock_data = false` — resolved at runtime by managed identity; the PAT value never lands
    in app settings or Terraform state.
