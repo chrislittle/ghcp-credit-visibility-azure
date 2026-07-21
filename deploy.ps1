@@ -407,7 +407,22 @@ function Ensure-Az {
   $script:Acct = (az account show 2>$null | ConvertFrom-Json)
   if (-not $script:Acct) { throw "Not signed in. Run: az login" }
   Write-Ok "az context: $($script:Acct.name)  (sub $($script:Acct.id), tenant $($script:Acct.tenantId))"
-  try { $script:Me = (az ad signed-in-user show --query "{id:id,upn:userPrincipalName,name:displayName}" -o json 2>$null | ConvertFrom-Json) } catch {}
+  try { $script:Me = (az ad signed-in-user show --query "{id:id,upn:userPrincipalName,mail:mail,name:displayName}" -o json 2>$null | ConvertFrom-Json) } catch {}
+}
+
+# B2B guest accounts get an internal UPN like "user_domain.com#EXT#@tenant.onmicrosoft.com" —
+# not a real, deliverable address. Prefer the account's actual "mail" attribute; if that's
+# missing, reconstruct the original external address by decoding the guest UPN encoding
+# (replace the last "_" before "#EXT#" with "@"). Falls back to '' if nothing usable is found.
+function Get-DisplayEmail($me) {
+  if (-not $me) { return '' }
+  if ($me.mail) { return $me.mail }
+  if ($me.upn -match '^(?<local>.+)#EXT#@') {
+    $encoded = $Matches.local
+    if ($encoded -match '^(?<rest>.+)_(?<domain>[^_]+)$') { return "$($Matches.rest)@$($Matches.domain)" }
+  }
+  if ($me.upn -notmatch '#EXT#') { return $me.upn }
+  return ''
 }
 
 # ── PHASE: prereqs ───────────────────────────────────────────────
@@ -603,8 +618,9 @@ function Phase-Configure {
   $sqlSkuDefault = if ($SqlSku) { $SqlSku } else { (Get-TfVar 'sql_database_sku') }; if (-not $sqlSkuDefault) { $sqlSkuDefault = 'GP_S_Gen5_1' }
   $sqlDbSku = Ask 'Azure SQL DB SKU (e.g. GP_S_Gen5_1 serverless, GP_Gen5_2 provisioned)' $sqlSkuDefault
 
-  $alertEmailDefault = if ($script:Me -and $script:Me.upn) { $script:Me.upn } else { '' }
-  $alertEmail = Ask 'Email (or DL) to notify on SQL CPU/memory/storage alerts (>80%) — blank = no alert email' $alertEmailDefault
+  $alertEmailDefault = Get-DisplayEmail $script:Me
+  $alertEmail = Ask 'Email address (or distribution list) to notify when SQL CPU/memory/storage exceeds 80% — press Enter to use your signed-in email' $alertEmailDefault
+  while (-not $alertEmail) { $alertEmail = Ask 'Alert email is required (no default could be resolved for your account) — enter one' '' }
 
   $identityMode = @('user_assigned_selfadmin', 'system_assigned')[(AskChoice 'Identity model' @(
         'user_assigned_selfadmin  — TEST: app identity is its own SQL admin (no grant)',
@@ -679,7 +695,7 @@ function Phase-Configure {
   $lines.Add("name_prefix               = `"$prefix`"")
   $lines.Add("app_service_sku           = `"$appSku`"")
   $lines.Add("sql_database_sku          = `"$sqlDbSku`"")
-  if ($alertEmail) { $lines.Add("sql_alert_email_addresses = [`"$alertEmail`"]") }
+  $lines.Add("sql_alert_email_addresses = [`"$alertEmail`"]")
   $lines.Add("identity_mode             = `"$identityMode`"")
   $lines.Add("use_private_networking    = $($private.ToString().ToLower())")
   if ($private -and $createZones) { $lines.Add("create_private_dns_zones  = true") }

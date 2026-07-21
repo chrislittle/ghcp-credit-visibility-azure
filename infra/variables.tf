@@ -308,8 +308,12 @@ variable "sql_auto_pause_minutes" {
 
 variable "sql_alert_email_addresses" {
   type        = list(string)
-  description = "Email addresses notified by the SQL CPU/memory/storage metric alerts (>80%) via the ag-sql-* action group. deploy.ps1 defaults this to your signed-in az account's UPN; override with a shared DL if you want the whole team notified. Leave empty to create the alerts with no notification target."
-  default     = []
+  description = "Email addresses notified by the SQL CPU/memory/storage metric alerts (>80%) via the ag-sql-* action group. Required (non-empty) — deploy.ps1 defaults this to your signed-in az account's email and won't let you skip it; override with a shared DL if you want the whole team notified instead."
+
+  validation {
+    condition     = length(var.sql_alert_email_addresses) > 0
+    error_message = "sql_alert_email_addresses must contain at least one email address — the SQL CPU/memory/storage alerts need a notification target."
+  }
 }
 
 # ── GitHub / app behaviour ────────────────────────────────────

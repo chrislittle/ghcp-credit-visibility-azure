@@ -58,6 +58,10 @@ use_private_networking = true
 sql_admin_group_name = "SG-GHCP-SQL-Admins"
 sql_admin_object_id  = "<entra-group-or-user-object-id>"
 
+# Required: who gets notified when SQL CPU/memory/storage exceeds 80% (deploy.ps1 defaults
+# this to your signed-in email — override with a shared DL if the whole team should get it).
+sql_alert_email_addresses = ["you@example.com"]
+
 # App behaviour
 use_mock_data        = true          # no PAT / GitHub Copilot needed while true
 retention_months     = 6             # >= 3
