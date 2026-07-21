@@ -86,13 +86,28 @@ function Invoke-OrEcho($cmd) {
   return $out
 }
 function Ask([string]$p, [string]$d) { $s = if ($d) { " [$d]" } else { "" }; $a = Read-Host "  $p$s"; if ([string]::IsNullOrWhiteSpace($a)) { $d } else { $a.Trim() } }
-function AskYesNo([string]$p, [bool]$d) { if ($Yes) { return $d }; $h = if ($d) { 'Y/n' } else { 'y/N' }; $a = Read-Host "  $p [$h]"; if ([string]::IsNullOrWhiteSpace($a)) { $d } else { $a -match '^[Yy]' } }
+function AskYesNo([string]$p, [bool]$d) {
+  if ($Yes) { return $d }
+  $h = if ($d) { 'Y/n' } else { 'y/N' }
+  while ($true) {
+    $a = Read-Host "  $p [$h]"
+    if ([string]::IsNullOrWhiteSpace($a)) { return $d }
+    if ($a -match '^[Yy]([Ee][Ss])?$') { return $true }
+    if ($a -match '^[Nn][Oo]?$') { return $false }
+    Write-Warn "Please answer y or n (or press Enter for the default: $(if ($d) {'y'} else {'n'}))."
+  }
+}
 function AskChoice([string]$p, [string[]]$opts, [int]$d = 1) {
   Write-Host "  $p" -ForegroundColor White
   for ($i = 0; $i -lt $opts.Count; $i++) { Write-Host ("     {0}) {1}" -f ($i + 1), $opts[$i]) -ForegroundColor Gray }
   if ($Yes) { return $d }
-  $a = Read-Host "  choose 1-$($opts.Count) [$d]"; if ([string]::IsNullOrWhiteSpace($a)) { return $d }
-  $n = 0; if ([int]::TryParse($a, [ref]$n) -and $n -ge 1 -and $n -le $opts.Count) { $n } else { $d }
+  while ($true) {
+    $a = Read-Host "  choose 1-$($opts.Count) [$d]"
+    if ([string]::IsNullOrWhiteSpace($a)) { return $d }
+    $n = 0
+    if ([int]::TryParse($a, [ref]$n) -and $n -ge 1 -and $n -le $opts.Count) { return $n }
+    Write-Warn "Please enter a number between 1 and $($opts.Count) (or press Enter for the default: $d)."
+  }
 }
 function Get-TfOutput([string]$n) { try { $v = (terraform -chdir="$infra" output -raw $n 2>$null); if ($LASTEXITCODE -eq 0 -and $v) { return $v.Trim() } } catch {}; return $null }
 
@@ -431,7 +446,7 @@ function Phase-Prereqs {
   foreach ($t in 'az', 'terraform') { if (-not (Get-Command $t -ErrorAction SilentlyContinue)) { throw "$t not found on PATH." }; Write-Ok "$t present" }
   if (-not (Test-Path (Join-Path $appDir 'Dockerfile'))) { throw "App/Dockerfile not found at $appDir" }
   Ensure-Az
-  if (-not $DryRun -and -not $Yes) { if ((Read-Host "  Proceed against THIS subscription? (y/N)") -ne 'y') { throw 'Aborted by user.' } }
+  if (-not $DryRun -and -not $Yes) { if (-not (AskYesNo 'Proceed against THIS subscription?' $false)) { throw 'Aborted by user.' } }
 }
 
 # ── PHASE: preflight (capacity/region) — self-contained ──────────
