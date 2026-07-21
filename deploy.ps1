@@ -627,7 +627,7 @@ function Phase-Configure {
         'system_assigned          — CUSTOMER/PROD: external Entra SQL admin + one-time grant') 1) - 1]
 
   Write-Info 'Note: public mode may be blocked by Azure Policy in governed/enterprise tenants (a Deny-effect policy disallowing public network access is common in landing zones) — if this is a managed corporate subscription, private mode is usually safer.'
-  $private = AskYesNo 'Private networking (VNet + private endpoints)? No = public (browsable)' $false
+  $private = AskYesNo 'Use private networking — VNet + private endpoints, not reachable from the public internet? No = public (simpler, browsable straight from your laptop)' $false
   $createZones = $false
   $customNetwork = $false
   $vnetSpace = ''; $subnetPe = ''; $subnetApp = ''
