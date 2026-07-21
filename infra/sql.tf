@@ -56,7 +56,117 @@ resource "azurerm_mssql_database" "db" {
   auto_pause_delay_in_minutes = var.sql_auto_pause_minutes
   min_capacity                = 0.5
 
+  # Explicit geo-redundant backup storage (GRS) — this is already Azure's default for new
+  # databases, but we pin it in code so it's an intentional, reviewable choice rather than an
+  # implicit platform default. Applies to both PITR (short-term, 7-day default — unchanged)
+  # and would apply to LTR backups if that were ever enabled (it isn't here).
+  storage_account_type = "Geo"
+
   tags = var.tags
+}
+
+# ── Monitoring & alerting: CPU / memory / storage pressure ────────
+# Notifies when the database is approaching the limits of its current tier, so you know to
+# scale up (CPU/memory) or increase max_size_gb (storage) before it becomes an outage.
+resource "azurerm_monitor_action_group" "sql_alerts" {
+  name                = "ag-sql-${local.base}"
+  resource_group_name = azurerm_resource_group.rg.name
+  short_name          = "sqlalert"
+  tags                = var.tags
+
+  dynamic "email_receiver" {
+    for_each = var.sql_alert_email_addresses
+    content {
+      name                    = "email-${index(var.sql_alert_email_addresses, email_receiver.value)}"
+      email_address           = email_receiver.value
+      use_common_alert_schema = true
+    }
+  }
+}
+
+# Stream SQL DB resource logs/metrics to the existing Log Analytics workspace (same pattern
+# as the App Service diagnostic setting) — enables KQL queries, SQLInsights, and history
+# beyond the Azure Monitor metrics retention used by the alerts above.
+resource "azurerm_monitor_diagnostic_setting" "sql_db" {
+  name                       = "diag-sql-db"
+  target_resource_id         = azurerm_mssql_database.db.id
+  log_analytics_workspace_id = azurerm_log_analytics_workspace.law.id
+
+  enabled_log {
+    category_group = "allLogs"
+  }
+  enabled_metric {
+    category = "Basic"
+  }
+}
+
+resource "azurerm_monitor_metric_alert" "sql_cpu" {
+  name                = "alert-sql-cpu-${local.base}"
+  resource_group_name = azurerm_resource_group.rg.name
+  scopes              = [azurerm_mssql_database.db.id]
+  description         = "Azure SQL Database CPU usage is above 80% — consider scaling up the SKU or optimizing queries."
+  severity            = 2
+  frequency           = "PT5M"
+  window_size         = "PT15M"
+  tags                = var.tags
+
+  criteria {
+    metric_namespace = "Microsoft.Sql/servers/databases"
+    metric_name      = "cpu_percent"
+    aggregation      = "Average"
+    operator         = "GreaterThan"
+    threshold        = 80
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.sql_alerts.id
+  }
+}
+
+resource "azurerm_monitor_metric_alert" "sql_memory" {
+  name                = "alert-sql-memory-${local.base}"
+  resource_group_name = azurerm_resource_group.rg.name
+  scopes              = [azurerm_mssql_database.db.id]
+  description         = "Azure SQL Database memory usage is above 80% — consider scaling up the SKU."
+  severity            = 2
+  frequency           = "PT5M"
+  window_size         = "PT15M"
+  tags                = var.tags
+
+  criteria {
+    metric_namespace = "Microsoft.Sql/servers/databases"
+    metric_name      = "sql_instance_memory_percent"
+    aggregation      = "Average"
+    operator         = "GreaterThan"
+    threshold        = 80
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.sql_alerts.id
+  }
+}
+
+resource "azurerm_monitor_metric_alert" "sql_storage" {
+  name                = "alert-sql-storage-${local.base}"
+  resource_group_name = azurerm_resource_group.rg.name
+  scopes              = [azurerm_mssql_database.db.id]
+  description         = "Azure SQL Database storage usage is above 80% of max_size_gb — increase max_size_gb or clean up data before it fills up."
+  severity            = 1
+  frequency           = "PT15M"
+  window_size         = "PT1H"
+  tags                = var.tags
+
+  criteria {
+    metric_namespace = "Microsoft.Sql/servers/databases"
+    metric_name      = "storage_percent"
+    aggregation      = "Average"
+    operator         = "GreaterThan"
+    threshold        = 80
+  }
+
+  action {
+    action_group_id = azurerm_monitor_action_group.sql_alerts.id
+  }
 }
 
 # PUBLIC pattern: allow Azure services (App Service outbound) to reach SQL.

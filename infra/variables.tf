@@ -306,6 +306,12 @@ variable "sql_auto_pause_minutes" {
   default     = -1
 }
 
+variable "sql_alert_email_addresses" {
+  type        = list(string)
+  description = "Email addresses notified by the SQL CPU/memory/storage metric alerts (>80%) via the ag-sql-* action group. deploy.ps1 defaults this to your signed-in az account's UPN; override with a shared DL if you want the whole team notified. Leave empty to create the alerts with no notification target."
+  default     = []
+}
+
 # ── GitHub / app behaviour ────────────────────────────────────
 variable "github_enterprise_slug" {
   type        = string
