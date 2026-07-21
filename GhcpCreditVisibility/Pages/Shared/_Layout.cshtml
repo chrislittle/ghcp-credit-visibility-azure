@@ -12,9 +12,9 @@
     // claim ("name", or its long ClaimTypes.Name form) over Identity.Name — Easy Auth's
     // name_typ can point at a different claim type than the one actually populated with the
     // display name (same class of mismatch already worked around for role_typ below), so
-    // Identity.Name often resolves to the UPN/email instead (e.g. "chris@tenant.onmicrosoft.com"),
-    // which produced wrong initials like "CC" (first letter of the name + first letter of the
-    // tenant domain) instead of "CL" for "Chris Little".
+    // Identity.Name often resolves to the UPN/email instead (e.g. "user@tenant.onmicrosoft.com"),
+    // which produced wrong initials (first letter of the mailbox name + first letter of the
+    // tenant domain) instead of the actual first/last name initials.
     var who = User?.FindFirst("name")?.Value
         ?? User?.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value
         ?? User?.Identity?.Name
