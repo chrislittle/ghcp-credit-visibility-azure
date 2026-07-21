@@ -8,8 +8,17 @@
     var isAdmin = User?.Identity?.IsAuthenticated == true && await AdminChecker.IsAdminAsync(User);
     var currentPage = (ViewContext.RouteData.Values["page"] as string) ?? "";
     string Active(string page) => currentPage.Equals(page, StringComparison.OrdinalIgnoreCase) ? "active" : "";
-    // Avatar initials from the signed-in identity.
-    var who = User?.Identity?.Name ?? "";
+    // Avatar initials + greeting from the signed-in identity. Prefer the actual display-name
+    // claim ("name", or its long ClaimTypes.Name form) over Identity.Name — Easy Auth's
+    // name_typ can point at a different claim type than the one actually populated with the
+    // display name (same class of mismatch already worked around for role_typ below), so
+    // Identity.Name often resolves to the UPN/email instead (e.g. "chris@tenant.onmicrosoft.com"),
+    // which produced wrong initials like "CC" (first letter of the name + first letter of the
+    // tenant domain) instead of "CL" for "Chris Little".
+    var who = User?.FindFirst("name")?.Value
+        ?? User?.FindFirst(System.Security.Claims.ClaimTypes.Name)?.Value
+        ?? User?.Identity?.Name
+        ?? "";
     var parts = who.Split(new[] { ' ', '@', '.' }, StringSplitOptions.RemoveEmptyEntries);
     var initials = parts.Length switch
     {
