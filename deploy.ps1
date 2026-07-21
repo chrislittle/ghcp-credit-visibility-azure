@@ -813,7 +813,7 @@ function Phase-Image {
 
 # ── PHASE: grant SQL access (system_assigned) ────────────────────
 function Phase-GrantSql {
-  Write-Step 5 'Grant the app identity access to SQL (for EF migrations)'
+  Write-Step 5 'Grant the app permission to create/update its own database tables in SQL'
   $grantHint = Get-TfOutput 'post_deploy_sql_grant'
   if ($grantHint -and $grantHint -match 'Not required') { Write-Ok 'Self-admin mode — no grant required (app applies migrations itself).'; return }
   $server = Get-TfOutput 'sql_server_fqdn'; $db = Get-TfOutput 'sql_database_name'; $app = Get-TfOutput 'web_app_name'
