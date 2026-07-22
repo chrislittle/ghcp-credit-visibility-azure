@@ -1,4 +1,4 @@
-# ── Azure SQL: Entra-only auth, serverless ───────────────────────
+# ── Azure SQL: Entra-only auth, serverless or provisioned (choose via sql_database_sku) ──
 resource "azurerm_mssql_server" "sql" {
   name                          = "sql-${local.base}"
   resource_group_name           = azurerm_resource_group.rg.name
@@ -45,6 +45,14 @@ resource "time_sleep" "sql_server_ready" {
   create_duration = "30s"
 }
 
+locals {
+  # Serverless SKUs are named e.g. "GP_S_Gen5_1" (the "_S_" marks the serverless compute tier).
+  # Provisioned SKUs (e.g. "GP_Gen5_2", "BC_Gen5_4") have no "_S_" segment. auto_pause_delay_in_minutes
+  # and min_capacity are serverless-only attributes — the provider rejects them on a provisioned SKU,
+  # so they must be null (not just -1/omitted) when sql_database_sku is provisioned.
+  sql_is_serverless = can(regex("_S_", var.sql_database_sku))
+}
+
 resource "azurerm_mssql_database" "db" {
   name        = "ghcpvisibility"
   server_id   = azurerm_mssql_server.sql.id
@@ -52,9 +60,12 @@ resource "azurerm_mssql_database" "db" {
   collation   = "SQL_Latin1_General_CP1_CI_AS"
   max_size_gb = 2
 
-  # Serverless auto-pause (GP_S_* SKUs). -1 = never pause (always warm).
-  auto_pause_delay_in_minutes = var.sql_auto_pause_minutes
-  min_capacity                = 0.5
+  # Serverless auto-pause + min vCore (GP_S_* SKUs only — null for provisioned SKUs, where the
+  # provider doesn't accept these fields). Auto-pause defaults to on (see sql_auto_pause_minutes)
+  # since a serverless DB that never pauses is billed ~3.4x the per-vCore-hour rate of an
+  # equivalent provisioned tier with none of the pause-to-save-cost benefit.
+  auto_pause_delay_in_minutes = local.sql_is_serverless ? var.sql_auto_pause_minutes : null
+  min_capacity                = local.sql_is_serverless ? var.sql_min_capacity : null
 
   # Explicit geo-redundant backup storage (GRS) — this is already Azure's default for new
   # databases, but we pin it in code so it's an intentional, reviewable choice rather than an

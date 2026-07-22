@@ -631,7 +631,20 @@ function Phase-Configure {
   $appSku = Ask 'App Service Plan SKU (e.g. S1, P1v3, P1mv3, P1v4 — check ./deploy.ps1 -Task preflight for quota first)' $skuDefault
 
   $sqlSkuDefault = if ($SqlSku) { $SqlSku } else { (Get-TfVar 'sql_database_sku') }; if (-not $sqlSkuDefault) { $sqlSkuDefault = 'GP_S_Gen5_1' }
-  $sqlDbSku = Ask 'Azure SQL DB SKU (e.g. GP_S_Gen5_1 serverless, GP_Gen5_2 provisioned)' $sqlSkuDefault
+  $sqlModeDefault = if ($sqlSkuDefault -match '_S_') { 1 } else { 2 }
+  Write-Info 'Serverless auto-scales/auto-pauses but is billed ~3.4x the per-vCore-hour rate of provisioned (eastus2) — cheaper only if the DB sits idle a meaningful fraction of the time. If it runs 24x7, provisioned is cheaper.'
+  $sqlMode = AskChoice 'Azure SQL compute model' @(
+    'Serverless — auto-scales + auto-pauses when idle (good for dev/test/bursty use)',
+    'Provisioned — fixed vCores, always on, no pause (cheaper for steady 24x7 workloads)') $sqlModeDefault
+  $sqlAutoPause = 60
+  if ($sqlMode -eq 1) {
+    $sqlDbSku = Ask 'Azure SQL DB serverless SKU (e.g. GP_S_Gen5_1, GP_S_Gen5_2)' $(if ($sqlSkuDefault -match '_S_') { $sqlSkuDefault } else { 'GP_S_Gen5_1' })
+    $autoPauseDefault = if ($sqlSkuDefault -match '_S_') { (Get-TfVar 'sql_auto_pause_minutes') } else { '' }; if (-not $autoPauseDefault) { $autoPauseDefault = '60' }
+    $sqlAutoPause = [int](Ask 'Auto-pause after idle minutes (60/90/120/240/360/720/1440, or -1 to disable/always-warm)' $autoPauseDefault)
+  }
+  else {
+    $sqlDbSku = Ask 'Azure SQL DB provisioned SKU (e.g. GP_Gen5_2, BC_Gen5_2)' $(if ($sqlSkuDefault -notmatch '_S_') { $sqlSkuDefault } else { 'GP_Gen5_2' })
+  }
 
   $alertEmailDefault = Get-DisplayEmail $script:Me
   $alertEmail = Ask 'Email address (or distribution list) to notify when SQL CPU/memory/storage exceeds 80% — press Enter to use your signed-in email' $alertEmailDefault
@@ -710,6 +723,7 @@ function Phase-Configure {
   $lines.Add("name_prefix               = `"$prefix`"")
   $lines.Add("app_service_sku           = `"$appSku`"")
   $lines.Add("sql_database_sku          = `"$sqlDbSku`"")
+  if ($sqlMode -eq 1) { $lines.Add("sql_auto_pause_minutes    = $sqlAutoPause") }
   $lines.Add("sql_alert_email_addresses = [`"$alertEmail`"]")
   $lines.Add("identity_mode             = `"$identityMode`"")
   $lines.Add("use_private_networking    = $($private.ToString().ToLower())")

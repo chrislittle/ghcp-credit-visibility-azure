@@ -239,7 +239,7 @@ deploy.ps1                One guided script: preflight -> configure -> apply -> 
 - App Service defaults to **Standard (S1)** with autoscale (1→3 instances); Premium isn't
   required for private endpoints. Azure Container Apps is a cheaper alternative (the app is
   already containerized) if you don't need App Service specifically.
-- Azure SQL defaults to **serverless**, but with **auto-pause disabled by default** (always-warm, to avoid resume latency) — set `sql_auto_pause_minutes` to a positive value if you want it to pause after idle time to save cost in dev/test.
+- Azure SQL supports **serverless or provisioned** — choose via `sql_database_sku` (`deploy.ps1` asks explicitly). Serverless defaults to **auto-pause on** (`sql_auto_pause_minutes = 60`) and is billed ~3.4x the per-vCore-hour rate of provisioned, so it's only cheaper if idle a meaningful fraction of the time. **If the DB runs 24x7, use a provisioned SKU** (e.g. `GP_Gen5_2`) instead — cheaper and predictable for always-on workloads.
 - The optional jump box + Bastion adds meaningful ongoing cost (an always-on VM + Bastion's
   hourly charge) — turn it off (`enable_jumpbox = false`) once you're done testing the private
   network path.

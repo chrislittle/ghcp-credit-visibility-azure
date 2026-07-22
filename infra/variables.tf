@@ -296,14 +296,35 @@ variable "sql_admin_object_id" {
 
 variable "sql_database_sku" {
   type        = string
-  description = "Azure SQL DB SKU. GP_S_Gen5_1 = serverless (cheapest for a POC) — NOTE: auto-pause is OFF by default (see sql_auto_pause_minutes, default -1); opt in to a positive sql_auto_pause_minutes if you want it to pause after idle time. For guaranteed always-warm production latency, use a provisioned tier instead (e.g., GP_Gen5_2)."
+  description = <<-EOT
+    Azure SQL DB SKU — this choice decides serverless vs provisioned:
+      - Serverless (SKU contains "_S_", e.g. "GP_S_Gen5_1"): auto-scales vCores between
+        sql_min_capacity and the SKU's max, and auto-pauses after sql_auto_pause_minutes idle
+        (default: on). Priced per-vCore-second (~3.4x the provisioned per-vCore-hour rate in
+        eastus2), so it's only cheaper than provisioned if the DB is idle a meaningful fraction
+        of the time. If it will run 24x7, use a provisioned SKU instead.
+      - Provisioned (no "_S_", e.g. "GP_Gen5_2"): fixed vCore count, always on, no pause. Cheaper
+        per-vCore-hour and predictable — the right choice for steady, always-on workloads.
+    Default here is serverless (cheapest entry point for a POC that isn't running constantly).
+  EOT
   default     = "GP_S_Gen5_1"
+}
+
+variable "sql_min_capacity" {
+  type        = number
+  description = "Serverless minimum vCores (floor it auto-scales down to when active, before auto-pause kicks in). Only applies to serverless SKUs (sql_database_sku containing \"_S_\") — ignored (forced null) for provisioned SKUs."
+  default     = 0.5
 }
 
 variable "sql_auto_pause_minutes" {
   type        = number
-  description = "Serverless auto-pause delay in minutes. -1 disables auto-pause (always warm — production default). Positive values pause after idle to save cost (adds first-hit resume latency). Only applies to GP_S_* serverless SKUs."
-  default     = -1
+  description = "Serverless auto-pause delay in minutes — pauses compute (billed only for storage) after this many idle minutes. Only applies to serverless SKUs (sql_database_sku containing \"_S_\"); ignored (forced null) for provisioned SKUs. Default 60 = Azure's standard auto-pause delay. Set -1 to disable auto-pause (always-warm, no resume latency, but then serverless is billed for the same 24x7 uptime as provisioned at ~3.4x the per-vCore-hour rate — use a provisioned SKU instead for always-on workloads)."
+  default     = 60
+
+  validation {
+    condition     = var.sql_auto_pause_minutes == -1 || contains([60, 90, 120, 240, 360, 720, 1440], var.sql_auto_pause_minutes)
+    error_message = "sql_auto_pause_minutes must be -1 (disabled) or one of the Azure-supported values: 60, 90, 120, 240, 360, 720, 1440."
+  }
 }
 
 variable "sql_alert_email_addresses" {
