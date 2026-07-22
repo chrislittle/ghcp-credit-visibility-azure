@@ -990,8 +990,18 @@ function Get-Code([string]$Path) {
   try { (Invoke-WebRequest -Uri "$BaseUrl$Path" -UseBasicParsing -TimeoutSec 20).StatusCode }
   catch { if ($_.Exception.Response) { $_.Exception.Response.StatusCode.value__ } else { "no-response" } }
 }
+# /health/ready can take up to a couple of minutes to come up on the very first hit after a
+# deploy (cold-start DB connection/pool warm-up). Retry here (inside the single jumpbox
+# run-command invocation) rather than reporting a false failure back to Phase-Status.
+# Worst case: 8 * 20s timeout + 7 * 5s sleeps = ~195s (~3.3 min) of headroom.
+$readyCode = 'no-response'
+for ($i = 1; $i -le 8; $i++) {
+  $readyCode = Get-Code '/health/ready'
+  if ($readyCode -eq 200) { break }
+  Start-Sleep -Seconds 5
+}
 Write-Output "HEALTH_LIVE=$(Get-Code '/health/live')"
-Write-Output "HEALTH_READY=$(Get-Code '/health/ready')"
+Write-Output "HEALTH_READY=$readyCode"
 Write-Output "HEALTH_CHECK_DONE"
 '@
   $out = Invoke-JumpboxRunCommand -ResourceGroup $ResourceGroup -VmName $VmName -NamePrefix 'health-check' -ScriptBody $script `
@@ -1051,11 +1061,30 @@ function Phase-Status {
 
   $hint = if ($isPrivate) { '503 = still warming up: grant/migrations' } else { '503 = still warming up: grant/migrations (not DNS — this is the PUBLIC pattern)' }
   foreach ($p in '/health/live', '/health/ready') {
-    try { $r = Invoke-WebRequest "$url$p" -UseBasicParsing -TimeoutSec 20; Write-Ok "$p → $($r.StatusCode)" }
-    catch {
-      $code = $_.Exception.Response.StatusCode.value__
-      if ($code) { Write-Warn "$p → $code ($hint)" }
-      else { Write-Warn "$p → no response ($($_.Exception.Message))" }
+    # /health/ready can take up to a couple of minutes to come up on the very first hit after a
+    # deploy (cold-start DB connection/pool warm-up), which otherwise gets misreported as a
+    # failure. Retry with a short backoff before giving up — worst case here is 8 * 20s timeout +
+    # 7 * 5s sleeps = ~195s (~3.3 min) of headroom. /health/live is expected to be instant, so it
+    # stays single-shot.
+    $maxAttempts = if ($p -eq '/health/ready') { 8 } else { 1 }
+    $delaySec = 5
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+      try {
+        $r = Invoke-WebRequest "$url$p" -UseBasicParsing -TimeoutSec 20
+        Write-Ok "$p → $($r.StatusCode)$(if ($attempt -gt 1) { " (after $attempt attempts)" })"
+        break
+      }
+      catch {
+        $code = $_.Exception.Response.StatusCode.value__
+        $isLast = ($attempt -eq $maxAttempts)
+        if (-not $isLast) {
+          Write-Info "$p → $(if ($code) { $code } else { 'no response' }) (attempt $attempt/$maxAttempts, retrying in ${delaySec}s — likely still warming up)"
+          Start-Sleep -Seconds $delaySec
+          continue
+        }
+        if ($code) { Write-Warn "$p → $code ($hint)" }
+        else { Write-Warn "$p → no response ($($_.Exception.Message))" }
+      }
     }
   }
 }
