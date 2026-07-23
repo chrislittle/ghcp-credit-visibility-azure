@@ -27,6 +27,7 @@ Entra-group-based access, deployed privately in **your own** Azure subscription.
 - [Going live with real GitHub data](#going-live-against-real-github-data)
 - [Repository layout](#repository-layout)
 - [Cost notes](#cost-notes)
+- [Security](#security)
 - [Contributing](#contributing)
 
 ## What this app does
@@ -245,6 +246,56 @@ deploy.ps1                One guided script: preflight -> configure -> apply -> 
   network path.
 - Always validate exact figures for your subscription/region in the Azure Pricing Calculator.
   Full breakdown: [infra/README.md](infra/README.md#cost-notes).
+
+## Security
+
+This repository is reviewed with Claude Security, an AI-assisted code security scanner, in
+addition to ordinary code review. To report a vulnerability, see [SECURITY.md](SECURITY.md) —
+please don't open a public issue.
+
+**Most recent review:** 2026-07-23 — whole-repository scan at medium effort against commit
+`a5ce586`. Five findings were reported (four medium, one low); all five are fixed as of
+`bdceb2a`, and each fix was verified against the running application rather than by
+inspection alone.
+
+| Finding | Area | Severity |
+|---|---|---|
+| Stored XSS in the admin console's confirmation prompts | Web app | Medium |
+| Deployment could run with platform authentication disabled while still trusting the platform identity header | App + Terraform | Medium |
+| `terraform.tfvars` backup written inside the repository, outside the ignore rules | Deploy script | Medium |
+| Unvalidated third-party IP-lookup response written to an auto-loaded Terraform variables file | Deploy script + Terraform | Medium |
+| GitHub PAT passed as a command-line argument | Deploy script | Low |
+
+### Scope and limits
+
+This is an automated review, not a security audit or certification. It reasons about source
+code; it does not execute the application or validate exploits, and it does not replace SAST,
+dependency scanning, or human review. Vendored front-end libraries under
+`GhcpCreditVisibility/wwwroot/lib` (Bootstrap, jQuery) are **outside its scope** — use a
+dependency scanner for known CVEs in those. Results are point-in-time and the analysis is
+nondeterministic: a clean run means nothing was found, not that nothing exists.
+
+### If you deployed an earlier version with `enable_easy_auth = false`
+
+Versions before `bdceb2a` deployed the web app with no platform authentication when
+`enable_easy_auth` was set to `false`, while the container still derived user identity —
+including the `Admin` role — from a request header that the platform authentication module
+would normally have stripped. **Any caller able to reach the site could therefore obtain
+administrator access without signing in**, which on an internet-facing deployment
+(`use_private_networking = false`) means anyone on the internet.
+
+If that describes your deployment:
+
+1. Redeploy from the current version. It emits an `Auth__EasyAuthEnabled` app setting, and the
+   application now refuses to serve requests when platform authentication is absent rather
+   than trusting the header.
+2. Review your application and App Service access logs for unexpected requests to
+   `/Admin/Mappings`.
+3. Check the admin principals and cost-center mappings in your database for entries you did
+   not create.
+
+Deployments using the default `enable_easy_auth = true` were not affected: the platform
+authentication module strips inbound copies of that header before they reach the container.
 
 ## Contributing
 
