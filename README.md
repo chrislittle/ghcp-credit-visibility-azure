@@ -227,6 +227,7 @@ GhcpCreditVisibility/     .NET 10 Razor Pages app (the dashboard itself)
   Services/               GitHub client (mock + real), snapshot job, admin mapping service, ...
   Authorization/          Easy Auth claims hydration, admin check, user-scope resolver
   Data/                   EF Core DbContext + entities (UsageSnapshot, mappings, budgets, ...)
+GhcpCreditVisibility.Tests/  xUnit tests (retention-purge cutoff and purge behaviour)
 infra/                    Terraform for the full Azure deployment (see infra/README.md)
 docs/
   RUN_LOCALLY.md          Full novice walkthrough — bash + PowerShell
@@ -301,5 +302,6 @@ authentication module strips inbound copies of that header before they reach the
 
 Issues and pull requests are welcome. Please keep secrets out of commits and Terraform state
 (see [infra/README.md](infra/README.md) for the Key Vault/managed-identity model this project
-relies on), and run `dotnet build` / `terraform validate` before submitting changes.
+relies on), and run `dotnet build`, `dotnet test`, and `terraform validate` before submitting
+changes.
 

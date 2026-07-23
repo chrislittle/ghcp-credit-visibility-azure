@@ -1138,12 +1138,16 @@ trap {
   break
 }
 
-# Standalone tasks (other than 'configure'/'provision', which set the region themselves)
-# operate on ALREADY-provisioned infra — always sync $Location from the existing
-# terraform.tfvars first so we never pass a stale/default -var "location=..." that could
-# force Terraform to replace resources into the wrong region. (The 'all' path below did
-# this already; standalone -Task image/grant-sql/set-pat/status did not — bug fix.)
-if ($Task -in @('image', 'grant-sql', 'set-pat', 'status')) {
+# Tasks that operate on ALREADY-provisioned infra sync $Location from the existing
+# terraform.tfvars first, so we never pass a stale/default -var "location=..." that could
+# force Terraform to REPLACE the resource group (and everything in it) into the wrong region.
+# 'configure' sets the region itself (interactively); 'all' syncs it below after Phase-Configure;
+# every other task must sync here. 'provision' is included: Phase-Provision requires an existing
+# terraform.tfvars, so tfvars — not the -Location parameter default (eastus2) — is the source of
+# truth for its region. (Standalone -Task provision/image/grant-sql/set-pat/status previously did
+# not sync, so `deploy.ps1 -Task provision` on a non-default region planned a destroy/recreate into
+# eastus2 — bug fix.)
+if ($Task -in @('provision', 'image', 'grant-sql', 'set-pat', 'status')) {
   $existingLoc = Get-TfVar 'location'
   if ($existingLoc) { $Location = $existingLoc }
 }

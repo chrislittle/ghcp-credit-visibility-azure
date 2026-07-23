@@ -28,10 +28,30 @@ namespace GhcpCreditVisibility.Services
             _logger = logger;
         }
 
+        /// <summary>
+        /// Floor on months of history kept, regardless of configuration. Reports and trends need at
+        /// least a quarter to mean anything, and purged rows are UNRECOVERABLE — GitHub's billing
+        /// API only serves the current month, so history exists nowhere else once deleted.
+        /// </summary>
+        public const int MinRetentionMonths = 3;
+
+        /// <summary>
+        /// Returns the first (Year, Month) that is KEPT; rows strictly older than it are purged.
+        /// Expressed as integers rather than a <see cref="DateTime"/> because the purge predicate
+        /// compares the Year/Month columns directly — building a DateTime from column values inside
+        /// the query is not translatable by the SQL Server provider.
+        /// </summary>
+        public static (int Year, int Month) ComputeRetentionCutoff(DateTime nowUtc, int retentionMonths)
+        {
+            var months = Math.Max(MinRetentionMonths, retentionMonths);
+            var cutoff = new DateTime(nowUtc.Year, nowUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-months);
+            return (cutoff.Year, cutoff.Month);
+        }
+
         public async Task RunAsync(CancellationToken ct = default)
         {
             var enterprise = _config["GitHub:Enterprise"] ?? "";
-            var retentionMonths = Math.Max(3, _config.GetValue("Retention:Months", 6));
+            var retentionMonths = _config.GetValue("Retention:Months", 6);
 
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
             var run = new SnapshotRun { StartedUtc = DateTime.UtcNow };
@@ -137,12 +157,27 @@ namespace GhcpCreditVisibility.Services
                 // constructing a DateTime from column values inside the query) is what SQL Server's
                 // EF Core provider can actually translate for ExecuteDelete — same class of bug as the
                 // BudgetSnapshots ExecuteDelete fix.
-                var cutoff = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-retentionMonths);
-                var cutoffYear = cutoff.Year;
-                var cutoffMonth = cutoff.Month;
-                var purged = await db.UsageSnapshots
-                    .Where(x => x.Year < cutoffYear || (x.Year == cutoffYear && x.Month < cutoffMonth))
-                    .ExecuteDeleteAsync(ct);
+                var (cutoffYear, cutoffMonth) = ComputeRetentionCutoff(now, retentionMonths);
+                var stale = db.UsageSnapshots
+                    .Where(x => x.Year < cutoffYear || (x.Year == cutoffYear && x.Month < cutoffMonth));
+
+                int purged;
+                if (db.Database.IsRelational())
+                {
+                    // Azure SQL: set-based delete in a single statement, no entities materialized.
+                    purged = await stale.ExecuteDeleteAsync(ct);
+                }
+                else
+                {
+                    // Local dev (in-memory provider) has no ExecuteDelete support — without this
+                    // fallback the whole snapshot run throws here, on its very last step, and the
+                    // job never completes locally. Volumes are tiny in dev, so load + RemoveRange
+                    // is fine.
+                    var staleRows = await stale.ToListAsync(ct);
+                    db.UsageSnapshots.RemoveRange(staleRows);
+                    await db.SaveChangesAsync(ct);
+                    purged = staleRows.Count;
+                }
 
                 run.RowsWritten = written;
                 run.RowsPurged = purged;
