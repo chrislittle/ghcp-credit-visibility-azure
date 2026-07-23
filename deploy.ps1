@@ -21,7 +21,7 @@
 .PARAMETER ImageTag   Image tag for the in-cloud build. Default: UTC timestamp.
 .PARAMETER DryRun     Print actions without changing anything.
 .PARAMETER Yes        Skip confirmation prompts (non-interactive where possible).
-.PARAMETER Force      Overwrite existing tfvars during configure (a .bak is kept).
+.PARAMETER Force      Overwrite existing tfvars during configure (a timestamped .bak is kept in your temp dir, outside the repo).
 .PARAMETER SkipPreflight / SkipImage   Skip those phases in an 'all' run.
 
 .EXAMPLE
@@ -284,6 +284,19 @@ function Get-MyPublicIp {
   $myIp = $null
   try { $myIp = (Invoke-RestMethod -Uri 'https://api.ipify.org?format=json' -TimeoutSec 10).ip } catch {}
   if (-not $myIp) { try { $myIp = (Invoke-RestMethod -Uri 'https://ifconfig.me/ip' -TimeoutSec 10).Trim() } catch {} }
+  # This is an unauthenticated third party's HTTP response, and Phase-GrantSql writes it into
+  # infra/adminip.auto.tfvars — which Terraform AUTO-LOADS on every plan/apply. A quote and a
+  # newline in the response would inject extra variable assignments (container_image,
+  # use_private_networking, ...) into the next deployment. Accept a bare IPv4 literal or nothing:
+  # both callers already handle $null.
+  if ($myIp) {
+    $myIp = "$myIp".Trim()
+    [System.Net.IPAddress]$parsed = $null
+    if (-not ($myIp -match '^\d{1,3}(\.\d{1,3}){3}$') -or -not [System.Net.IPAddress]::TryParse($myIp, [ref]$parsed)) {
+      Write-Warn 'Public-IP lookup returned an unexpected value — ignoring it.'
+      return $null
+    }
+  }
   return $myIp
 }
 
@@ -326,9 +339,22 @@ IF IS_ROLEMEMBER('db_ddladmin',  @app) = 0 EXEC('ALTER ROLE db_ddladmin  ADD MEM
 }
 
 function Invoke-PatSetDirect([string]$VaultName, [string]$PatValue) {
-  if ($DryRun) { Write-Host "  DRYRUN> az keyvault secret set --vault-name $VaultName --name github-pat --value <PAT>" -ForegroundColor DarkGray; return }
-  $errOutput = az keyvault secret set --vault-name $VaultName --name github-pat --value $PatValue --only-show-errors 2>&1 | Out-String
-  if ($LASTEXITCODE -ne 0) { throw "Failed to set the secret: $($errOutput.Trim())" }
+  if ($DryRun) { Write-Host "  DRYRUN> az keyvault secret set --vault-name $VaultName --name github-pat --file <temp file holding the PAT>" -ForegroundColor DarkGray; return }
+  # NOT --value: a process argument list is readable by any other local process and is captured
+  # wholesale by EDR/Sysmon command-line logging, which would defeat Read-PatSecurely reading it
+  # as a SecureString in the first place. --file keeps it out of argv; the temp copy is
+  # user-scoped and removed in the finally.
+  $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
+  try {
+    # utf8NoBOM and -NoNewline are both load-bearing: a BOM or a trailing newline would be
+    # stored as part of the secret and the GitHub API would reject the token.
+    Set-Content -Path $tmp -Value $PatValue -NoNewline -Encoding utf8NoBOM
+    $errOutput = az keyvault secret set --vault-name $VaultName --name github-pat --file $tmp --only-show-errors 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "Failed to set the secret: $($errOutput.Trim())" }
+  }
+  finally {
+    if (Test-Path $tmp) { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
+  }
   Write-Ok 'PAT stored in Key Vault. The app resolves it via its managed identity on the next snapshot.'
 }
 
@@ -754,7 +780,16 @@ function Phase-Configure {
   Write-Host ''; Write-Info 'Review terraform.tfvars:'; Write-Host $content -ForegroundColor DarkGray
   if (-not (AskYesNo 'Write this terraform.tfvars?' $true)) { throw 'Aborted — nothing written.' }
   if ($DryRun) { Write-Host "  DRYRUN> (would write $tfvars)" -ForegroundColor DarkGray; return }
-  if (Test-Path $tfvars) { Copy-Item $tfvars "$tfvars.bak" -Force; Write-Info 'Backed up → terraform.tfvars.bak' }
+  # Back up OUTSIDE the repo: tfvars carries the PAT / jumpbox password / tenant identifiers,
+  # and a ".bak" beside it is not matched by the "*.tfvars" ignore rule — one `git add -A` and
+  # those land in history for good. Timestamped so successive runs don't overwrite each other.
+  if (Test-Path $tfvars) {
+    $backupDir = Join-Path ([System.IO.Path]::GetTempPath()) 'ghcp-credit-visibility'
+    New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+    $backup = Join-Path $backupDir ("terraform.tfvars.{0}.bak" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+    Copy-Item $tfvars $backup -Force
+    Write-Info "Backed up → $backup"
+  }
   Set-Content -Path $tfvars -Value $content -NoNewline
   Write-Ok "Wrote $tfvars"
 }

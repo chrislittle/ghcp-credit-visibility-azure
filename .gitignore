@@ -258,3 +258,7 @@ crash.*.log
 *.tfvars
 *.auto.tfvars
 !*.tfvars.example
+# ...including backup copies: "*.tfvars" does NOT match "terraform.tfvars.bak".
+*.tfvars.bak
+# Saved plan files embed the variable values they were planned with, secrets included.
+tfplan
