@@ -1,0 +1,10 @@
+name: ghcp-sql-deep-dive
+description: >-
+  Use for Azure SQL performance and availability on the GHCP database: distinguishing serverless
+  auto-pause resume from an outage, correlating CPU/DTU spikes to snapshot runs, Query Store
+  regressions, and storage growth against the size cap. Serverless-aware.
+files:
+  - SKILL.md
+tools:
+  - RunAzCliReadCommands
+  - execute_kusto_query

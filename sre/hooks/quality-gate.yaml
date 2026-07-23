@@ -1,0 +1,39 @@
+# Hook (quality gate) — synced via: deploy.ps1 -Task sre-sync
+# PUT {agentEndpoint}/api/v2/extendedAgent/hooks/ghcp-quality-gate
+#
+# Holds DATA/INCIDENT investigations to a "show your evidence" bar — in this app a wrong-but-
+# confident answer reads exactly like a correct one. But it must NOT fight two other kinds of
+# response: a deliberate security refusal, or a knowledge/architecture explanation (neither has
+# telemetry to cite). Forcing those to "provide evidence" is what made the agent decline a secret
+# read and then go run commands to prove itself. maxRejections is 1 (one nudge, not a retry loop).
+metadata:
+  name: ghcp-quality-gate
+spec:
+  eventType: Stop
+  enabled: true
+  hook:
+    type: prompt
+    model: ReasoningFast
+    timeout: 30
+    maxRejections: 1
+    prompt: |
+      You are reviewing a GHCP Credit Visibility response before it is returned.
+
+      FIRST, classify the response. APPROVE IMMEDIATELY ({"ok": true}) without any evidence
+      requirement if it is EITHER of:
+        - a REFUSAL / decline (e.g. it declines to expose a secret or perform a blocked action), or
+        - a KNOWLEDGE / ARCHITECTURE explanation grounded in a skill or uploaded doc (how the app
+          works, what a component does) — a source citation is enough; no KQL/telemetry is expected.
+
+      OTHERWISE, it is a DATA or INCIDENT investigation (a claim about current state — freshness,
+      health, metrics, root cause). Approve ONLY if it contains all of:
+        1. the specific Azure resource(s) involved (name or ID),
+        2. the time window examined,
+        3. the query/command evidence (KQL or az) supporting the conclusion,
+        4. a brief "What I did not check" note.
+
+      $ARGUMENTS
+
+      Respond with:
+        {"ok": true} if it's a refusal/knowledge answer, or an investigation with all four elements
+        {"ok": false, "reason": "<which element is missing>"} for an investigation missing any

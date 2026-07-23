@@ -375,3 +375,76 @@ variable "retention_months" {
     error_message = "retention_months must be at least 3."
   }
 }
+
+# ── Azure SRE Agent (optional add-on) ─────────────────────────
+# An AI reliability agent (Microsoft.App/agents) scoped to this deployment's resource group.
+# Reads through ARM / Log Analytics / Application Insights (global control-plane endpoints), so it
+# can live in a DIFFERENT region from the app and still monitor it. Off by default; see
+# docs/SRE_AGENT.md. All resources here are gated on enable_sre_agent.
+variable "enable_sre_agent" {
+  type        = bool
+  description = "Deploy an Azure SRE Agent scoped to this deployment's resource group. Preview feature; incurs an always-on cost while it exists (see docs/SRE_AGENT.md)."
+  default     = false
+}
+
+variable "sre_agent_location" {
+  type        = string
+  description = "Region for the SRE Agent itself. Microsoft.App/agents is NOT available in every region (notably not Germany West Central), so this is separate from var.location. The agent monitors the app remotely regardless of where it runs — prefer an in-geo region for the agent's own conversation data."
+  default     = "swedencentral"
+
+  validation {
+    # Supported regions for Microsoft.App/agents as of 2026-07. Re-check with:
+    #   az provider show -n Microsoft.App --query "resourceTypes[?resourceType=='agents'].locations"
+    condition = contains([
+      "swedencentral", "uksouth", "eastus2", "australiaeast", "francecentral",
+      "canadacentral", "italynorth", "koreacentral", "southeastasia", "southafricanorth"
+    ], lower(replace(var.sre_agent_location, " ", "")))
+    error_message = "sre_agent_location must be a region where Microsoft.App/agents is available (e.g. swedencentral, francecentral, uksouth, italynorth, eastus2). Germany West Central is NOT supported."
+  }
+}
+
+variable "sre_agent_mode" {
+  type        = string
+  description = "Agent action mode: ReadOnly (diagnose only), Review (propose actions, wait for approval), or Autonomous (act without approval). Default Review. Never use Autonomous for anything that can touch SQL or Key Vault."
+  default     = "Review"
+
+  validation {
+    condition     = contains(["ReadOnly", "Review", "Autonomous"], var.sre_agent_mode)
+    error_message = "sre_agent_mode must be one of: ReadOnly, Review, Autonomous."
+  }
+}
+
+variable "sre_agent_access_level" {
+  type        = string
+  description = "RBAC tier granted to the agent's identity: Low (reader-tier + OBO elevation for writes) or High (contributor-tier). Default Low — keep the agent read-only and require human approval for any change."
+  default     = "Low"
+
+  validation {
+    condition     = contains(["Low", "High"], var.sre_agent_access_level)
+    error_message = "sre_agent_access_level must be one of: Low, High."
+  }
+}
+
+variable "sre_agent_model_provider" {
+  type        = string
+  description = "AI model provider for the agent (e.g. Anthropic, MicrosoftFoundry). Determines AAU billing rates."
+  default     = "Anthropic"
+}
+
+variable "sre_agent_model_name" {
+  type        = string
+  description = "AI model for the agent (e.g. claude-opus-4-5, claude-sonnet-4-5, gpt-5). Opus gives the deepest investigations; a cheaper model suits high-volume scheduled sweeps. Changeable in the portal anytime."
+  default     = "claude-opus-4-5"
+}
+
+variable "sre_agent_sponsor_group_id" {
+  type        = string
+  description = "OPTIONAL Entra security group object ID that administers the agent (authorizes on-behalf-of elevation). Leave empty for a strictly read-only agent with no OBO path — the recommended posture for this app. When set, the agentIdentity block is included."
+  default     = ""
+}
+
+variable "sre_agent_admin_object_id" {
+  type        = string
+  description = "OPTIONAL Entra object ID (user or group) to grant the 'SRE Agent Administrator' role on the agent — required to run deploy.ps1 -Task sre-sync (data-plane push of skills/agents/hooks). Defaults to the deploying principal (data.azurerm_client_config.current.object_id) when empty. Set this to a shared ops group if someone other than the deployer will manage the agent."
+  default     = ""
+}

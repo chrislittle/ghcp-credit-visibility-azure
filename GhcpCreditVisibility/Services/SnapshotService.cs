@@ -1,3 +1,4 @@
+using Microsoft.ApplicationInsights;
 using Microsoft.EntityFrameworkCore;
 using GhcpCreditVisibility.Data;
 
@@ -15,18 +16,25 @@ namespace GhcpCreditVisibility.Services
         private readonly IDbContextFactory<BillingDbContext> _dbFactory;
         private readonly IConfiguration _config;
         private readonly ILogger<SnapshotService> _logger;
+        private readonly TelemetryClient? _telemetry;
 
         public SnapshotService(
             IGitHubBillingClient client,
             IDbContextFactory<BillingDbContext> dbFactory,
             IConfiguration config,
-            ILogger<SnapshotService> logger)
+            ILogger<SnapshotService> logger,
+            TelemetryClient? telemetry = null)
         {
             _client = client;
             _dbFactory = dbFactory;
             _config = config;
             _logger = logger;
+            _telemetry = telemetry;
         }
+
+        /// <summary>App Service instance running this snapshot — lets the SnapshotRunCompleted event distinguish concurrent runs.</summary>
+        private static string InstanceId =>
+            Environment.GetEnvironmentVariable("WEBSITE_INSTANCE_ID") ?? "local";
 
         /// <summary>
         /// Floor on months of history kept, regardless of configuration. Reports and trends need at
@@ -185,6 +193,17 @@ namespace GhcpCreditVisibility.Services
                 run.CompletedUtc = DateTime.UtcNow;
                 await db.SaveChangesAsync(ct);
                 _logger.LogInformation("Snapshot complete: {Written} rows written, {Purged} purged.", written, purged);
+
+                // Point-in-time signal for the SRE agent / alert rules: which instance ran, how long
+                // it took, and what it wrote. Complements the periodic gauge in SreDiagnosticsPublisher.
+                _telemetry?.TrackEvent("SnapshotRunCompleted",
+                    new Dictionary<string, string> { ["status"] = "succeeded", ["instanceId"] = InstanceId },
+                    new Dictionary<string, double>
+                    {
+                        ["rowsWritten"] = written,
+                        ["rowsPurged"] = purged,
+                        ["durationMs"] = (run.CompletedUtc.Value - run.StartedUtc).TotalMilliseconds,
+                    });
             }
             catch (Exception ex)
             {
@@ -193,6 +212,13 @@ namespace GhcpCreditVisibility.Services
                 run.CompletedUtc = DateTime.UtcNow;
                 await db.SaveChangesAsync(CancellationToken.None);
                 _logger.LogError(ex, "Snapshot run failed.");
+
+                _telemetry?.TrackEvent("SnapshotFailed",
+                    new Dictionary<string, string> { ["error"] = ex.Message, ["instanceId"] = InstanceId },
+                    new Dictionary<string, double>
+                    {
+                        ["durationMs"] = (DateTime.UtcNow - run.StartedUtc).TotalMilliseconds,
+                    });
                 throw;
             }
         }

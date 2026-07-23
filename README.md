@@ -227,14 +227,31 @@ GhcpCreditVisibility/     .NET 10 Razor Pages app (the dashboard itself)
   Services/               GitHub client (mock + real), snapshot job, admin mapping service, ...
   Authorization/          Easy Auth claims hydration, admin check, user-scope resolver
   Data/                   EF Core DbContext + entities (UsageSnapshot, mappings, budgets, ...)
-GhcpCreditVisibility.Tests/  xUnit tests (retention-purge cutoff and purge behaviour)
+GhcpCreditVisibility.Tests/  xUnit tests (retention-purge + SRE diagnostics collector)
 infra/                    Terraform for the full Azure deployment (see infra/README.md)
+sre/                      Optional SRE Agent config — skills, custom agents, hooks (see sre/README.md)
 docs/
   RUN_LOCALLY.md          Full novice walkthrough — bash + PowerShell
   DEMO_DATA.md            Where the synthetic/demo data comes from
+  SRE_AGENT.md            Optional Azure SRE Agent integration
   images/                 Screenshots used in this README
 deploy.ps1                One guided script: preflight -> configure -> apply -> build image -> grant SQL -> set PAT -> health
 ```
+
+## Optional: Azure SRE Agent
+
+For deep, always-on troubleshooting of the app, its database, and supporting services, this repo can
+optionally provision an [Azure SRE Agent](https://learn.microsoft.com/azure/sre-agent/overview) — an
+AI reliability agent — scoped to the deployment. It's **off by default** (`enable_sre_agent = false`).
+
+The foundation is a small always-on **diagnostics layer** (`SreDiagnosticsPublisher` + `/health/diag`)
+that surfaces the failures unique to this app — a stalled snapshot job, data that's present but wrong,
+an unresolved Key Vault reference — as Application Insights metrics. Those are invisible to ordinary
+HTTP monitoring (the site returns 200 while serving stale or wrong numbers), and they ship whether or
+not you ever enable the agent. On top of that sit domain **skills**, **custom agents**, **hooks**
+(including a policy gate that blocks the agent from ever reading the GitHub PAT), and alert rules.
+
+Full walkthrough — architecture, what gets built, deploy steps, and cost: **[docs/SRE_AGENT.md](docs/SRE_AGENT.md)**.
 
 ## Cost notes
 

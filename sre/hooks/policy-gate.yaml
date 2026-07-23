@@ -1,0 +1,39 @@
+# Hook (policy gate) — synced via: deploy.ps1 -Task sre-sync
+# PUT {agentEndpoint}/api/v2/extendedAgent/hooks/ghcp-policy-gate
+# Body: { name, type: "GlobalHook", tags: [], properties: <spec> }
+#
+# Blocks the operations that would exfiltrate the GitHub PAT or mutate protected config, regardless
+# of run mode or how plausibly the agent justifies it. This is the security boundary that keeps the
+# agent from ever reading github-pat into a conversation thread.
+metadata:
+  name: ghcp-policy-gate
+spec:
+  eventType: PostToolUse
+  enabled: true
+  hook:
+    type: command
+    matcher: ^(RunAzCliReadCommands|RunAzCliWriteCommands|ExecuteShellCommand|Bash)$
+    failMode: block
+    timeout: 30
+    script: |
+      #!/usr/bin/env python3
+      import sys, json, re
+      ctx = json.load(sys.stdin)
+      cmd = json.dumps(ctx.get("tool_input", {}))
+      forbidden = [
+          r"keyvault\s+secret\s+(show|download|set|delete)",  # never surface/alter the PAT value
+          r"webapp\s+config\s+appsettings\s+set",             # no app-setting mutation
+          r"(sql|webapp|group)\s+delete",                     # no resource deletion
+          r"sql\s+server\s+ad-admin",                         # no SQL admin changes
+          r"role\s+assignment\s+(create|delete)",             # no RBAC changes
+      ]
+      for pattern in forbidden:
+          if re.search(pattern, cmd):
+              print(json.dumps({
+                  "decision": "block",
+                  "reason": f"Blocked by GHCP policy: '{pattern}'. This must be done by a human "
+                            f"operator, not the agent. The GitHub PAT in Key Vault is never to be "
+                            f"read into a conversation thread."
+              }))
+              sys.exit(0)
+      print(json.dumps({"decision": "allow"}))

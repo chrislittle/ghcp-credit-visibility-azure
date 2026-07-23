@@ -1,0 +1,9 @@
+name: ghcp-identity-and-auth
+description: >-
+  Use for GHCP authentication and identity failures: users can't sign in (Entra app client-secret
+  expiry), the Easy Auth / EasyAuthEnabled consistency check, and managed-identity RBAC grant
+  propagation for SQL, Key Vault, and ACR.
+files:
+  - SKILL.md
+tools:
+  - RunAzCliReadCommands

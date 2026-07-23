@@ -10,6 +10,12 @@ terraform {
       source  = "hashicorp/azuread"
       version = "~> 3.0"
     }
+    # Azure SRE Agent (Microsoft.App/agents) has no azurerm resource yet — provisioned via azapi.
+    # Only used when enable_sre_agent = true; the provider block below is inert otherwise.
+    azapi = {
+      source  = "Azure/azapi"
+      version = "~> 2.0"
+    }
     random = {
       source  = "hashicorp/random"
       version = "~> 3.6"
@@ -41,4 +47,9 @@ provider "azurerm" {
 
 provider "azuread" {
   # Uses the same `az login` context as azurerm (the subscription's tenant).
+}
+
+provider "azapi" {
+  # Uses the same `az login` context as azurerm.
+  subscription_id = var.subscription_id
 }

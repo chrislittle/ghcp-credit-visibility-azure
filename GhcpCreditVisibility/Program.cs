@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using GhcpCreditVisibility.Authorization;
 using GhcpCreditVisibility.Data;
 using GhcpCreditVisibility.Services;
@@ -30,6 +31,10 @@ builder.Services.AddDbContextFactory<BillingDbContext>(o =>
             errorNumbersToAdd: null)); // transparently handles serverless auto-resume transients (e.g., 40613)
     }
 });
+
+// Last-seen GitHub rate-limit state, shared between the HTTP client (writer) and the SRE
+// diagnostics collector (reader). Singleton so it survives across scoped snapshot runs.
+builder.Services.AddSingleton<GitHubRateLimitState>();
 
 // ── GitHub billing client: mock (no PAT/Copilot needed) or the resilient real client.
 var useMock = builder.Configuration.GetValue("GitHub:UseMock", true);
@@ -69,6 +74,30 @@ builder.Services.AddScoped<BudgetService>();
 builder.Services.AddScoped<IUserScopeResolver, DbGroupScopeResolver>();
 
 builder.Services.AddApplicationInsightsTelemetry();
+
+// Guarantee a resolvable TelemetryClient. AddApplicationInsightsTelemetry() registers one on
+// Windows/local, but on App Service Linux (.NET 10 + this SDK version) it was observed NOT to —
+// so the custom-metric publisher had nothing to resolve. TryAdd is a no-op when the SDK already
+// registered TelemetryClient; otherwise it builds one from the SDK's TelemetryConfiguration (or a
+// default configured from the connection string if that's missing too). This is what keeps the
+// Phase 0 SRE metrics flowing regardless of the host's AI-SDK quirks.
+builder.Services.TryAddSingleton(sp =>
+{
+    var cfg = sp.GetService<Microsoft.ApplicationInsights.Extensibility.TelemetryConfiguration>();
+    if (cfg is null)
+    {
+        cfg = Microsoft.ApplicationInsights.Extensibility.TelemetryConfiguration.CreateDefault();
+        var cs = sp.GetRequiredService<IConfiguration>()["APPLICATIONINSIGHTS_CONNECTION_STRING"];
+        if (!string.IsNullOrWhiteSpace(cs)) cfg.ConnectionString = cs;
+    }
+    return new Microsoft.ApplicationInsights.TelemetryClient(cfg);
+});
+
+// ── SRE observability: surface the failures that live only in the private DB (stalled snapshot,
+// wrong data, unresolved Key Vault reference) as App Insights metrics + a JSON endpoint, so an
+// out-of-network reliability agent or an Azure Monitor alert can see them. See docs/SRE_AGENT.md.
+builder.Services.AddScoped<SreDiagnosticsCollector>();
+builder.Services.AddHostedService<SreDiagnosticsPublisher>();
 
 // Health checks: liveness (process up) + readiness (DB reachable + schema applied). Readiness
 // reflects the private-DNS / SQL-grant / migration warm-up window.
@@ -210,6 +239,14 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
         await ctx.Response.WriteAsync(System.Text.Json.JsonSerializer.Serialize(payload));
     }
 }).AllowAnonymous();
+
+// Deep diagnostics for ops / the SRE agent: the same signals the metric publisher emits, as JSON,
+// on demand. Requires an authenticated user (inherits the fallback auth policy) — unlike the
+// deliberately-anonymous liveness/readiness probes, this exposes internal state (data counts,
+// token-resolution status), so it must not be public.
+app.MapGet("/health/diag", async (SreDiagnosticsCollector collector, CancellationToken ct) =>
+    Results.Json(await collector.CollectAsync(ct)))
+    .RequireAuthorization();
 
 app.MapStaticAssets();
 app.MapRazorPages().WithStaticAssets();
