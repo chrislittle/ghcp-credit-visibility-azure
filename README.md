@@ -10,7 +10,8 @@ Entra-group-based access, deployed privately in **your own** Azure subscription.
 
 > Built for platform/IT teams who've rolled out GitHub Copilot and now need to answer "who's
 > using it, how much is it costing, and is any team about to blow through budget?" — without
-> waiting on a spreadsheet export or opening a GitHub support ticket every month.
+> re-pivoting a CSV export every month, and without making every manager an enterprise billing
+> admin just to see their own team's number.
 
 ---
 
@@ -20,6 +21,7 @@ Entra-group-based access, deployed privately in **your own** Azure subscription.
 - [Screenshots](#screenshots)
 - [Features](#features)
 - [Architecture](#architecture)
+- [Optional: Azure SRE Agent](#optional-azure-sre-agent)
 - [Quickstart](#quickstart)
 - [Deploying to Azure](#deploying-to-azure)
 - [The admin console — who sees what](#the-admin-console--who-sees-what)
@@ -89,6 +91,13 @@ actual users, cost centers, and spend.)*
   own database; the dashboard only ever reads from it.
 - **Resilient GitHub API client** — retry with exponential backoff and jitter, honours
   `Retry-After`, circuit breaker, request timeout.
+- **Correctness monitoring, not just uptime monitoring** — the app publishes its own health
+  (snapshot age, rows written, whether the Key Vault PAT reference resolved, pending migrations)
+  to Application Insights and at `GET /health/diag`, because a billing dashboard can be 100%
+  available while serving 100% wrong numbers. Ships always, agent or no agent.
+- **Optional [Azure SRE Agent](#optional-azure-sre-agent)** — an AI reliability agent scoped to
+  the deployment, with alert rules over those signals and domain skills/hooks that teach it this
+  app. Off by default, read-only, and blocked from ever reading the GitHub PAT.
 - **Persistent history** in Azure SQL (or an in-memory store for local preview), with automatic
   retention purge (configurable, default 12 months).
 - **Secrets in Key Vault**, accessed via managed identity — never in app settings, code, or
@@ -105,7 +114,7 @@ actual users, cost centers, and spend.)*
 ## Architecture
 
 <p align="left">
-  <img src="docs/images/architecture.png" alt="Request path and data path architecture diagram" width="900" />
+  <img src="docs/images/architecture.png" alt="Request path, data path, and observability path architecture diagram" width="900" />
 </p>
 
 **Request path:** a browser hits the app → Azure App Service **Easy Auth** redirects to
@@ -122,6 +131,13 @@ fast and insulates it from GitHub API latency/outages.
 app settings or source) and authenticates to Azure SQL via Entra-only auth (no SQL passwords
 anywhere).
 
+**Observability path:** because the dashboard reads only the database, the failures that matter
+here are invisible to HTTP monitoring — the site returns 200 while serving month-old or wrong
+numbers. `SreDiagnosticsPublisher` and the snapshot job publish the app's *own* health (snapshot
+age, rows written, whether the Key Vault PAT reference resolved) to Application Insights as
+custom metrics, also readable at `GET /health/diag`. That layer ships either way; the
+[Azure SRE Agent](#optional-azure-sre-agent) that reads it is optional and off by default.
+
 ### Networking modes — public or private, your choice
 
 <p align="left">
@@ -130,6 +146,22 @@ anywhere).
 
 See [infra/README.md](infra/README.md) for the full resource list, the bring-your-own-VNet path,
 and the optional jump box + Bastion for testing the private path end-to-end.
+
+## Optional: Azure SRE Agent
+
+For deep, always-on troubleshooting of the app, its database, and supporting services, this repo can
+optionally provision an [Azure SRE Agent](https://learn.microsoft.com/azure/sre-agent/overview) — an
+AI reliability agent — scoped to the deployment. It's **off by default** (`enable_sre_agent = false`),
+and it's the third lane of the [architecture diagram](#architecture) above.
+
+The foundation is the always-on **diagnostics layer** described there (`SreDiagnosticsPublisher` +
+`/health/diag`), which surfaces the failures unique to this app — a stalled snapshot job, data that's
+present but wrong, an unresolved Key Vault reference — as Application Insights metrics. Enabling the
+agent adds six alert rules over exactly those signals, plus domain **skills**, **custom agents**,
+**hooks** (including a policy gate that blocks the agent from ever reading the GitHub PAT).
+
+Full walkthrough — architecture, the skills/agents/hooks that teach it this app, what gets built, and
+deploy steps: **[docs/SRE_AGENT.md](docs/SRE_AGENT.md)**.
 
 ## Quickstart
 
@@ -234,25 +266,10 @@ docs/
   RUN_LOCALLY.md          Full novice walkthrough — bash + PowerShell
   DEMO_DATA.md            Where the synthetic/demo data comes from
   SRE_AGENT.md            Optional Azure SRE Agent integration
-  images/                 Screenshots used in this README
+  images/                 Screenshots and diagrams used in this README
+    src/                  HTML source for the architecture diagram (render to PNG with headless Chrome)
 deploy.ps1                One guided script: preflight -> configure -> apply -> build image -> grant SQL -> set PAT -> health
 ```
-
-## Optional: Azure SRE Agent
-
-For deep, always-on troubleshooting of the app, its database, and supporting services, this repo can
-optionally provision an [Azure SRE Agent](https://learn.microsoft.com/azure/sre-agent/overview) — an
-AI reliability agent — scoped to the deployment. It's **off by default** (`enable_sre_agent = false`).
-
-The foundation is a small always-on **diagnostics layer** (`SreDiagnosticsPublisher` + `/health/diag`)
-that surfaces the failures unique to this app — a stalled snapshot job, data that's present but wrong,
-an unresolved Key Vault reference — as Application Insights metrics. Those are invisible to ordinary
-HTTP monitoring (the site returns 200 while serving stale or wrong numbers), and they ship whether or
-not you ever enable the agent. On top of that sit domain **skills**, **custom agents**, **hooks**
-(including a policy gate that blocks the agent from ever reading the GitHub PAT), and alert rules.
-
-Full walkthrough — architecture, the skills/agents/hooks that teach it this app, what gets built, and
-deploy steps: **[docs/SRE_AGENT.md](docs/SRE_AGENT.md)**.
 
 ## Cost notes
 

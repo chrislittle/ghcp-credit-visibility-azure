@@ -1,0 +1,187 @@
+<meta charset="utf-8">
+<!--
+  Source for docs/images/architecture.png. Render with headless Chrome, then trim the
+  trailing whitespace to the content height (~1817px):
+
+    chrome --headless --disable-gpu --hide-scrollbars --force-device-scale-factor=2 \
+           --window-size=1180,1000 --screenshot=architecture.png architecture.html
+
+  Fonts: Segoe UI (Windows). Palette is Fluent — #243A5E navy, #201F1E / #605E5C text,
+  #EDEBE9 borders, #0078D4 / #107C10 / #6E5494 / #CA5010 accents.
+-->
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    width: 1180px;
+    padding: 32px;
+    background: #fff;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    color: #201F1E;
+    -webkit-font-smoothing: auto;
+  }
+  h1 {
+    font-size: 21px; font-weight: 700; color: #243A5E;
+    letter-spacing: -.2px; line-height: 1.2;
+    padding-bottom: 9px; border-bottom: 2px solid #EDEBE9;
+  }
+
+  .lanes, .cards2 { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; }
+  .lanes { margin-top: 18px; }
+
+  .head { display: flex; align-items: center; gap: 12px; height: 20px; margin-bottom: 13px; }
+  .head-title { font-size: 15px; font-weight: 700; color: #243A5E; }
+  .pill {
+    font-size: 10.5px; font-weight: 700; line-height: 1;
+    padding: 5px 10px; border-radius: 999px; white-space: nowrap;
+  }
+  .pill.blue   { color: #1E40AF; background: #EDF2FB; }
+  .pill.purple { color: #5C2D91; background: #F3EEFA; }
+  .pill.green  { color: #0B6A0B; background: #EDF6ED; }
+
+  .box {
+    height: 68px; border: 1px solid #CFE0F5; border-radius: 8px;
+    background: linear-gradient(180deg, #F6F9FE, #EFF4FB);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px;
+  }
+  .box-title { font-size: 15px; font-weight: 700; }
+  .box-sub   { font-size: 12px; color: #605E5C; }
+
+  .arrow {
+    height: 32px; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; color: #605E5C;
+  }
+  .arrow b { color: #201F1E; }
+
+  .card {
+    border: 1px solid #EDEBE9; border-radius: 8px; background: #fff;
+    padding: 12px 16px; box-shadow: 0 1px 2px rgba(0,0,0,.045);
+  }
+  .card.blue   { border-left: 5px solid #0078D4; }
+  .card.green  { border-left: 5px solid #107C10; }
+  .card.purple { border-left: 5px solid #6E5494; }
+  .card.orange { border-left: 5px solid #CA5010; }
+  .card-title { font-size: 15px; font-weight: 700; margin-bottom: 3px; }
+  .card-body  { font-size: 12px; color: #605E5C; line-height: 1.5; }
+
+  .split {
+    display: flex; align-items: center; gap: 12px;
+    height: 32px; font-size: 11px; font-weight: 700;
+  }
+  .split::before, .split::after { content: ''; flex: 1; height: 1px; background: #EDEBE9; }
+
+  /* observability band */
+  .band { margin-top: 38px; }
+  .band-row { display: grid; grid-template-columns: 1fr 108px 1fr 108px 1fr; align-items: stretch; }
+  .band-row .card { display: flex; flex-direction: column; justify-content: center; }
+  .conn { text-align: center; font-size: 11px; color: #605E5C; line-height: 1.45; padding: 0 6px; }
+  .conn .glyph { display: block; font-size: 13px; color: #A19F9D; margin-bottom: 2px; }
+  .card.dashed {
+    border: 2px dashed #D2D0CE; background: #FCFCFC; box-shadow: none;
+    padding: 11px 15px;
+  }
+  .card.dashed .card-title { color: #3B3A39; }
+  .title-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+  .title-row .card-title { margin-bottom: 0; }
+  .tag {
+    font-size: 9.5px; font-weight: 700; line-height: 1; letter-spacing: .2px;
+    padding: 4px 7px; border-radius: 4px; color: #605E5C; background: #F3F2F1;
+    text-transform: uppercase;
+  }
+
+  .cards2 { margin-top: 38px; }
+  .fcard { border: 1px solid #EDEBE9; border-radius: 8px; padding: 16px 18px; }
+  .fcard-title { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
+  .fcard-body  { font-size: 12px; color: #605E5C; line-height: 1.55; }
+
+  .caption { margin-top: 30px; font-size: 12px; color: #605E5C; line-height: 1.6; }
+  code {
+    font-family: Consolas, 'Cascadia Mono', monospace; font-size: .93em;
+    background: #F3F2F1; padding: 1px 5px; border-radius: 3px; color: #3B3A39;
+  }
+</style>
+
+<h1>How it fits together</h1>
+
+<div class="lanes">
+  <div>
+    <div class="head"><span class="head-title">Request path</span><span class="pill blue">every page view</span></div>
+    <div class="box">
+      <div class="box-title">Team lead, exec, or admin</div>
+      <div class="box-sub">signs in with a browser</div>
+    </div>
+    <div class="arrow">▼&nbsp; HTTPS — sign-in redirect</div>
+    <div class="card">
+      <div class="card-title">Microsoft Entra ID</div>
+      <div class="card-body">App registration + Easy Auth · group claims &amp; app roles</div>
+    </div>
+    <div class="arrow">▼&nbsp; redirect back with token</div>
+    <div class="card blue">
+      <div class="card-title">App Service</div>
+      <div class="card-body">Razor Pages dashboard · resolves scope: admin → all data, else the union of the signed-in user's mapped cost centers</div>
+    </div>
+    <div class="arrow">▼&nbsp; reads only — <b>&nbsp;never&nbsp;</b> calls GitHub on a page view</div>
+    <div class="card green">
+      <div class="card-title">Azure SQL</div>
+      <div class="card-body">UsageSnapshot · BudgetSnapshot · PrincipalCostCenterMapping · AdminPrincipal</div>
+    </div>
+  </div>
+
+  <div>
+    <div class="head"><span class="head-title">Data path</span><span class="pill purple">background · every 12h</span></div>
+    <div class="box">
+      <div class="box-title">SnapshotHostedService</div>
+      <div class="box-sub">runs at startup, then every 12 hours</div>
+    </div>
+    <div class="arrow">▼&nbsp; calls one client, chosen by <b>&nbsp;GitHub:UseMock</b></div>
+    <div class="card purple">
+      <div class="card-title">GitHub billing REST APIs</div>
+      <div class="card-body">usage · cost centers · budgets — retry/backoff, honours Retry-After, circuit breaker</div>
+    </div>
+    <div class="split">GitHub:UseMock = true (default)</div>
+    <div class="card purple">
+      <div class="card-title">MockGitHubBillingClient</div>
+      <div class="card-body">synthetic demo data — no PAT, no live call, deterministic per user/month</div>
+    </div>
+    <div class="arrow">▼&nbsp; writes snapshots</div>
+    <div class="card green">
+      <div class="card-title">Azure SQL</div>
+      <div class="card-body">same tables the dashboard reads — identical pipeline either way</div>
+    </div>
+  </div>
+</div>
+
+<div class="band">
+  <div class="head"><span class="head-title">Observability path</span><span class="pill green">always on · agent optional</span></div>
+  <div class="band-row">
+    <div class="card orange">
+      <div class="card-title">App Service + snapshot job</div>
+      <div class="card-body"><b>SreDiagnosticsPublisher</b> emits snapshot age · rows written · PAT resolved · rate limit — also at <code>GET /health/diag</code></div>
+    </div>
+    <div class="conn"><span class="glyph">▶</span>custom metrics<br>&amp; events</div>
+    <div class="card green">
+      <div class="card-title">App Insights + Log Analytics</div>
+      <div class="card-body">workspace-based — the six alert rules over these signals fire from here</div>
+    </div>
+    <div class="conn"><span class="glyph">▶</span>read by<br>the agent</div>
+    <div class="card dashed">
+      <div class="title-row"><span class="card-title">Azure SRE Agent</span><span class="tag">off by default</span></div>
+      <div class="card-body">read-only, own resource group and region — skills, hooks &amp; knowledge kept in <code>sre/</code></div>
+    </div>
+  </div>
+</div>
+
+<div class="cards2">
+  <div class="fcard">
+    <div class="fcard-title">🔑&nbsp; Key Vault</div>
+    <div class="fcard-body">holds the GitHub PAT secret (github-pat) — read by the snapshot job via the app's managed identity, never in app settings or source</div>
+  </div>
+  <div class="fcard">
+    <div class="fcard-title">🔒&nbsp; Private networking (optional)</div>
+    <div class="fcard-body">use_private_networking = true puts the app's inbound path, Key Vault, and Azure SQL behind private endpoints in your VNet — no public access anywhere</div>
+  </div>
+</div>
+
+<div class="caption">
+  Azure SQL authenticates the app via Entra-only auth (managed identity) — no SQL passwords anywhere. See the networking-modes diagram below for the public-vs-private and bring-your-own-VNet choices.
+  The observability path ships whether or not you ever enable the agent — without it, this app can be 100% available while serving 100% wrong numbers.
+</div>
