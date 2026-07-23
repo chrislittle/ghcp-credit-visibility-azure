@@ -12,16 +12,60 @@ namespace GhcpCreditVisibility.Authorization
     /// </summary>
     public sealed class EasyAuthClaimsMiddleware
     {
+        // Health probes must stay reachable even when the app refuses to serve traffic, or
+        // App Service evicts the instance and the deployment looks like a platform fault.
+        private static readonly string[] AlwaysAllowedPaths = { "/health/live", "/health/ready" };
+
         private readonly RequestDelegate _next;
         private readonly ILogger<EasyAuthClaimsMiddleware> _logger;
-        public EasyAuthClaimsMiddleware(RequestDelegate next, ILogger<EasyAuthClaimsMiddleware> logger)
+        private readonly bool _easyAuthEnabled;
+        private readonly bool _isDevelopment;
+
+        public EasyAuthClaimsMiddleware(
+            RequestDelegate next,
+            ILogger<EasyAuthClaimsMiddleware> logger,
+            IConfiguration config,
+            IWebHostEnvironment env)
         {
             _next = next;
             _logger = logger;
+            _isDevelopment = env.IsDevelopment();
+
+            // Set from Terraform (Auth__EasyAuthEnabled = var.enable_easy_auth). Defaults to true
+            // so an existing deployment or a local run behaves exactly as before; it is the
+            // infrastructure that supplies the "false" when it deploys the app without auth.
+            _easyAuthEnabled = config.GetValue("Auth:EasyAuthEnabled", true);
+
+            if (!_easyAuthEnabled && !_isDevelopment)
+            {
+                _logger.LogError(
+                    "Auth:EasyAuthEnabled is false — the platform authentication module is not in front of this app, "
+                    + "so X-MS-CLIENT-PRINCIPAL is unauthenticated client input and will NOT be trusted. "
+                    + "All non-health requests will be refused with 503 until authentication is configured.");
+            }
         }
 
         public async Task Invoke(HttpContext ctx)
         {
+            // Without the Easy Auth module in front, nothing strips an inbound
+            // X-MS-CLIENT-PRINCIPAL, so any caller could hand us a "roles":"Admin" claim and
+            // own the admin console. Fail closed rather than authenticate from client input.
+            if (!_easyAuthEnabled && !_isDevelopment)
+            {
+                if (!AlwaysAllowedPaths.Contains(ctx.Request.Path.Value, StringComparer.OrdinalIgnoreCase))
+                {
+                    ctx.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                    ctx.Response.ContentType = "text/plain";
+                    await ctx.Response.WriteAsync(
+                        "Authentication is not configured for this deployment, so this application will not serve "
+                        + "requests. Redeploy with enable_easy_auth = true.");
+                    return;
+                }
+
+                await _next(ctx);
+                return;
+            }
+
             var header = ctx.Request.Headers["X-MS-CLIENT-PRINCIPAL"].FirstOrDefault();
             if (!string.IsNullOrEmpty(header) && (ctx.User?.Identity?.IsAuthenticated != true))
             {

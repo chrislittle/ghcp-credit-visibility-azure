@@ -70,7 +70,12 @@
                         {
                             <span class="badge rounded-pill text-bg-light border me-1 mb-1" style="font-weight:500;">
                                 @(m.CostCenterName ?? m.CostCenterId)
-                                <form method="post" asp-page-handler="DeleteMapping" style="display:inline" onsubmit="return confirm('Remove access to @(m.CostCenterName ?? m.CostCenterId) for @(first.PrincipalDisplayName ?? first.PrincipalObjectId)?');">
+                                @* Confirmation text goes in a data-* attribute, NOT inline JS: these values carry
+                                   GitHub cost-center names and operator-supplied labels, and Razor's HTML encoding
+                                   does not survive the browser decoding an attribute before parsing it as script.
+                                   site.js reads data-confirm as text — see the js-confirm handler there. *@
+                                <form method="post" asp-page-handler="DeleteMapping" style="display:inline" class="js-confirm"
+                                      data-confirm="Remove access to @(m.CostCenterName ?? m.CostCenterId) for @(first.PrincipalDisplayName ?? first.PrincipalObjectId)?">
                                     <input type="hidden" name="id" value="@m.Id" />
                                     <button type="submit" class="btn btn-sm p-0 border-0" style="color:#d1242f;background:none;line-height:1;" title="Remove this cost center">&times;</button>
                                 </form>
@@ -143,7 +148,7 @@
                     <td>@(a.PrincipalDisplayName ?? "—")</td>
                     <td style="color:#66707d"><code>@a.PrincipalObjectId</code></td>
                     <td style="text-align:right">
-                        <form method="post" asp-page-handler="DeleteAdmin" onsubmit="return confirm('Remove this administrator?');">
+                        <form method="post" asp-page-handler="DeleteAdmin" class="js-confirm" data-confirm="Remove this administrator?">
                             <input type="hidden" name="id" value="@a.Id" />
                             <button class="btn btn-sm btn-outline-danger" type="submit">Remove</button>
                         </form>

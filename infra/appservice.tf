@@ -86,6 +86,12 @@ resource "azurerm_linux_web_app" "app" {
       "GitHub__Enterprise"                    = var.github_enterprise_slug
       "GitHub__UseMock"                       = tostring(var.use_mock_data)
       "Retention__Months"                     = tostring(var.retention_months)
+      # Tells the container whether the platform Easy Auth module is actually in front of it.
+      # The app derives identity from the X-MS-CLIENT-PRINCIPAL request header, which is only
+      # trustworthy because Easy Auth strips inbound copies of it — with auth_settings_v2 absent
+      # (enable_easy_auth = false) that header is plain client input and anyone could claim the
+      # Admin role. When this is false the app refuses to serve rather than trusting it.
+      "Auth__EasyAuthEnabled" = tostring(var.enable_easy_auth)
       # Managed-identity SQL connection. In user_assigned_selfadmin mode we must name the
       # identity via "User Id=<UAMI clientId>"; system-assigned needs no User Id.
       "ConnectionStrings__BillingDb" = "Server=tcp:${azurerm_mssql_server.sql.fully_qualified_domain_name},1433;Database=${azurerm_mssql_database.db.name};Authentication=Active Directory Managed Identity;${local.use_uami ? "User Id=${azurerm_user_assigned_identity.app[0].client_id};" : ""}Encrypt=True;TrustServerCertificate=False;"

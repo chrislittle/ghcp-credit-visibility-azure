@@ -91,12 +91,23 @@ namespace GhcpCreditVisibility.Pages.Admin
                 var chosen = (costCenterIds ?? Array.Empty<string>()).Select(id => id?.Trim()).Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
                 if (chosen.Count == 0) throw new ArgumentException("Select at least one cost center.");
 
+                // Only ids the snapshot job has actually discovered may be mapped. The form is a
+                // select built from `known`, so a value outside it did not come from the UI —
+                // accepting one would persist an attacker-chosen id (and its display name) into
+                // the mappings table, where the admin console later renders it.
+                var unknown = chosen.Where(id => !known.Any(c => c.Id == id)).ToList();
+                if (unknown.Count > 0)
+                {
+                    throw new ArgumentException(
+                        $"Unknown cost center(s): {string.Join(", ", unknown)}. Pick from the discovered cost centers.");
+                }
+
                 var names = new List<string>();
                 foreach (var costCenterId in chosen)
                 {
-                    var cc = known.FirstOrDefault(c => c.Id == costCenterId);
-                    await _svc.UpsertMappingAsync(principalType, principalObjectId, principalName, costCenterId!, cc?.Name, Actor, ct);
-                    names.Add(cc?.Name ?? costCenterId!);
+                    var cc = known.First(c => c.Id == costCenterId);
+                    await _svc.UpsertMappingAsync(principalType, principalObjectId, principalName, costCenterId!, cc.Name, Actor, ct);
+                    names.Add(cc.Name ?? costCenterId!);
                 }
                 Message = $"Mapped {principalType.ToLowerInvariant()} '{principalName ?? principalObjectId}' -> {names.Count} cost center(s): {string.Join(", ", names)}.";
             }

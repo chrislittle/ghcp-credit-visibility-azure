@@ -211,6 +211,14 @@ variable "admin_client_ip" {
   type        = string
   description = "PUBLIC pattern only: your current public IP, added as a temporary Azure SQL firewall rule (\"AllowDeployerIP\") so deploy.ps1's grant-sql phase can run T-SQL as the Entra SQL admin. Leave empty to skip (no rule created). deploy.ps1 sets this automatically before Phase-GrantSql."
   default     = ""
+
+  # deploy.ps1 fills this from a third-party IP-echo service and writes it to the auto-loaded
+  # adminip.auto.tfvars, so validate it here too: anything but a bare IPv4 literal is refused
+  # before it can reach the firewall rule or smuggle extra HCL past the generator.
+  validation {
+    condition     = var.admin_client_ip == "" || can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", var.admin_client_ip))
+    error_message = "admin_client_ip must be empty or a single IPv4 address, e.g. 203.0.113.10."
+  }
 }
 
 variable "create_private_dns_zones" {
