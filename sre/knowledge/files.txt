@@ -1,0 +1,11 @@
+# Knowledge files uploaded to the SRE Agent by: deploy.ps1 -Task sre-sync
+# One repo-relative path (or glob) per line. Markdown / plain text only. Blank lines and #-comments
+# are ignored. Caps: <=16 MB per file, <=100 MB per sync. Indexing (RAG) runs after the last file.
+README.md
+SECURITY.md
+infra/README.md
+docs/DEMO_DATA.md
+docs/SRE_AGENT.md
+sre/README.md
+# Past security findings — lets the agent recognize the enable_easy_auth history on odd /Admin traffic.
+CLAUDE-SECURITY-*/CLAUDE-SECURITY-RESULTS.md

@@ -1,0 +1,10 @@
+name: ghcp-data-integrity
+description: >-
+  Use when the GHCP dashboard is UP but the numbers look wrong: month-over-month swings, missing
+  users or cost centers, a gap in the trend series, or a suspected retention over-purge. A billing
+  app can be fully available while serving wrong data — this catches that.
+files:
+  - SKILL.md
+tools:
+  - execute_kusto_query
+  - RunAzCliReadCommands

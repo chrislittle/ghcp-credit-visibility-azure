@@ -1,0 +1,10 @@
+name: ghcp-snapshot-pipeline
+description: >-
+  Use when the GHCP Credit Visibility dashboard data looks stale, missing, or wrong, or when a
+  snapshot run fails. Covers the SnapshotHostedService -> GitHub billing API -> Azure SQL
+  pipeline: staleness, failed runs, zero-row runs, and the per-error-string triage.
+files:
+  - SKILL.md
+tools:
+  - RunAzCliReadCommands
+  - execute_kusto_query

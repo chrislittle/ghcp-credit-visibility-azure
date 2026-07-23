@@ -5,7 +5,9 @@
 
   Runs the whole journey end-to-end (guided, colorized, with confirmations), or a single task:
     prereqs → preflight → configure (tfvars) → provision (terraform) → build+deploy image
-            → grant SQL access → seed GitHub PAT → status/health.
+            → grant SQL access → seed GitHub PAT → status/health
+            → [optional] SRE agent: provision → grant SQL → sync config.
+  The optional SRE agent runs LAST and is isolated — a failure there never blocks the core app.
 
 .DESCRIPTION
   Default (-Task all) walks you through everything, making smart decisions from your choices
@@ -41,7 +43,7 @@
 #>
 [CmdletBinding()]
 param(
-  [ValidateSet('all', 'preflight', 'configure', 'provision', 'image', 'grant-sql', 'set-pat', 'status')]
+  [ValidateSet('all', 'preflight', 'configure', 'provision', 'image', 'grant-sql', 'set-pat', 'status', 'sre-provision', 'grant-sre-sql', 'sre-sync')]
   [string]$Task = 'all',
   [string]$Location = 'eastus2',
   [string]$Sku = '',
@@ -743,6 +745,17 @@ function Phase-Configure {
     else { $sqlName = Ask 'SQL admin display name (UPN or group name)' 'SG-GHCP-SQL-Admins'; $sqlId = Ask 'SQL admin object ID' '' }
   }
 
+  # Optional Azure SRE Agent (AI reliability agent). Off by default — it's a preview feature that
+  # incurs an always-on cost (~$0.40/hr) from creation until deleted. See docs/SRE_AGENT.md.
+  $sreDefault = (Get-TfVar 'enable_sre_agent') -eq 'true'
+  $enableSre = AskYesNo 'Also deploy the optional Azure SRE Agent (AI reliability agent)? Preview; ~$0.40/hr always-on until deleted' $sreDefault
+  $sreRegion = ''
+  if ($enableSre) {
+    Write-Info 'Microsoft.App/agents is NOT available in every region (notably not Germany West Central). The agent monitors the app remotely, so its own region is separate.'
+    $sreRegionDefault = (Get-TfVar 'sre_agent_location'); if (-not $sreRegionDefault) { $sreRegionDefault = 'swedencentral' }
+    $sreRegion = Ask 'SRE Agent region (swedencentral, francecentral, uksouth, italynorth, eastus2, canadacentral, ...)' $sreRegionDefault
+  }
+
   $lines = [System.Collections.Generic.List[string]]::new()
   $lines.Add("subscription_id           = `"$subId`"")
   $lines.Add("location                  = `"$loc`"")
@@ -775,6 +788,10 @@ function Phase-Configure {
   if (-not $mock) { $lines.Add("github_enterprise_slug    = `"$ghSlug`"") }
   $lines.Add("create_acr                = $($createAcr.ToString().ToLower())")
   if ($adminId) { $lines.Add("admin_principal_object_id = `"$adminId`"") }
+  if ($enableSre) {
+    $lines.Add("enable_sre_agent          = true")
+    $lines.Add("sre_agent_location        = `"$sreRegion`"")
+  }
   $content = ($lines -join "`n") + "`n"
 
   Write-Host ''; Write-Info 'Review terraform.tfvars:'; Write-Host $content -ForegroundColor DarkGray
@@ -798,18 +815,58 @@ function Phase-Configure {
 function Phase-Provision {
   Write-Step 3 'Provision infrastructure (terraform)'
   if (-not (Test-Path $tfvars)) { throw "terraform.tfvars not found — run: ./deploy.ps1 -Task configure" }
+
   Push-Location $infra
   try {
     Invoke-OrEcho 'terraform init -input=false'
+    # The optional SRE agent is held out of this apply when $script:HoldSreAgent is set (see the
+    # dispatcher) — Invoke-TerraformApply appends -var enable_sre_agent=false. Phase-SreProvision is
+    # the ONLY apply that includes it, so an agent-API failure can never block the core app.
     Invoke-TerraformApply "-var `"location=$Location`""
   } finally { Pop-Location }
   Write-Ok 'infrastructure applied'
+}
+
+# ── PHASE: provision the optional SRE Agent (isolated, non-fatal) ──
+# Runs LAST in the `all` sequence — after the app is deployed AND health-checked — so a failure in
+# the preview Microsoft.App/agents API can never abort the core deploy. Re-runnable on its own:
+#   ./deploy.ps1 -Task sre-provision
+function Phase-SreProvision {
+  if ((Get-TfVar 'enable_sre_agent') -ne 'true') { return }  # opt-in only; silent no-op otherwise
+  Write-Step 8 'Provision the optional SRE Agent (isolated — cannot block the app)'
+  # This is the ONE apply that includes the agent — clear the hold so it's actually created.
+  $script:HoldSreAgent = $false
+
+  # Microsoft.App is often NotRegistered; --wait blocks until it's ready so the apply doesn't race it.
+  if ($DryRun) { Write-Host '  DRYRUN> az provider register -n Microsoft.App --wait' -ForegroundColor DarkGray }
+  else {
+    $state = az provider show -n Microsoft.App --query registrationState -o tsv 2>$null
+    if ($state -ne 'Registered') {
+      Write-Info 'Registering Microsoft.App provider (SRE Agent) — this can take a few minutes...'
+      az provider register -n Microsoft.App --wait --only-show-errors | Out-Null
+      Write-Ok 'Microsoft.App provider registered.'
+    }
+  }
+
+  Push-Location $infra
+  try {
+    # Full apply (no enable_sre_agent override) — this is where the agent + its RBAC/alerts come up.
+    Invoke-TerraformApply "-var `"location=$Location`""
+    Write-Ok 'SRE Agent infrastructure applied.'
+  } catch {
+    Write-Warn "SRE Agent provisioning failed — the app is unaffected. $($_.Exception.Message)"
+    Write-Info 'Fix and re-run just this step: ./deploy.ps1 -Task sre-provision'
+  } finally { Pop-Location }
 }
 
 # Runs `terraform plan` to a saved plan file, shows it, and asks for confirmation before
 # applying — unless -Yes/-DryRun is set. Caller must already be in the terraform working dir.
 # $extraArgs is a string of extra -var/-var-file args appended to both plan and apply.
 function Invoke-TerraformApply([string]$extraArgs = '') {
+  # Hold the optional SRE agent out of core-phase applies (provision/image/grant-sql). Only
+  # Phase-SreProvision clears this flag, so it's the single place the agent is applied — a failure
+  # there can't abort the app. See the dispatcher where the flag is computed.
+  if ($script:HoldSreAgent) { $extraArgs = ($extraArgs + ' -var "enable_sre_agent=false"').Trim() }
   if ($DryRun) { Write-Host "  DRYRUN> terraform plan -out=tfplan $extraArgs; terraform apply tfplan" -ForegroundColor DarkGray; return }
   $planFile = 'tfplan'
   Invoke-OrEcho "terraform plan -input=false -out=$planFile $extraArgs"
@@ -942,6 +999,211 @@ function Phase-GrantSql {
       Show-ManualInstructionsAndMaybePause $manualInstructions
     }
   }
+}
+
+# ── SRE Agent: read-only SQL grant for the agent's managed identity ──
+# Mirrors Invoke-SqlGrantDirect but grants ONLY db_datareader + VIEW DATABASE STATE (DMVs / Query
+# Store) — never write or DDL. The SQL user name is the agent's identity display name, which equals
+# the agent resource name (sre-ghcp-<suffix>).
+function Invoke-SreSqlGrantDirect([string]$Server, [string]$Database, [string]$AgentName) {
+  $tsql = @"
+DECLARE @app sysname = N'$($AgentName.Replace("'","''"))';
+DECLARE @q sysname = QUOTENAME(@app);
+IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = @app)
+    EXEC('CREATE USER ' + @q + ' FROM EXTERNAL PROVIDER;');
+IF IS_ROLEMEMBER('db_datareader', @app) = 0 EXEC('ALTER ROLE db_datareader ADD MEMBER ' + @q + ';');
+EXEC('GRANT VIEW DATABASE STATE TO ' + @q + ';');
+"@
+  if ($DryRun) { Write-Host "  DRYRUN> Invoke-Sqlcmd against $Server/$Database with read-only agent grant" -ForegroundColor DarkGray; Write-Host $tsql -ForegroundColor DarkGray; return }
+  $token = (az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv)
+  Invoke-Sqlcmd -ServerInstance $Server -Database $Database -AccessToken $token -Query $tsql -ErrorAction Stop
+  Write-Ok 'Agent SQL grant applied (db_datareader + VIEW DATABASE STATE, read-only).'
+}
+
+function Phase-GrantSreSql {
+  Write-Step 9 'Grant the SRE Agent read-only access to the SQL database'
+  $agent = Get-TfOutput 'sre_agent_name'
+  if (-not $agent) { Write-Warn 'No SRE Agent in state (enable_sre_agent=false or not applied). Skipping.'; return }
+  $server = Get-TfOutput 'sql_server_fqdn'; $db = Get-TfOutput 'sql_database_name'
+  if (-not ($server -and $db)) { Write-Warn 'Could not read SQL outputs (infra not applied?). Skipping.'; return }
+  Write-Info "Server $server · DB $db · Agent identity $agent"
+  if (-not $script:Acct) { Ensure-Az }
+  Write-Info "You must be the Entra SQL admin (or in the admin group) for this to succeed ($($script:Acct.user.name))."
+
+  $manual = "Run this against the $db DB as the Entra SQL admin (Portal -> SQL database -> Query editor):`n`n" +
+            "CREATE USER [$agent] FROM EXTERNAL PROVIDER;`nALTER ROLE db_datareader ADD MEMBER [$agent];`nGRANT VIEW DATABASE STATE TO [$agent];"
+
+  # PUBLIC pattern: the AllowDeployerIP firewall rule from `-Task grant-sql` (or a fresh apply)
+  # opens the path. If it isn't open, the direct attempt fails with a clear firewall error.
+  if ((Get-TfVar 'use_private_networking') -ne 'true') {
+    if (-not (Ensure-SqlServerModule)) { Write-Info $manual; return }
+    if (-not (AskYesNo 'Apply the read-only agent grant now?' $true)) { Write-Warn 'Skipped. Later: ./deploy.ps1 -Task grant-sre-sql'; return }
+    try { Invoke-SreSqlGrantDirect -Server $server -Database $db -AgentName $agent }
+    catch {
+      Write-Err "Grant failed: $($_.Exception.Message)"
+      if ($_.Exception.Message -match 'is not allowed to access the server') { Write-Info 'Your IP may not be open on the SQL firewall — run ./deploy.ps1 -Task grant-sql first (it opens AllowDeployerIP), then re-run this.' }
+      else { Write-Info $manual }
+    }
+    return
+  }
+
+  # PRIVATE pattern: the four-mode access flow is owned by grant-sql; for the read-only agent grant
+  # we print the T-SQL and let the operator run it via whichever private path they already use.
+  Write-Warn 'Private networking: run the agent grant from a host on the VNet (jump box, or the same path you used for -Task grant-sql).'
+  Write-Info $manual
+}
+
+# Ensures the powershell-yaml module (ConvertFrom-Yaml) is available for parsing sre/ config.
+# Same install-on-demand pattern as Ensure-SqlServerModule.
+function Ensure-YamlModule {
+  if (Get-Command ConvertFrom-Yaml -ErrorAction SilentlyContinue) { return $true }
+  if (AskYesNo 'Syncing SRE config needs the powershell-yaml module (ConvertFrom-Yaml). Install it now (CurrentUser scope)?' $true) {
+    try {
+      Install-Module powershell-yaml -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+      Import-Module powershell-yaml -ErrorAction Stop
+      return $true
+    } catch { Write-Warn "Couldn't install powershell-yaml: $($_.Exception.Message)"; return $false }
+  }
+  return $false
+}
+
+# PUT one config item to the agent's data plane. Envelope (from the official microsoft/sre-agent
+# apply-extras.sh): { name, type, tags: [], properties: <spec> }. Route:
+#   PUT {endpoint}/api/v2/extendedAgent/{kind}/{name}
+function Invoke-SreDataPlanePut([string]$Endpoint, [string]$Token, [string]$Kind, [string]$Name, [string]$Type, $Properties) {
+  $body = @{ name = $Name; type = $Type; tags = @(); properties = $Properties } | ConvertTo-Json -Depth 40
+  $url = "$Endpoint/api/v2/extendedAgent/$Kind/" + [uri]::EscapeDataString($Name)
+  if ($DryRun) { Write-Host "  DRYRUN> PUT $url" -ForegroundColor DarkGray; return }
+  try {
+    Invoke-RestMethod -Method Put -Uri $url -Headers @{ Authorization = "Bearer $Token" } -ContentType 'application/json' -Body $body -ErrorAction Stop | Out-Null
+    Write-Ok "  $Kind/$Name"
+  } catch {
+    Write-Err "  FAILED $Kind/$Name — $($_.Exception.Message)"
+  }
+}
+
+# Upload ONE knowledge file to AgentMemory (RAG-indexed) via multipart/form-data.
+#   POST {endpoint}/api/v1/AgentMemory/upload?triggerIndexing={bool}   field: files=@<path>
+# Only trigger indexing on the LAST file of a batch, so we don't re-index per file.
+function Invoke-SreKnowledgeUpload([string]$Endpoint, [string]$Token, [string]$Path, [bool]$TriggerIndexing) {
+  $name = Split-Path $Path -Leaf
+  $url = "$Endpoint/api/v1/AgentMemory/upload?triggerIndexing=" + $TriggerIndexing.ToString().ToLower()
+  if ($DryRun) { Write-Host "  DRYRUN> POST $url  ($name)" -ForegroundColor DarkGray; return }
+  try {
+    Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = "Bearer $Token" } -Form @{ files = Get-Item -LiteralPath $Path } -ErrorAction Stop | Out-Null
+    Write-Ok "  knowledge/$name"
+  } catch {
+    Write-Err "  FAILED knowledge/$name — $($_.Exception.Message)"
+  }
+}
+
+# ── SRE Agent: sync data-plane config (skills / custom agents / hooks) from sre/ ──
+# Only the agent itself is an ARM resource; skills, custom agents, and hooks are data-plane config
+# (route /api/v2/extendedAgent/*). This PUTs them directly via the data-plane API. Auth is a token
+# for audience https://azuresre.dev — you need the SRE Agent Administrator role on the agent. If the
+# endpoint or token isn't available, it degrades gracefully with guidance rather than failing.
+function Phase-SreSync {
+  Write-Step 10 'Sync SRE Agent config (skills / agents / hooks / knowledge)'
+  $agentId = Get-TfOutput 'sre_agent_id'
+  $agent = Get-TfOutput 'sre_agent_name'
+  if (-not $agentId) { Write-Warn 'No SRE Agent in state (enable_sre_agent=false or not applied). Skipping.'; return }
+  $sreDir = Join-Path $PSScriptRoot 'sre'
+  if (-not (Test-Path $sreDir)) { Write-Warn "sre/ config directory not found at $sreDir."; return }
+
+  # Resolve the data-plane endpoint (from ARM) and a data-plane token (audience azuresre.dev).
+  Write-Info "Resolving data-plane endpoint for $agent ..."
+  $armUrl = "https://management.azure.com" + $agentId + "?api-version=2025-05-01-preview"
+  $endpoint = (az rest -m GET --url $armUrl --query properties.agentEndpoint -o tsv 2>$null)
+  if ($endpoint) { $endpoint = $endpoint.Trim().TrimEnd('/') }
+  if (-not $endpoint) { Write-Warn 'Could not resolve the agent data-plane endpoint (still provisioning?). Re-run in a minute: ./deploy.ps1 -Task sre-sync'; return }
+
+  $token = (az account get-access-token --resource https://azuresre.dev --query accessToken -o tsv 2>$null)
+  if ($token) { $token = $token.Trim() }
+  if (-not $token) {
+    Write-Warn "Couldn't get a data-plane token (audience https://azuresre.dev). You likely need the 'SRE Agent Administrator' role on the agent, or the tenant blocks this audience."
+    Write-Info  "Grant it: az role assignment create --assignee <you> --role 'SRE Agent Administrator' --scope $agentId ; then re-run ./deploy.ps1 -Task sre-sync"
+    return
+  }
+
+  # Preflight the data-plane RBAC: acquiring a token only proves you signed in, NOT that you can
+  # write to the agent. Subscription Owner is NOT sufficient — the data plane needs the dedicated
+  # 'SRE Agent Administrator' role on the agent. Check once so we fail with one actionable message
+  # instead of a 403 per item.
+  try {
+    Invoke-RestMethod -Method Get -Uri "$endpoint/api/v2/extendedAgent/skills" -Headers @{ Authorization = "Bearer $token" } -ErrorAction Stop | Out-Null
+  } catch {
+    if ($_.Exception.Response -and $_.Exception.Response.StatusCode.value__ -eq 403) {
+      $meId = az ad signed-in-user show --query id -o tsv 2>$null
+      Write-Warn "Data-plane access denied (403). Being subscription Owner is NOT enough — the agent needs the 'SRE Agent Administrator' role."
+      Write-Info "Grant it, then re-run ./deploy.ps1 -Task sre-sync :"
+      Write-Host "    az role assignment create --assignee $meId --role `"SRE Agent Administrator`" --scope $agentId" -ForegroundColor DarkGray
+      Write-Info 'RBAC can take up to a couple of minutes to propagate after you assign it.'
+      return
+    }
+    # Any other error (e.g. endpoint still warming up): fall through and let per-item calls report it.
+  }
+
+  if (-not (Ensure-YamlModule)) { Write-Warn 'YAML module unavailable — cannot parse sre/ config. Skipping.'; return }
+
+  # Skills: sre/skills/<name>/skill.yaml (name, description, tools) + SKILL.md -> skillContent.
+  $skillDirs = @(Get-ChildItem -Path (Join-Path $sreDir 'skills') -Directory -ErrorAction SilentlyContinue)
+  if ($skillDirs.Count -gt 0) {
+    Write-Info "Skills: $($skillDirs.Count)"
+    foreach ($d in $skillDirs) {
+      $manifestPath = Join-Path $d.FullName 'skill.yaml'
+      if (-not (Test-Path $manifestPath)) { continue }
+      $m = (Get-Content $manifestPath -Raw) | ConvertFrom-Yaml
+      $mdPath = Join-Path $d.FullName 'SKILL.md'
+      $content = if (Test-Path $mdPath) { Get-Content $mdPath -Raw } else { '' }
+      $props = @{ name = $m.name; description = $m.description; tools = @($m.tools); skillContent = $content; additionalFiles = @() }
+      Invoke-SreDataPlanePut -Endpoint $endpoint -Token $token -Kind 'skills' -Name $m.name -Type 'Skill' -Properties $props
+    }
+  }
+
+  # Custom agents (subagents): route is /agents/{name}, type ExtendedAgent, properties = spec.
+  $agentFiles = @(Get-ChildItem -Path (Join-Path $sreDir 'agents') -Filter *.yaml -ErrorAction SilentlyContinue)
+  if ($agentFiles.Count -gt 0) {
+    Write-Info "Custom agents: $($agentFiles.Count)"
+    foreach ($f in $agentFiles) {
+      $y = (Get-Content $f.FullName -Raw) | ConvertFrom-Yaml
+      Invoke-SreDataPlanePut -Endpoint $endpoint -Token $token -Kind 'agents' -Name $y.metadata.name -Type 'ExtendedAgent' -Properties $y.spec
+    }
+  }
+
+  # Hooks: route /hooks/{name}, type GlobalHook, properties = spec.
+  $hookFiles = @(Get-ChildItem -Path (Join-Path $sreDir 'hooks') -Filter *.yaml -ErrorAction SilentlyContinue)
+  if ($hookFiles.Count -gt 0) {
+    Write-Info "Hooks: $($hookFiles.Count)"
+    foreach ($f in $hookFiles) {
+      $y = (Get-Content $f.FullName -Raw) | ConvertFrom-Yaml
+      Invoke-SreDataPlanePut -Endpoint $endpoint -Token $token -Kind 'hooks' -Name $y.metadata.name -Type 'GlobalHook' -Properties $y.spec
+    }
+  }
+
+  # Knowledge files: repo docs listed in sre/knowledge/files.txt -> AgentMemory (RAG-indexed).
+  # Paths are repo-relative and may be globs; indexing fires only after the final file.
+  $manifest = Join-Path $sreDir 'knowledge/files.txt'
+  if (Test-Path $manifest) {
+    $paths = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in Get-Content $manifest) {
+      $t = $line.Trim()
+      if (-not $t -or $t.StartsWith('#')) { continue }
+      foreach ($r in @(Get-ChildItem -Path (Join-Path $PSScriptRoot $t) -File -ErrorAction SilentlyContinue)) {
+        if ($r.Length -gt 16MB) { Write-Warn "  skipping $($r.Name) — exceeds the 16 MB/file cap"; continue }
+        $paths.Add($r.FullName)
+      }
+    }
+    if ($paths.Count -gt 0) {
+      Write-Info "Knowledge files: $($paths.Count)"
+      for ($i = 0; $i -lt $paths.Count; $i++) {
+        Invoke-SreKnowledgeUpload -Endpoint $endpoint -Token $token -Path $paths[$i] -TriggerIndexing:($i -eq $paths.Count - 1)
+      }
+      Write-Info 'Indexing runs after the final file — progress: GET {endpoint}/api/v1/agentmemory/indexer-status'
+    }
+  }
+
+  Write-Ok 'SRE config sync complete (skills, agents, hooks, knowledge).'
+  Write-Info "Open the agent: https://sre.azure.com"
 }
 
 # ── PHASE: seed GitHub PAT into Key Vault (real data) ────────────
@@ -1147,9 +1409,23 @@ trap {
 # truth for its region. (Standalone -Task provision/image/grant-sql/set-pat/status previously did
 # not sync, so `deploy.ps1 -Task provision` on a non-default region planned a destroy/recreate into
 # eastus2 — bug fix.)
-if ($Task -in @('provision', 'image', 'grant-sql', 'set-pat', 'status')) {
+if ($Task -in @('provision', 'image', 'grant-sql', 'set-pat', 'status', 'sre-provision', 'grant-sre-sql', 'sre-sync')) {
   $existingLoc = Get-TfVar 'location'
   if ($existingLoc) { $Location = $existingLoc }
+}
+
+# Decide whether to hold the OPTIONAL SRE agent out of core-phase terraform applies. We hold it out
+# only when it's enabled AND not yet created (fresh deploy) — so a failure in the preview agent API
+# can never block the app phases (provision/image/grant-sql). Once the agent exists in state we stop
+# holding it, so there's no destroy/recreate churn. Phase-SreProvision (task 'sre-provision', run
+# last in 'all') clears this flag and is the only apply that includes the agent.
+$script:HoldSreAgent = $false
+if ($Task -in @('all', 'provision', 'image', 'grant-sql', 'set-pat') -and (Get-TfVar 'enable_sre_agent') -eq 'true') {
+  $agentInState = $null
+  Push-Location $infra
+  try { $agentInState = terraform state list 2>$null | Select-String -Pattern 'azapi_resource\.sre_agent' } catch {}
+  finally { Pop-Location }
+  if (-not $agentInState) { $script:HoldSreAgent = $true }
 }
 
 switch ($Task) {
@@ -1157,9 +1433,12 @@ switch ($Task) {
   'configure' { Phase-Configure }
   'provision' { Phase-Prereqs; Phase-Provision }
   'image'     { Ensure-Az; Phase-Image }
-  'grant-sql' { Ensure-Az; Phase-GrantSql }
-  'set-pat'   { Ensure-Az; Phase-SetPat }
-  'status'    { Phase-Status }
+  'grant-sql'     { Ensure-Az; Phase-GrantSql }
+  'set-pat'       { Ensure-Az; Phase-SetPat }
+  'status'        { Phase-Status }
+  'sre-provision' { Ensure-Az; Phase-SreProvision }
+  'grant-sre-sql' { Ensure-Az; Phase-GrantSreSql }
+  'sre-sync'      { Ensure-Az; Phase-SreSync }
   'all' {
     $script:InAllSequence = $true
     Phase-Prereqs
@@ -1168,11 +1447,18 @@ switch ($Task) {
     Phase-Configure
     $tfLoc = Get-TfVar 'location'; if ($tfLoc) { $Location = $tfLoc }
     Phase-Preflight -Gate
+    # ── Core app: everything the app needs, in order. The optional SRE agent is deliberately NOT
+    #    here — it runs LAST (below), so a failure in the preview agent API can never abort these.
     Phase-Provision
     Phase-Image
     Phase-GrantSql
     Phase-SetPat
     Phase-Status
+    # ── Optional SRE Agent add-on — LAST, after the app is deployed and health-checked. All three
+    #    self-skip when enable_sre_agent != true, and Phase-SreProvision is non-fatal on failure.
+    Phase-SreProvision
+    Phase-GrantSreSql
+    Phase-SreSync
     Write-Banner 'Done'
     Write-Info 'Sign in with your Microsoft account when redirected. Admin console appears if you were granted the Admin role.'
     Write-Info 'Tear down when finished:  cd infra ; terraform destroy'

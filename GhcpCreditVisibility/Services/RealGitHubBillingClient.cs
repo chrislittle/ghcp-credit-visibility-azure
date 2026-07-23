@@ -19,14 +19,16 @@ namespace GhcpCreditVisibility.Services
         private readonly HttpClient _http;   // BaseAddress = https://api.github.com, resilience handler attached
         private readonly string _token;
         private readonly ILogger<RealGitHubBillingClient> _logger;
+        private readonly GitHubRateLimitState _rateLimit;
 
         // Typed-client ctor: token is read from configuration (GitHub:Token), which in
         // Azure is a Key Vault reference resolved via the app's managed identity.
-        public RealGitHubBillingClient(HttpClient http, IConfiguration config, ILogger<RealGitHubBillingClient> logger)
+        public RealGitHubBillingClient(HttpClient http, IConfiguration config, ILogger<RealGitHubBillingClient> logger, GitHubRateLimitState rateLimit)
         {
             _http = http;
             _token = config["GitHub:Token"] ?? string.Empty;
             _logger = logger;
+            _rateLimit = rateLimit;
         }
 
         public async Task<IReadOnlyList<EnterpriseLicenseUser>> GetEnterpriseUsersAsync(string enterprise, CancellationToken ct = default)
@@ -83,6 +85,19 @@ namespace GhcpCreditVisibility.Services
             request.Headers.UserAgent.Add(new ProductInfoHeaderValue("GhcpCreditVisibility", "1.0"));
 
             using var response = await _http.SendAsync(request, ct);
+
+            // Record rate-limit headers (present on both success and 4xx) so the diagnostics
+            // publisher can surface the remaining budget as an alertable metric — the sequential
+            // per-user calls here are what put pressure on it at enterprise scale.
+            if (response.Headers.TryGetValues("X-RateLimit-Remaining", out var remainingValues)
+                && int.TryParse(remainingValues.FirstOrDefault(), out var remaining))
+            {
+                int? limit = null;
+                if (response.Headers.TryGetValues("X-RateLimit-Limit", out var limitValues)
+                    && int.TryParse(limitValues.FirstOrDefault(), out var l))
+                    limit = l;
+                _rateLimit.Record(remaining, limit);
+            }
 
             // Log (but do not crash the snapshot run on) rate-limit responses; the
             // resilience handler already retried transient 429/5xx before we get here.

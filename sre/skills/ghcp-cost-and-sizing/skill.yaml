@@ -1,0 +1,10 @@
+name: ghcp-cost-and-sizing
+description: >-
+  Use to right-size and audit the cost of the GHCP deployment: serverless-vs-provisioned SQL
+  crossover from real paused-hours data, App Service SKU/autoscale fit, and leftover deployment
+  artifacts (AllowDeployerIP firewall rules, public network access) worth flagging.
+files:
+  - SKILL.md
+tools:
+  - RunAzCliReadCommands
+  - execute_kusto_query

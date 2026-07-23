@@ -1,0 +1,9 @@
+name: ghcp-private-network-path
+description: >-
+  Use when the GHCP app can't reach SQL, Key Vault, or GitHub in the PRIVATE networking pattern —
+  DNS resolution failures, Key Vault reference not resolving, or outbound GitHub calls dying while
+  everything else looks healthy. Covers private endpoints, private DNS, and forced-tunnel egress.
+files:
+  - SKILL.md
+tools:
+  - RunAzCliReadCommands
