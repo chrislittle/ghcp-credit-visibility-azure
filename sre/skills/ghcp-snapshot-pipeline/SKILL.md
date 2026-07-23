@@ -25,7 +25,7 @@ attempts:
 Column mapping vs. classic: metric value → `Max`/`Min`/`Sum` (not `value`); event fields → `Properties`
 and `Measurements` (not `customDimensions`/`customMeasurements`); time → `TimeGenerated`.
 
-## Telemetry you have (Phase 0)
+## Telemetry you have
 
 | Signal (AppMetrics.Name / AppEvents.Name) | Meaning |
 |---|---|

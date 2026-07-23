@@ -7,7 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace GhcpCreditVisibility.Tests;
 
 /// <summary>
-/// The diagnostics collector is the whole point of Phase 0: it turns the app's private-DB failure
+/// The diagnostics collector is the load-bearing piece: it turns the app's private-DB failure
 /// modes into a shape an out-of-network agent (or an Azure Monitor alert) can act on. These tests
 /// pin the readings that alert rules and the SRE skills key off — especially the ones with subtle
 /// semantics (token-resolution detection, "no run yet" vs "run failed").

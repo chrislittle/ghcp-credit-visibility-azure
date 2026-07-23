@@ -257,14 +257,13 @@ resource "azurerm_role_assignment" "sre_system_reader" {
 #  Phase 5 — alert rules routed to the agent
 # ─────────────────────────────────────────────────────────────────────────────
 #  Log-search alerts over the app's Application Insights, firing on the custom metrics/events
-#  emitted by SreDiagnosticsPublisher / SnapshotService (Phase 0). These DETECT; the agent
-#  DIAGNOSES — keeping detection in cheap alert rules (not agent polling) is the biggest cost
-#  lever in the plan.
+#  emitted by SreDiagnosticsPublisher / SnapshotService. These DETECT; the agent DIAGNOSES —
+#  keeping detection in alert rules rather than agent polling is deliberate.
 #
-#  KQL note: these query the classic customMetrics/customEvents schema on the App Insights
-#  component. Validate each rule against real telemetry once it is flowing (Phase 0 must be
-#  deployed and a snapshot must have run) — table/column shapes are the one thing that can't be
-#  checked at plan time.
+#  KQL note: see the schema comment on `sre_alerts` below — this App Insights is workspace-based,
+#  so the rules query the App* tables, not classic customMetrics/customEvents. Validate each rule
+#  against real telemetry once it is flowing (the app must be deployed and a snapshot must have
+#  run) — table/column shapes are the one thing that can't be checked at plan time.
 # ─────────────────────────────────────────────────────────────────────────────
 
 resource "azurerm_monitor_action_group" "sre" {

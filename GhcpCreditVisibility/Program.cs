@@ -80,7 +80,7 @@ builder.Services.AddApplicationInsightsTelemetry();
 // so the custom-metric publisher had nothing to resolve. TryAdd is a no-op when the SDK already
 // registered TelemetryClient; otherwise it builds one from the SDK's TelemetryConfiguration (or a
 // default configured from the connection string if that's missing too). This is what keeps the
-// Phase 0 SRE metrics flowing regardless of the host's AI-SDK quirks.
+// SRE diagnostics metrics flowing regardless of the host's AI-SDK quirks.
 builder.Services.TryAddSingleton(sp =>
 {
     var cfg = sp.GetService<Microsoft.ApplicationInsights.Extensibility.TelemetryConfiguration>();

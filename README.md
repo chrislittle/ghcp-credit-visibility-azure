@@ -251,7 +251,8 @@ HTTP monitoring (the site returns 200 while serving stale or wrong numbers), and
 not you ever enable the agent. On top of that sit domain **skills**, **custom agents**, **hooks**
 (including a policy gate that blocks the agent from ever reading the GitHub PAT), and alert rules.
 
-Full walkthrough — architecture, what gets built, deploy steps, and cost: **[docs/SRE_AGENT.md](docs/SRE_AGENT.md)**.
+Full walkthrough — architecture, the skills/agents/hooks that teach it this app, what gets built, and
+deploy steps: **[docs/SRE_AGENT.md](docs/SRE_AGENT.md)**.
 
 ## Cost notes
 

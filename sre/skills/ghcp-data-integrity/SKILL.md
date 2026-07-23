@@ -8,7 +8,7 @@ present but suspicious — or on a schedule, proactively.
 > operator invoke **`/agent ghcp_data_auditor`** (the data-correctness subagent) — name that agent,
 > not this skill. This skill is the background playbook the specialist (and you) work from.
 
-Signals available without DB access (from Phase 0 telemetry). This App Insights is WORKSPACE-BASED,
+Signals available without DB access (from the app's diagnostics telemetry). This App Insights is WORKSPACE-BASED,
 so run the KQL below with the **"Monitor Workspace Log Query" tool** (connector-backed, reliable —
 not "Resource Log Query", which 403s) against the `App*` tables (`AppMetrics`/`AppEvents`); the
 classic `customMetrics`/`customEvents` tables are empty here. See `ghcp-snapshot-pipeline` for the
