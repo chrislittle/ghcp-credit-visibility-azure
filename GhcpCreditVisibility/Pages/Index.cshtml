@@ -314,16 +314,29 @@
     </div>
 </div>
 
-<!-- BUDGETS (bottom) -->
+<!-- BUDGETS (bottom): exceptions-first at scale, everything at small scale -->
 @if (Model.Budgets.Count > 0)
 {
     <div class="gh-card">
         <div class="ch">
-            <h2>Budgets</h2>
+            <h2>@(Model.BudgetExceptionsMode ? "Budgets — needs attention" : "Budgets")</h2>
             <span class="hint">@Model.MonthLabel · actual vs GitHub budget</span>
         </div>
+        @if (Model.BudgetExceptionsMode)
+        {
+            <div class="gh-cardbody" style="border-bottom:1px solid var(--gh-line);display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <span class="gh-note">@Model.Budgets.Count budgets across @Model.BudgetEnterpriseCount @(Model.BudgetEnterpriseCount == 1 ? "enterprise" : "enterprises"):</span>
+                @if (Model.BudgetOverCount > 0) { <span class="gh-badge over">@Model.BudgetOverCount over</span> }
+                @if (Model.BudgetNearLimitCount > 0) { <span class="gh-badge critical">@Model.BudgetNearLimitCount near limit</span> }
+                <span class="gh-badge ok">@Model.BudgetOnTrackCount on track</span>
+            </div>
+            @if (Model.DisplayBudgets.Count == 0)
+            {
+                <div class="gh-cardbody"><div class="gh-note mb-0">✅ All @Model.Budgets.Count budgets are on track — nothing needs attention this month.</div></div>
+            }
+        }
         <div class="gh-budgets">
-        @foreach (var b in Model.Budgets)
+        @foreach (var b in Model.DisplayBudgets)
         {
             var pct = Math.Min(100, (int)Math.Round(b.Pct));
             var levelLabel = b.Level switch { "over" => "Over budget", "critical" => "Near limit", "warn" => "Watch", _ => "On track" };
@@ -345,8 +358,22 @@
             </div>
         }
         </div>
-        <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
-            <div class="gh-note mb-0">Budgets are set in GitHub; alert emails are sent by GitHub. This is a read-only view of current-month utilization.</div>
+        <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+            <div class="gh-note mb-0">
+                @if (Model.BudgetExceptionsMode)
+                {
+                    @if (Model.HiddenAttentionBudgetCount > 0)
+                    {
+                        <text>…and @Model.HiddenAttentionBudgetCount more need@(Model.HiddenAttentionBudgetCount == 1 ? "s" : "") attention. </text>
+                    }
+                    <text>On-track budgets are summarized above, not listed. Budgets are set in GitHub; alert emails are sent by GitHub.</text>
+                }
+                else
+                {
+                    <text>Budgets are set in GitHub; alert emails are sent by GitHub. This is a read-only view of current-month utilization.</text>
+                }
+            </div>
+            <a href="@Url.Page("Budgets", new { Period = Model.PeriodValue, Ent = Model.Ent })" style="font-weight:600;font-size:13px;white-space:nowrap;">View all @Model.Budgets.Count budgets →</a>
         </div>
     </div>
 }

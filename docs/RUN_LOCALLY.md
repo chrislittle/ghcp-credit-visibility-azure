@@ -89,7 +89,9 @@ Go to the HTTPS URL printed in the console (e.g. `https://localhost:5001`).
   whom deliberately share logins with Contoso users, plus a cost center also named "Engineering")
   — so the multi-enterprise UI has something real to show: the **enterprise dropdown** in the
   header, enterprise-qualified cost-center labels (`Engineering · Contoso` vs
-  `Engineering · Fabrikam`), and per-enterprise budgets. Try the **Reports** page (break down by
+  `Engineering · Fabrikam`), and per-enterprise budgets shown **exceptions-first** (only
+  over/near-limit budgets get meters; the full list is on the **Budgets** page, grouped by
+  enterprise and filterable by status). Try the **Reports** page (break down by
   user/model/cost-center/**enterprise**, by day/week/month), and **Admin** for both **GitHub
   enterprises** (the registry — add/disable/remove enterprises, no redeploy) and **Access
   mappings** (map a fake Entra group/user object ID to cost centers across either enterprise — no

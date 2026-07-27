@@ -1,0 +1,133 @@
+@page
+@model BudgetsModel
+@{
+    ViewData["Title"] = "Budgets";
+    string LevelLabel(string level) => level switch { "over" => "Over budget", "critical" => "Near limit", "warn" => "Watch", _ => "On track" };
+}
+
+<div class="gh-pagehead">
+    <div>
+        <h1>Budgets</h1>
+        <div class="sub">Every GitHub budget in your scope — governed and alerted in GitHub, read-only here. The Usage dashboard shows only the ones needing attention.</div>
+    </div>
+    <div class="gh-headtools">
+        <form method="get" class="gh-mpick mb-0">
+            @if (Model.Ent is long) { <input type="hidden" name="Ent" value="@Model.Ent" /> }
+            @if (Model.Status != "all") { <input type="hidden" name="Status" value="@Model.Status" /> }
+            <span class="cal" aria-hidden="true">🗓</span>
+            <select name="Period" onchange="this.form.submit()" aria-label="Month">
+                @if (Model.AvailableMonths.Count == 0)
+                {
+                    <option value="@Model.PeriodValue" selected>@Model.MonthLabel</option>
+                }
+                @foreach (var mo in Model.AvailableMonths)
+                {
+                    var val = $"{mo.Year:D4}-{mo.Month:D2}";
+                    <option value="@val" selected="@(mo.Year == Model.Year && mo.Month == Model.Month)">@BudgetsModel.FormatMonth(mo.Year, mo.Month)</option>
+                }
+            </select>
+        </form>
+    </div>
+</div>
+
+<!-- FILTERS + STATUS SUMMARY -->
+<div class="gh-card">
+    <div class="ch">
+        <h2>All budgets — @Model.MonthLabel</h2>
+        <span class="hint">
+            <span class="gh-badge over">@Model.OverCount over</span>
+            <span class="gh-badge critical">@Model.NearLimitCount near limit</span>
+            <span class="gh-badge warn">@Model.WatchCount watch</span>
+            <span class="gh-badge ok">@Model.OnTrackCount on track</span>
+        </span>
+    </div>
+    <div class="gh-cardbody">
+        <form method="get" class="gh-filters">
+            <input type="hidden" name="Period" value="@Model.PeriodValue" />
+            @if (Model.MultiEnterprise)
+            {
+                <div class="fld">
+                    <label>Enterprise</label>
+                    <select name="Ent" onchange="this.form.submit()">
+                        <option value="">All enterprises</option>
+                        @foreach (var e in Model.VisibleEnterprises)
+                        {
+                            <option value="@e.Id" selected="@(Model.Ent == e.Id)">@e.Name</option>
+                        }
+                    </select>
+                </div>
+            }
+            <div class="fld">
+                <label>Status</label>
+                <select name="Status" onchange="this.form.submit()">
+                    <option value="all" selected="@(Model.Status == "all")">Any status</option>
+                    <option value="over" selected="@(Model.Status == "over")">Over budget</option>
+                    <option value="critical" selected="@(Model.Status == "critical")">Near limit (90%+)</option>
+                    <option value="warn" selected="@(Model.Status == "warn")">Watch (75–90%)</option>
+                    <option value="ok" selected="@(Model.Status == "ok")">On track</option>
+                </select>
+            </div>
+            <div class="fld">
+                <label>Search</label>
+                <input type="search" name="Q" value="@Model.Q" placeholder="Cost center or enterprise…" class="form-control form-control-sm" style="min-width:220px" />
+            </div>
+            <button class="btn btn-sm btn-primary" type="submit">Apply</button>
+            <a class="btn btn-sm btn-outline-secondary" href="?Period=@Model.PeriodValue">Reset</a>
+        </form>
+    </div>
+</div>
+
+@if (Model.MatchCount == 0)
+{
+    <div class="gh-card"><div class="gh-cardbody"><p style="text-align:center;color:#66707d;margin:0;padding:18px 0;">No budgets match this filter.</p></div></div>
+}
+else
+{
+    @foreach (var group in Model.Groups)
+    {
+        <div class="gh-card">
+            @if (Model.MultiEnterprise)
+            {
+                <div class="ch"><h2>🏢 @(group.EnterpriseName ?? $"Enterprise {group.EnterpriseId}")</h2><span class="hint">@group.Rows.Count budget@(group.Rows.Count == 1 ? "" : "s")</span></div>
+            }
+            <table>
+                <thead>
+                    <tr>
+                        <th>Budget</th><th>Status</th><th class="num">% used</th><th class="num">Actual&nbsp;($)</th><th class="num">Budget&nbsp;($)</th><th class="num">Remaining&nbsp;($)</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var b in group.Rows)
+                    {
+                        <tr>
+                            <td>
+                                @if (b.IsOrg)
+                                {
+                                    <strong>🏦 Enterprise-wide</strong>
+                                }
+                                else
+                                {
+                                    @(b.CostCenterName ?? b.CostCenterId)
+                                }
+                            </td>
+                            <td><span class="gh-badge @b.Level">@LevelLabel(b.Level)</span></td>
+                            <td class="num">@b.Pct.ToString("N0")%</td>
+                            <td class="num">@b.Actual.ToString("N2")</td>
+                            <td class="num">@b.Amount.ToString("N2")</td>
+                            <td class="num" style="@(b.Remaining < 0 ? "color:#b42318" : "")">@(b.Remaining >= 0 ? b.Remaining.ToString("N2") : $"−{Math.Abs(b.Remaining):N2}")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    <div class="gh-card">
+        <div class="gh-cardbody">
+            <div class="gh-note mb-0">
+                Budgets are <strong>configured and enforced in GitHub</strong>; GitHub sends the alert emails. Thresholds here are presentational:
+                <strong>watch</strong> from 75%, <strong>near limit</strong> from 90%, <strong>over</strong> past 100%. Enterprise-wide budgets are visible to admins only.
+            </div>
+        </div>
+    </div>
+}

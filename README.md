@@ -65,9 +65,13 @@ This app closes that gap:
 |---|---|
 | ![Usage dashboard with the enterprise filter and enterprise-qualified cost centers](docs/images/dashboard.png) | ![Reports page breaking spend down by cost center across enterprises, with the enterprise filter](docs/images/reports.png) |
 
-| Admin console — enterprise registry + access mappings | About page (in-app documentation) |
+| Budgets — every budget, grouped by enterprise | Admin console — enterprise registry + access mappings |
 |---|---|
-| ![Admin console with the GitHub enterprises registry and mappings](docs/images/admin-mappings.png) | ![About page](docs/images/about.png) |
+| ![Budgets page with all budgets grouped by enterprise, filterable by status](docs/images/budgets.png) | ![Admin console with the GitHub enterprises registry and mappings](docs/images/admin-mappings.png) |
+
+| About page (in-app documentation) |
+|---|
+| ![About page](docs/images/about.png) |
 
 *(Screenshots above were captured from a local run against the built-in synthetic demo data — two
 mock enterprises, **Contoso** and **Fabrikam**, seeded automatically; note the enterprise dropdown,
@@ -90,9 +94,13 @@ enterprises, users, cost centers, and spend.)*
   principals — no redeploy, no Terraform, no restart. Alerts split by an enterprise telemetry
   dimension, so enterprise N+1 is alertable automatically. Hybrid deployments (real enterprises
   alongside mock demo/fire-drill ones) are first-class.
-- **Budget tracking** — reads the budgets and thresholds you've configured *in GitHub* (this app
-  never creates or edits budgets) and shows current-month utilization with near-limit/over-budget
-  callouts. GitHub still sends the actual alert emails.
+- **Budget tracking, exceptions-first at scale** — reads the budgets and thresholds you've
+  configured *in GitHub* (this app never creates or edits budgets) and shows current-month
+  utilization. The dashboard surfaces only budgets **needing attention** (over / near limit, worst
+  first) once more than a handful are visible — an exec spanning several enterprises sees the two
+  red ones, not a wall of dozens of green meters — while a dedicated **Budgets** page lists every
+  budget, grouped by enterprise and filterable by status. GitHub still sends the actual alert
+  emails.
 - **Microsoft Entra ID authentication** (Azure App Service Easy Auth) — no anonymous access, ever.
 - **Group- and user-based access scoping, many-to-many** — an in-app Admin console maps Entra
   security groups *and/or* individual users to **one or more** GitHub cost centers each. An
