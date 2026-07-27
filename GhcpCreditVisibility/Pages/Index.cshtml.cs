@@ -25,6 +25,7 @@ namespace GhcpCreditVisibility.Pages
         [BindProperty(SupportsGet = true)] public string? Period { get; set; }      // "YYYY-MM" for the per-user table
         [BindProperty(SupportsGet = true)] public string? UserSearch { get; set; }  // filter the per-user table by name/login/cost center
         [BindProperty(SupportsGet = true)] public int UserPage { get; set; } = 1;   // 1-based page index for the per-user table
+        [BindProperty(SupportsGet = true)] public long? Ent { get; set; }           // enterprise filter (null = all in scope)
 
         public const int UserPageSize = 25;
 
@@ -32,6 +33,9 @@ namespace GhcpCreditVisibility.Pages
         public int Month { get; private set; }
         public bool SeesAll { get; private set; }
         public string ScopeLabel { get; private set; } = "";
+        /// <summary>Enterprises whose data the caller can see; the filter dropdown renders only when there's more than one.</summary>
+        public IReadOnlyList<UsageQueryService.EnterpriseOption> VisibleEnterprises { get; private set; } = Array.Empty<UsageQueryService.EnterpriseOption>();
+        public bool MultiEnterprise => VisibleEnterprises.Count > 1;
         public IReadOnlyList<UsageQueryService.MonthOption> AvailableMonths { get; private set; } = Array.Empty<UsageQueryService.MonthOption>();
 
         /// <summary>The single page of per-user rows actually rendered in the table (already filtered by <see cref="UserSearch"/> and paged in the database).</summary>
@@ -75,6 +79,14 @@ namespace GhcpCreditVisibility.Pages
                 ? "All cost centers"
                 : scope.CostCenterIds.Count > 0 ? $"Cost centers: {string.Join(", ", scope.CostCenterIds)}"
                 : "No assigned scope";
+
+            // Enterprise filter: only applies when the chosen enterprise is within the caller's
+            // visibility (a bookmarked ?Ent= for an enterprise they can't see silently resets to all).
+            VisibleEnterprises = await _query.GetVisibleEnterprisesAsync(scope, ct);
+            if (Ent is long entFilter && VisibleEnterprises.Any(e => e.Id == entFilter))
+                scope = scope with { EnterpriseFilter = entFilter };
+            else
+                Ent = null;
 
             AvailableMonths = await _query.GetAvailableMonthsAsync(scope, ct);
 

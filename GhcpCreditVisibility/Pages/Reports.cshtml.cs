@@ -22,17 +22,20 @@ namespace GhcpCreditVisibility.Pages
             _scopeResolver = scopeResolver;
         }
 
-        [BindProperty(SupportsGet = true)] public string Dim { get; set; } = "costcenter";     // total | user | model | costcenter
+        [BindProperty(SupportsGet = true)] public string Dim { get; set; } = "costcenter";     // total | user | model | costcenter | enterprise
         [BindProperty(SupportsGet = true)] public string Gran { get; set; } = "month";           // day | week | month
         [BindProperty(SupportsGet = true)] public int Range { get; set; } = 12;                  // number of buckets back; 0 = all
         [BindProperty(SupportsGet = true)] public string? FilterUser { get; set; }
         [BindProperty(SupportsGet = true)] public string? FilterModel { get; set; }
-        [BindProperty(SupportsGet = true)] public string? FilterCostCenter { get; set; }
+        [BindProperty(SupportsGet = true)] public string? FilterCostCenter { get; set; }         // enterprise-qualified key "<enterpriseId>:<ccId>"
+        [BindProperty(SupportsGet = true)] public long? Ent { get; set; }                        // enterprise filter (null = all in scope)
         [BindProperty(SupportsGet = true)] public string View { get; set; } = "chart";           // chart | table
 
         public bool SeesAll { get; private set; }
         public string ScopeLabel { get; private set; } = "";
-        public FilterOptions Options { get; private set; } = new(Array.Empty<UserOption>(), Array.Empty<string>(), Array.Empty<CostCenterTotal>());
+        public IReadOnlyList<EnterpriseOption> VisibleEnterprises { get; private set; } = Array.Empty<EnterpriseOption>();
+        public bool MultiEnterprise => VisibleEnterprises.Count > 1;
+        public FilterOptions Options { get; private set; } = new(Array.Empty<UserOption>(), Array.Empty<string>(), Array.Empty<CostCenterFilterOption>(), Array.Empty<EnterpriseOption>());
         public IReadOnlyList<Series> SeriesList { get; private set; } = Array.Empty<Series>();
         public IReadOnlyList<string> Buckets { get; private set; } = Array.Empty<string>();
         public decimal GrandTotal { get; private set; }
@@ -49,15 +52,17 @@ namespace GhcpCreditVisibility.Pages
             _ => MonthRanges
         };
 
-        public string DimLabel => Dim switch { "user" => "user", "model" => "model", "costcenter" => "cost center", _ => "total" };
+        public string DimLabel => Dim switch { "user" => "user", "model" => "model", "costcenter" => "cost center", "enterprise" => "enterprise", _ => "total" };
         public string GranLabel => Gran switch { "day" => "day", "week" => "week", _ => "month" };
         public bool IsTotal => Dim == "total";
 
         // Contextual filters: only offer filters that can't collapse the breakdown to a trivial 100%.
-        // (A user maps to exactly one cost center, so a user filter collapses a cost-center breakdown.)
-        public bool ShowUserFilter => Dim is "model" or "total";
-        public bool ShowModelFilter => Dim is "costcenter" or "user" or "total";
+        // (A user maps to exactly one cost center, so a user filter collapses a cost-center breakdown;
+        // an enterprise filter collapses an enterprise breakdown the same way.)
+        public bool ShowUserFilter => Dim is "model" or "total" or "enterprise";
+        public bool ShowModelFilter => Dim is "costcenter" or "user" or "total" or "enterprise";
         public bool ShowCostCenterFilter => Dim is "user" or "model" or "total";
+        public bool ShowEnterpriseFilter => Dim is not "enterprise" && MultiEnterprise;
 
         public string PeriodLabel
         {
@@ -77,10 +82,20 @@ namespace GhcpCreditVisibility.Pages
                 : scope.CostCenterIds.Count > 0 ? $"Cost centers: {string.Join(", ", scope.CostCenterIds)}"
                 : "No assigned scope";
 
+            // Enterprise filter: validated against the caller's visibility, then applied to the
+            // scope itself so filter options AND series both narrow to the chosen enterprise.
+            VisibleEnterprises = await _query.GetVisibleEnterprisesAsync(scope, ct);
+            // An enterprise filter on the enterprise breakdown would collapse it to a trivial 100%.
+            if (string.Equals(Dim, "enterprise", StringComparison.OrdinalIgnoreCase)) Ent = null;
+            if (Ent is long entFilter && VisibleEnterprises.Any(e => e.Id == entFilter))
+                scope = scope with { EnterpriseFilter = entFilter };
+            else
+                Ent = null;
+
             Options = await _query.GetFilterOptionsAsync(scope, ct);
 
             if (View != "table") View = "chart";
-            if (Dim is not ("total" or "user" or "model" or "costcenter")) Dim = "costcenter";
+            if (Dim is not ("total" or "user" or "model" or "costcenter" or "enterprise")) Dim = "costcenter";
             if (Gran is not ("day" or "week" or "month")) Gran = "month";
             // Snap the range to a valid option for the chosen granularity (avoids e.g. "12 days" after switching from months).
             if (!RangeOptions.Any(o => o.Value == Range))
@@ -96,6 +111,7 @@ namespace GhcpCreditVisibility.Pages
                 "user" => SeriesDimension.User,
                 "model" => SeriesDimension.Model,
                 "costcenter" => SeriesDimension.CostCenter,
+                "enterprise" => SeriesDimension.Enterprise,
                 _ => SeriesDimension.Total
             };
             var granularity = Gran switch { "day" => TimeGranularity.Day, "week" => TimeGranularity.Week, _ => TimeGranularity.Month };

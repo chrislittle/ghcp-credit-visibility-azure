@@ -1,0 +1,320 @@
+using GhcpCreditVisibility.Authorization;
+using GhcpCreditVisibility.Data;
+using GhcpCreditVisibility.Services;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
+
+namespace GhcpCreditVisibility.Tests;
+
+/// <summary>
+/// Pins the multi-enterprise schema semantics — the exact collision cases the EnterpriseId
+/// qualifiers exist for. The same GitHub login CAN exist in two enterprises, two enterprises DO
+/// both have an org-scope budget row, and cost centers in different enterprises must never merge.
+/// These are deterministic model/index facts, testable with no deployment and no second real
+/// enterprise.
+/// </summary>
+public class MultiEnterpriseSchemaTests
+{
+    private static IDbContextFactory<BillingDbContext> NewFactory()
+    {
+        var services = new ServiceCollection();
+        services.AddDbContextFactory<BillingDbContext>(o => o.UseInMemoryDatabase(Guid.NewGuid().ToString()));
+        return services.BuildServiceProvider().GetRequiredService<IDbContextFactory<BillingDbContext>>();
+    }
+
+    [Fact]
+    public void Usage_natural_key_is_enterprise_qualified()
+    {
+        // Model-level assertion: the unique index over usage rows must LEAD with EnterpriseId —
+        // without it, the same login/month/model/sku in two enterprises silently collapses.
+        using var db = NewFactory().CreateDbContext();
+        var entity = db.Model.FindEntityType(typeof(UsageSnapshot))!;
+        var unique = entity.GetIndexes().Single(i => i.IsUnique);
+        var props = unique.Properties.Select(p => p.Name).ToArray();
+        Assert.Equal(new[] { "EnterpriseId", "Year", "Month", "Day", "UserLogin", "Model", "Sku" }, props);
+    }
+
+    [Fact]
+    public void Budget_key_and_mapping_key_are_enterprise_qualified()
+    {
+        using var db = NewFactory().CreateDbContext();
+
+        var budget = db.Model.FindEntityType(typeof(BudgetSnapshot))!;
+        Assert.Equal(new[] { "EnterpriseId", "Scope", "CostCenterId" },
+            budget.GetIndexes().Single(i => i.IsUnique).Properties.Select(p => p.Name).ToArray());
+
+        var mapping = db.Model.FindEntityType(typeof(PrincipalCostCenterMapping))!;
+        Assert.Equal(new[] { "PrincipalType", "PrincipalObjectId", "EnterpriseId", "CostCenterId" },
+            mapping.GetIndexes().Single(i => i.IsUnique).Properties.Select(p => p.Name).ToArray());
+
+        var directory = db.Model.FindEntityType(typeof(CostCenterDirectoryEntry))!;
+        Assert.Equal(new[] { "EnterpriseId", "CostCenterId" },
+            directory.FindPrimaryKey()!.Properties.Select(p => p.Name).ToArray());
+
+        var enterprise = db.Model.FindEntityType(typeof(Enterprise))!;
+        Assert.True(enterprise.GetIndexes().Single(i => i.Properties.Single().Name == "Slug").IsUnique,
+            "Enterprise.Slug must be uniquely constrained — an accidental duplicate registration would double every number for that enterprise.");
+    }
+
+    [Fact]
+    public async Task Same_login_same_month_persists_as_two_rows_across_enterprises()
+    {
+        var factory = NewFactory();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 1, Year = 2026, Month = 7, Day = 1, UserLogin = "dkim", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 10m });
+            db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 2, Year = 2026, Month = 7, Day = 1, UserLogin = "dkim", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 99m });
+            await db.SaveChangesAsync();
+        }
+
+        await using var check = await factory.CreateDbContextAsync();
+        var rows = await check.UsageSnapshots.Where(x => x.UserLogin == "dkim").ToListAsync();
+        Assert.Equal(2, rows.Count);
+        Assert.Equal(109m, rows.Sum(r => r.NetAmount)); // distinct spend per enterprise, never merged
+    }
+
+    [Fact]
+    public async Task Each_enterprise_keeps_its_own_org_budget_row()
+    {
+        var factory = NewFactory();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            db.BudgetSnapshots.Add(new BudgetSnapshot { EnterpriseId = 1, Scope = BudgetScopes.Org, CostCenterId = "", Amount = 700m });
+            db.BudgetSnapshots.Add(new BudgetSnapshot { EnterpriseId = 2, Scope = BudgetScopes.Org, CostCenterId = "", Amount = 450m });
+            await db.SaveChangesAsync();
+        }
+
+        await using var check = await factory.CreateDbContextAsync();
+        Assert.Equal(2, await check.BudgetSnapshots.CountAsync(b => b.Scope == BudgetScopes.Org));
+    }
+}
+
+/// <summary>End-to-end behavior of the registry + snapshot loop against the in-memory provider.</summary>
+public class MultiEnterprisePipelineTests
+{
+    private static IDbContextFactory<BillingDbContext> NewFactory()
+    {
+        var services = new ServiceCollection();
+        services.AddDbContextFactory<BillingDbContext>(o => o.UseInMemoryDatabase(Guid.NewGuid().ToString()));
+        return services.BuildServiceProvider().GetRequiredService<IDbContextFactory<BillingDbContext>>();
+    }
+
+    private static EnterpriseRegistryService Registry(IDbContextFactory<BillingDbContext> factory, string? slug = "test-enterprise", bool useMock = true)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["GitHub:Enterprise"] = slug,
+            ["GitHub:UseMock"] = useMock.ToString()
+        }).Build();
+        return new EnterpriseRegistryService(factory, config, NullLogger<EnterpriseRegistryService>.Instance);
+    }
+
+    private sealed class RoutingMockFactory : IEnterpriseBillingClientFactory
+    {
+        private readonly MockGitHubBillingClient _mock = new();
+        public Task<IGitHubBillingClient> GetClientAsync(Enterprise enterprise, CancellationToken ct = default)
+            => Task.FromResult<IGitHubBillingClient>(_mock);
+    }
+
+    private static SnapshotService Service(IDbContextFactory<BillingDbContext> factory, EnterpriseRegistryService registry)
+    {
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["Retention:Months"] = "6"
+        }).Build();
+        return new SnapshotService(new RoutingMockFactory(), registry, factory, config, NullLogger<SnapshotService>.Instance);
+    }
+
+    [Fact]
+    public async Task Bootstrap_seeds_exactly_one_row_from_config_and_is_idempotent()
+    {
+        var factory = NewFactory();
+        var registry = Registry(factory);
+
+        await registry.EnsureBootstrapAsync();
+        await registry.EnsureBootstrapAsync(); // idempotent
+
+        var all = await registry.GetAllAsync();
+        var row = Assert.Single(all);
+        Assert.Equal("test-enterprise", row.Slug);
+        Assert.True(row.UseMockData);
+        Assert.True(row.Enabled); // the bootstrap (pre-existing) enterprise stays enabled on upgrade
+    }
+
+    [Fact]
+    public async Task Duplicate_slug_is_rejected()
+    {
+        var factory = NewFactory();
+        var registry = Registry(factory);
+        await registry.AddAsync("contoso", null, null, useMockData: true, "test");
+
+        await Assert.ThrowsAsync<ArgumentException>(() =>
+            registry.AddAsync("contoso", "Duplicate", null, useMockData: true, "test"));
+    }
+
+    [Fact]
+    public async Task New_enterprises_start_disabled()
+    {
+        var factory = NewFactory();
+        var registry = Registry(factory);
+
+        var row = await registry.AddAsync("fabrikam", "Fabrikam", null, useMockData: true, "test");
+
+        Assert.False(row.Enabled); // verify-before-visible onboarding: enable is an explicit step
+        Assert.Equal("github-pat-fabrikam", row.PatSecretName);
+    }
+
+    [Fact]
+    public async Task Snapshot_cycle_writes_each_enabled_enterprise_and_skips_disabled()
+    {
+        var factory = NewFactory();
+        var registry = Registry(factory, slug: "contoso");
+        await registry.EnsureBootstrapAsync();
+        var fabrikam = await registry.AddAsync("fabrikam", "Fabrikam", null, useMockData: true, "test");
+        await registry.SetEnabledAsync(fabrikam.Id, true, "test");
+        var disabled = await registry.AddAsync("disabled-ent", null, null, useMockData: true, "test");
+
+        await Service(factory, registry).RunAsync();
+
+        await using var db = await factory.CreateDbContextAsync();
+        var runs = await db.SnapshotRuns.ToListAsync();
+        Assert.Equal(2, runs.Count); // one run row per ENABLED enterprise; the disabled one is skipped
+        Assert.All(runs, r => Assert.Equal("succeeded", r.Status));
+        Assert.DoesNotContain(runs, r => r.EnterpriseId == disabled.Id);
+
+        // Every usage row is stamped with its enterprise, and both enterprises wrote data.
+        var byEnterprise = await db.UsageSnapshots.GroupBy(x => x.EnterpriseId).Select(g => g.Key).ToListAsync();
+        Assert.Equal(2, byEnterprise.Count);
+
+        // The overlapping logins (dkim, jchen exist in both mock enterprises) stayed distinct rows.
+        var fabrikamId = fabrikam.Id;
+        Assert.True(await db.UsageSnapshots.AnyAsync(x => x.UserLogin == "dkim" && x.EnterpriseId == fabrikamId));
+        Assert.True(await db.UsageSnapshots.AnyAsync(x => x.UserLogin == "dkim" && x.EnterpriseId != fabrikamId));
+    }
+
+    [Fact]
+    public async Task One_broken_enterprise_never_aborts_the_others()
+    {
+        var factory = NewFactory();
+        var registry = Registry(factory, slug: "contoso");
+        await registry.EnsureBootstrapAsync();
+        // The mock's fire-drill enterprise: every call throws a simulated outage.
+        var broken = await registry.AddAsync(MockGitHubBillingClient.BrokenEnterpriseSlug, "Broken (fire drill)", null, useMockData: true, "test");
+        await registry.SetEnabledAsync(broken.Id, true, "test");
+        var fabrikam = await registry.AddAsync("fabrikam", "Fabrikam", null, useMockData: true, "test");
+        await registry.SetEnabledAsync(fabrikam.Id, true, "test");
+
+        // Must NOT throw: per-enterprise isolation records the failure and continues.
+        await Service(factory, registry).RunAsync();
+
+        await using var db = await factory.CreateDbContextAsync();
+        var runs = await db.SnapshotRuns.ToListAsync();
+        Assert.Equal(3, runs.Count);
+        var brokenRun = Assert.Single(runs, r => r.EnterpriseId == broken.Id);
+        Assert.Equal("failed", brokenRun.Status);
+        Assert.Contains("Simulated outage", brokenRun.Error);
+        // Both healthy enterprises completed and wrote rows despite the failure between them.
+        Assert.All(runs.Where(r => r.EnterpriseId != broken.Id), r =>
+        {
+            Assert.Equal("succeeded", r.Status);
+            Assert.True(r.RowsWritten > 0);
+        });
+    }
+
+    [Fact]
+    public async Task Remove_enterprise_purges_exactly_its_own_data()
+    {
+        var factory = NewFactory();
+        var registry = Registry(factory, slug: "contoso");
+        await registry.EnsureBootstrapAsync();
+        var fabrikam = await registry.AddAsync("fabrikam", "Fabrikam", null, useMockData: true, "test");
+        await registry.SetEnabledAsync(fabrikam.Id, true, "test");
+        await Service(factory, registry).RunAsync();
+
+        var result = await registry.DeleteWithDataAsync(fabrikam.Id);
+
+        Assert.True(result.UsageRows > 0);
+        await using var db = await factory.CreateDbContextAsync();
+        Assert.False(await db.Enterprises.AnyAsync(e => e.Id == fabrikam.Id));
+        Assert.False(await db.UsageSnapshots.AnyAsync(x => x.EnterpriseId == fabrikam.Id));
+        Assert.False(await db.BudgetSnapshots.AnyAsync(x => x.EnterpriseId == fabrikam.Id));
+        Assert.False(await db.CostCenterDirectory.AnyAsync(x => x.EnterpriseId == fabrikam.Id));
+        Assert.False(await db.SnapshotRuns.AnyAsync(x => x.EnterpriseId == fabrikam.Id));
+        // The other enterprise's data is untouched.
+        Assert.True(await db.UsageSnapshots.AnyAsync(x => x.EnterpriseId != fabrikam.Id));
+    }
+}
+
+/// <summary>Scope enforcement: access is the exact (enterprise, cost-center) PAIR.</summary>
+public class EnterpriseScopeTests
+{
+    private static IDbContextFactory<BillingDbContext> NewFactory()
+    {
+        var services = new ServiceCollection();
+        services.AddDbContextFactory<BillingDbContext>(o => o.UseInMemoryDatabase(Guid.NewGuid().ToString()));
+        return services.BuildServiceProvider().GetRequiredService<IDbContextFactory<BillingDbContext>>();
+    }
+
+    private static async Task<IDbContextFactory<BillingDbContext>> SeedTwoEnterprisesAsync()
+    {
+        var factory = NewFactory();
+        await using var db = await factory.CreateDbContextAsync();
+        db.Enterprises.Add(new Enterprise { Slug = "contoso", DisplayName = "Contoso", UseMockData = true });
+        db.Enterprises.Add(new Enterprise { Slug = "fabrikam", DisplayName = "Fabrikam", UseMockData = true });
+        // DELIBERATE worst case: the same cost-center ID exists in both enterprises.
+        db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 1, Year = 2026, Month = 7, Day = 1, UserLogin = "a", CostCenterId = "cc-shared-id", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 10m });
+        db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 2, Year = 2026, Month = 7, Day = 1, UserLogin = "b", CostCenterId = "cc-shared-id", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 99m });
+        db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 2, Year = 2026, Month = 7, Day = 1, UserLogin = "c", CostCenterId = "cc-other", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 5m });
+        await db.SaveChangesAsync();
+        return factory;
+    }
+
+    [Fact]
+    public async Task Pair_scope_never_leaks_the_same_id_from_another_enterprise()
+    {
+        var factory = await SeedTwoEnterprisesAsync();
+        var query = new UsageQueryService(factory);
+        // Granted: cc-shared-id in enterprise 1 ONLY.
+        var scope = new UserScope(false, new[] { new EnterpriseCostCenter(1, "cc-shared-id") }, Array.Empty<string>());
+
+        var totals = await query.GetUserTotalsAsync(2026, 7, scope);
+
+        var row = Assert.Single(totals);
+        Assert.Equal("a", row.UserLogin);
+        Assert.Equal(10m, row.NetAmount); // enterprise 2's cc-shared-id (99) must NOT leak in
+    }
+
+    [Fact]
+    public async Task Enterprise_filter_narrows_even_an_admin_scope()
+    {
+        var factory = await SeedTwoEnterprisesAsync();
+        var query = new UsageQueryService(factory);
+        var adminScope = UserScope.All() with { EnterpriseFilter = 2 };
+
+        var totals = await query.GetUserTotalsAsync(2026, 7, adminScope);
+
+        Assert.Equal(2, totals.Count);
+        Assert.All(totals, t => Assert.Equal(2, t.EnterpriseId));
+        Assert.Equal(104m, totals.Sum(t => t.NetAmount));
+    }
+
+    [Fact]
+    public async Task Cross_enterprise_scope_unions_pairs()
+    {
+        var factory = await SeedTwoEnterprisesAsync();
+        var query = new UsageQueryService(factory);
+        // The exec case: one principal granted cost centers in TWO enterprises.
+        var scope = new UserScope(false, new[]
+        {
+            new EnterpriseCostCenter(1, "cc-shared-id"),
+            new EnterpriseCostCenter(2, "cc-other"),
+        }, Array.Empty<string>());
+
+        var totals = await query.GetUserTotalsAsync(2026, 7, scope);
+
+        Assert.Equal(2, totals.Count);
+        Assert.Equal(15m, totals.Sum(t => t.NetAmount)); // 10 (ent1) + 5 (ent2) — never ent2's 99
+    }
+}

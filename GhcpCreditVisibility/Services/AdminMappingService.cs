@@ -13,7 +13,14 @@ namespace GhcpCreditVisibility.Services
         private readonly IDbContextFactory<BillingDbContext> _dbFactory;
         public AdminMappingService(IDbContextFactory<BillingDbContext> dbFactory) => _dbFactory = dbFactory;
 
-        public sealed record CostCenterOption(string Id, string? Name);
+        /// <summary>An enterprise-qualified cost center the admin can map. Label carries the
+        /// enterprise name whenever more than one enterprise is registered — two enterprises WILL
+        /// both have an "Engineering", so a bare name is ambiguous.</summary>
+        public sealed record CostCenterOption(long EnterpriseId, string Id, string? Name, string? EnterpriseName)
+        {
+            /// <summary>Stable form value: "&lt;enterpriseId&gt;:&lt;ccId&gt;".</summary>
+            public string Key => $"{EnterpriseId}:{Id}";
+        }
 
         public const string OrgDisplayNameKey = "OrgDisplayName";
 
@@ -36,7 +43,7 @@ namespace GhcpCreditVisibility.Services
             await db.SaveChangesAsync(ct);
         }
 
-        // ── Cost centers discovered from the snapshot (real GitHub cost centers) ──
+        // ── Cost centers discovered from the snapshot (real GitHub cost centers), enterprise-qualified ──
         public async Task<IReadOnlyList<CostCenterOption>> GetKnownCostCentersAsync(CancellationToken ct = default)
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
@@ -45,30 +52,41 @@ namespace GhcpCreditVisibility.Services
             // earlier in SnapshotService.cs). Materialize the grouped keys first, then
             // project/order client-side.
             //
-            // Group by CostCenterId ONLY (not the (Id, Name) pair) — GitHub cost centers are
+            // Group by (EnterpriseId, CostCenterId) ONLY (never the name) — GitHub cost centers are
             // keyed by a stable id but the display name can be renamed at any time. Snapshot
             // rows freeze whatever name was live when written, so grouping by the pair would
             // otherwise show a renamed cost center as two separate dropdown entries.
             var rows = await db.UsageSnapshots
                 .Where(x => x.CostCenterId != null)
-                .Select(x => new { x.CostCenterId, x.CostCenterName, x.SnapshotUtc })
+                .Select(x => new { x.EnterpriseId, x.CostCenterId, x.CostCenterName, x.SnapshotUtc })
                 .ToListAsync(ct);
             // CostCenterDirectory is the single source of truth for the CURRENT name (refreshed every
             // snapshot run); prefer it over the frozen per-row name so a rename shows up immediately
-            // even for ids whose most recent usage row still has the old name cached.
-            var currentNames = await db.CostCenterDirectory.ToDictionaryAsync(x => x.CostCenterId, x => x.CurrentName, ct);
+            // even for ids whose most recent usage row still has the old name cached. It also
+            // surfaces cost centers that exist in GitHub but have no usage rows yet.
+            var directory = await db.CostCenterDirectory.ToListAsync(ct);
+            var currentNames = directory.ToDictionary(x => (x.EnterpriseId, x.CostCenterId), x => x.CurrentName);
+            var entNames = await db.Enterprises.ToDictionaryAsync(
+                e => e.Id, e => string.IsNullOrWhiteSpace(e.DisplayName) ? e.Slug : e.DisplayName!, ct);
 
-            return rows
-                .GroupBy(x => x.CostCenterId)
+            var fromUsage = rows
+                .GroupBy(x => new { x.EnterpriseId, x.CostCenterId })
                 .Select(g =>
                 {
-                    var id = g.Key!;
-                    var name = currentNames.TryGetValue(id, out var current) && current is not null
+                    var id = g.Key.CostCenterId!;
+                    var name = currentNames.TryGetValue((g.Key.EnterpriseId, id), out var current) && current is not null
                         ? current
                         : g.OrderByDescending(x => x.SnapshotUtc).First().CostCenterName;
-                    return new CostCenterOption(id, name);
-                })
-                .OrderBy(o => o.Name ?? o.Id)
+                    return new CostCenterOption(g.Key.EnterpriseId, id, name, entNames.GetValueOrDefault(g.Key.EnterpriseId));
+                });
+            var fromDirectory = directory
+                .Select(d => new CostCenterOption(d.EnterpriseId, d.CostCenterId, d.CurrentName, entNames.GetValueOrDefault(d.EnterpriseId)));
+
+            return fromUsage.Concat(fromDirectory)
+                .GroupBy(o => (o.EnterpriseId, o.Id))
+                .Select(g => g.First())
+                .OrderBy(o => o.EnterpriseName ?? "")
+                .ThenBy(o => o.Name ?? o.Id)
                 .ToList();
         }
 
@@ -81,7 +99,7 @@ namespace GhcpCreditVisibility.Services
                 .ToListAsync(ct);
         }
 
-        public async Task UpsertMappingAsync(string principalType, string principalObjectId, string? principalName, string costCenterId, string? costCenterName, string? modifiedBy, CancellationToken ct = default)
+        public async Task UpsertMappingAsync(string principalType, string principalObjectId, string? principalName, long enterpriseId, string costCenterId, string? costCenterName, string? modifiedBy, CancellationToken ct = default)
         {
             var type = NormalizeType(principalType);
             principalObjectId = principalObjectId?.Trim() ?? "";
@@ -91,7 +109,7 @@ namespace GhcpCreditVisibility.Services
 
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
             var existing = await db.PrincipalCostCenterMappings
-                .FirstOrDefaultAsync(m => m.PrincipalType == type && m.PrincipalObjectId == principalObjectId && m.CostCenterId == costCenterId, ct);
+                .FirstOrDefaultAsync(m => m.PrincipalType == type && m.PrincipalObjectId == principalObjectId && m.EnterpriseId == enterpriseId && m.CostCenterId == costCenterId, ct);
             if (existing is null)
             {
                 db.PrincipalCostCenterMappings.Add(new PrincipalCostCenterMapping
@@ -99,6 +117,7 @@ namespace GhcpCreditVisibility.Services
                     PrincipalType = type,
                     PrincipalObjectId = principalObjectId,
                     PrincipalDisplayName = string.IsNullOrWhiteSpace(principalName) ? null : principalName.Trim(),
+                    EnterpriseId = enterpriseId,
                     CostCenterId = costCenterId,
                     CostCenterName = string.IsNullOrWhiteSpace(costCenterName) ? null : costCenterName.Trim(),
                     ModifiedBy = modifiedBy

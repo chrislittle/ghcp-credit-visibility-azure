@@ -119,19 +119,32 @@ public class RetentionPurgeTests
         return factory;
     }
 
-    private static SnapshotService BuildService(IDbContextFactory<BillingDbContext> factory, int retentionMonths)
+    /// <summary>Routes every enterprise to the shared mock — the test equivalent of an all-mock registry.</summary>
+    private sealed class MockOnlyClientFactory : IEnterpriseBillingClientFactory
+    {
+        private readonly MockGitHubBillingClient _mock = new();
+        public Task<IGitHubBillingClient> GetClientAsync(Enterprise enterprise, CancellationToken ct = default)
+            => Task.FromResult<IGitHubBillingClient>(_mock);
+    }
+
+    internal static SnapshotService BuildSnapshotService(IDbContextFactory<BillingDbContext> factory, int retentionMonths)
     {
         var config = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
                 ["GitHub:Enterprise"] = "test-enterprise",
+                ["GitHub:UseMock"] = "true",
                 ["Retention:Months"] = retentionMonths.ToString()
             })
             .Build();
 
+        var registry = new EnterpriseRegistryService(factory, config, NullLogger<EnterpriseRegistryService>.Instance);
         return new SnapshotService(
-            new MockGitHubBillingClient(), factory, config, NullLogger<SnapshotService>.Instance);
+            new MockOnlyClientFactory(), registry, factory, config, NullLogger<SnapshotService>.Instance);
     }
+
+    private static SnapshotService BuildService(IDbContextFactory<BillingDbContext> factory, int retentionMonths)
+        => BuildSnapshotService(factory, retentionMonths);
 
     [Fact]
     public async Task Purges_everything_older_than_the_cutoff_and_nothing_newer()

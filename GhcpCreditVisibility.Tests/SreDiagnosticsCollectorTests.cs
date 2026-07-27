@@ -28,9 +28,22 @@ public class SreDiagnosticsCollectorTests
         return new ConfigurationBuilder().AddInMemoryCollection(dict).Build();
     }
 
+    /// <summary>Config-only PAT resolver (no Key Vault) — mirrors the real resolver's first two steps.</summary>
+    private sealed class ConfigPatResolver : IGitHubPatResolver
+    {
+        private readonly IConfiguration _config;
+        public ConfigPatResolver(IConfiguration config) => _config = config;
+        public Task<(string? Token, bool Resolved)> TryResolveAsync(Enterprise enterprise, CancellationToken ct = default)
+        {
+            var token = _config["GitHub:Token"];
+            var ok = !string.IsNullOrWhiteSpace(token) && !token!.StartsWith("@Microsoft.KeyVault", StringComparison.OrdinalIgnoreCase);
+            return Task.FromResult(ok ? ((string?)token, true) : ((string?)null, false));
+        }
+    }
+
     private static SreDiagnosticsCollector Collector(
-        IDbContextFactory<BillingDbContext> factory, IConfiguration config, GitHubRateLimitState? rate = null)
-        => new(factory, config, rate ?? new GitHubRateLimitState());
+        IDbContextFactory<BillingDbContext> factory, IConfiguration config, GitHubRateLimitRegistry? rates = null)
+        => new(factory, config, rates ?? new GitHubRateLimitRegistry(), new ConfigPatResolver(config));
 
     [Fact]
     public async Task Empty_database_reports_no_run_and_zero_data()
@@ -112,16 +125,53 @@ public class SreDiagnosticsCollectorTests
     public async Task Surfaces_the_last_seen_github_rate_limit()
     {
         var factory = NewFactory();
-        var rate = new GitHubRateLimitState();
+        var rates = new GitHubRateLimitRegistry();
 
         // Before any GitHub call, remaining is null (distinct from a real 0 = exhausted).
-        var before = await Collector(factory, Config(useMock: false), rate).CollectAsync();
+        var before = await Collector(factory, Config(useMock: false), rates).CollectAsync();
         Assert.Null(before.GitHubRateLimitRemaining);
 
-        rate.Record(1234, 5000);
-        var after = await Collector(factory, Config(useMock: false), rate).CollectAsync();
+        rates.For("test-enterprise").Record(1234, 5000);
+        var after = await Collector(factory, Config(useMock: false), rates).CollectAsync();
 
         Assert.Equal(1234, after.GitHubRateLimitRemaining);
         Assert.NotNull(after.GitHubRateLimitSeenUtc);
+    }
+
+    [Fact]
+    public async Task Reports_per_enterprise_health_independently()
+    {
+        var factory = NewFactory();
+        long healthyId, staleId;
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var healthy = new Enterprise { Slug = "contoso", DisplayName = "Contoso", UseMockData = true, Enabled = true };
+            var stale = new Enterprise { Slug = "fabrikam", DisplayName = "Fabrikam", UseMockData = true, Enabled = true };
+            db.Enterprises.AddRange(healthy, stale);
+            await db.SaveChangesAsync();
+            (healthyId, staleId) = (healthy.Id, stale.Id);
+
+            // contoso ran 2h ago and succeeded; fabrikam's last run was 40h ago and failed.
+            db.SnapshotRuns.Add(new SnapshotRun { EnterpriseId = healthyId, StartedUtc = DateTime.UtcNow.AddHours(-2), CompletedUtc = DateTime.UtcNow.AddHours(-2), Status = "succeeded", RowsWritten = 10 });
+            db.SnapshotRuns.Add(new SnapshotRun { EnterpriseId = staleId, StartedUtc = DateTime.UtcNow.AddHours(-40), CompletedUtc = DateTime.UtcNow.AddHours(-40), Status = "failed", RowsWritten = 0 });
+            await db.SaveChangesAsync();
+        }
+
+        var snap = await Collector(factory, Config(useMock: true)).CollectAsync();
+
+        // The GLOBAL age (most recent run anywhere) is healthy — only the per-enterprise view
+        // exposes fabrikam's 40h staleness. This is exactly why the alert rules split by enterprise.
+        Assert.NotNull(snap.SnapshotAgeHours);
+        Assert.InRange(snap.SnapshotAgeHours!.Value, 1.9, 2.1);
+
+        Assert.Equal(2, snap.Enterprises.Count);
+        var contoso = snap.Enterprises.Single(e => e.Slug == "contoso");
+        var fabrikam = snap.Enterprises.Single(e => e.Slug == "fabrikam");
+        Assert.Equal("succeeded", contoso.LastSnapshotStatus);
+        Assert.InRange(contoso.SnapshotAgeHours!.Value, 1.9, 2.1);
+        Assert.Equal("failed", fabrikam.LastSnapshotStatus);
+        Assert.InRange(fabrikam.SnapshotAgeHours!.Value, 39.9, 40.1);
+        // Mock enterprises need no PAT — token status is "not applicable", never "missing".
+        Assert.Null(contoso.TokenResolved);
     }
 }

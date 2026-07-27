@@ -74,25 +74,38 @@ namespace GhcpCreditVisibility.Services
 
         private static void Publish(TelemetryClient telemetry, DiagnosticsSnapshot s)
         {
-            if (s.SnapshotAgeHours is double age)
-                telemetry.GetMetric("ghcp.snapshot.age_hours").TrackValue(age);
+            // Enterprise-scoped metrics carry an "enterprise" DIMENSION (the slug) — one series per
+            // enterprise under the same metric name. Alert rules split on the dimension, so they
+            // fire when ANY enterprise degrades, name which one, and automatically cover enterprise
+            // N+1 with zero infra changes. A metric name must keep ONE dimension shape process-wide
+            // (the AI SDK rejects re-registering with different dimensions), so these names are
+            // always dimensioned, even with a single enterprise.
+            foreach (var e in s.Enterprises)
+            {
+                if (!e.Enabled) continue; // disabled enterprises are deliberately not alertable
 
-            telemetry.GetMetric("ghcp.snapshot.last_status").TrackValue(
-                string.Equals(s.LastSnapshotStatus, "succeeded", StringComparison.OrdinalIgnoreCase) ? 1 : 0);
+                if (e.SnapshotAgeHours is double entAge)
+                    telemetry.GetMetric("ghcp.snapshot.age_hours", "enterprise").TrackValue(entAge, e.Slug);
 
-            if (s.LastSnapshotRowsWritten is int rows)
-                telemetry.GetMetric("ghcp.snapshot.rows_written").TrackValue(rows);
+                telemetry.GetMetric("ghcp.snapshot.last_status", "enterprise").TrackValue(
+                    string.Equals(e.LastSnapshotStatus, "succeeded", StringComparison.OrdinalIgnoreCase) ? 1 : 0, e.Slug);
 
+                if (e.LastSnapshotRowsWritten is int entRows)
+                    telemetry.GetMetric("ghcp.snapshot.rows_written", "enterprise").TrackValue(entRows, e.Slug);
+
+                telemetry.GetMetric("ghcp.data.costcenters", "enterprise").TrackValue(e.CostCenters, e.Slug);
+                telemetry.GetMetric("ghcp.data.budgets", "enterprise").TrackValue(e.Budgets, e.Slug);
+                telemetry.GetMetric("ghcp.data.months_with_data", "enterprise").TrackValue(e.MonthsWithData, e.Slug);
+
+                if (e.TokenResolved is bool entResolved)
+                    telemetry.GetMetric("ghcp.github.token_resolved", "enterprise").TrackValue(entResolved ? 1 : 0, e.Slug);
+
+                if (e.RateLimitRemaining is int entRemaining)
+                    telemetry.GetMetric("ghcp.github.rate_limit_remaining", "enterprise").TrackValue(entRemaining, e.Slug);
+            }
+
+            // Infra-level (not per-enterprise) signals stay undimensioned.
             telemetry.GetMetric("ghcp.db.pending_migrations").TrackValue(s.PendingMigrations);
-            telemetry.GetMetric("ghcp.data.costcenters").TrackValue(s.CostCenters);
-            telemetry.GetMetric("ghcp.data.budgets").TrackValue(s.Budgets);
-            telemetry.GetMetric("ghcp.data.months_with_data").TrackValue(s.MonthsWithData);
-
-            if (s.GitHubTokenResolved is bool resolved)
-                telemetry.GetMetric("ghcp.github.token_resolved").TrackValue(resolved ? 1 : 0);
-
-            if (s.GitHubRateLimitRemaining is int remaining)
-                telemetry.GetMetric("ghcp.github.rate_limit_remaining").TrackValue(remaining);
         }
     }
 }

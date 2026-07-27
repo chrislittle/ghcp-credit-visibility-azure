@@ -5,27 +5,34 @@ using GhcpCreditVisibility.Data;
 namespace GhcpCreditVisibility.Services
 {
     /// <summary>
-    /// Pulls current-month usage for every licensed user from the billing client
-    /// (real or mock) and upserts it into the database, then purges snapshots older
-    /// than the retention window. Runs sequentially and is the ONLY caller of the
-    /// GitHub API — the UI reads exclusively from the database.
+    /// Pulls current-month usage for every licensed user of every ENABLED registry enterprise from
+    /// that enterprise's billing client (real or mock, routed per row) and upserts it into the
+    /// database, then purges snapshots older than the retention window. Enterprises run
+    /// SEQUENTIALLY with per-enterprise error isolation: one enterprise's expired PAT or API outage
+    /// records a failed <see cref="SnapshotRun"/> for THAT enterprise and the loop continues — it
+    /// never aborts the others. This is the ONLY caller of the GitHub API — the UI reads exclusively
+    /// from the database. The registry is re-read every cycle, so a newly enabled enterprise is
+    /// picked up on the next run with no restart.
     /// </summary>
     public sealed class SnapshotService
     {
-        private readonly IGitHubBillingClient _client;
+        private readonly IEnterpriseBillingClientFactory _clientFactory;
+        private readonly EnterpriseRegistryService _registry;
         private readonly IDbContextFactory<BillingDbContext> _dbFactory;
         private readonly IConfiguration _config;
         private readonly ILogger<SnapshotService> _logger;
         private readonly TelemetryClient? _telemetry;
 
         public SnapshotService(
-            IGitHubBillingClient client,
+            IEnterpriseBillingClientFactory clientFactory,
+            EnterpriseRegistryService registry,
             IDbContextFactory<BillingDbContext> dbFactory,
             IConfiguration config,
             ILogger<SnapshotService> logger,
             TelemetryClient? telemetry = null)
         {
-            _client = client;
+            _clientFactory = clientFactory;
+            _registry = registry;
             _dbFactory = dbFactory;
             _config = config;
             _logger = logger;
@@ -56,21 +63,55 @@ namespace GhcpCreditVisibility.Services
             return (cutoff.Year, cutoff.Month);
         }
 
+        /// <summary>
+        /// One full cycle: bootstrap the registry (idempotent), then snapshot each enabled
+        /// enterprise in turn. Per-enterprise failures are recorded and swallowed (isolation);
+        /// only infrastructure failures (registry/DB unreachable) propagate to the caller's
+        /// retry/backoff.
+        /// </summary>
         public async Task RunAsync(CancellationToken ct = default)
         {
-            var enterprise = _config["GitHub:Enterprise"] ?? "";
+            await _registry.EnsureBootstrapAsync(ct);
+            var enterprises = await _registry.GetEnabledAsync(ct);
+            if (enterprises.Count == 0)
+            {
+                _logger.LogWarning("Snapshot cycle skipped: no enabled enterprises in the registry.");
+                return;
+            }
+
+            foreach (var enterprise in enterprises)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    await RunForEnterpriseAsync(enterprise, ct);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    // Isolation by design: this enterprise's run row + SnapshotFailed event already
+                    // record the failure (see RunForEnterpriseAsync); the remaining enterprises
+                    // still get their snapshot this cycle.
+                    _logger.LogError(ex, "Snapshot for enterprise '{Slug}' failed; continuing with the next enterprise.", enterprise.Slug);
+                }
+            }
+        }
+
+        private async Task RunForEnterpriseAsync(Enterprise enterprise, CancellationToken ct)
+        {
             var retentionMonths = _config.GetValue("Retention:Months", 6);
 
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
-            var run = new SnapshotRun { StartedUtc = DateTime.UtcNow };
+            var run = new SnapshotRun { EnterpriseId = enterprise.Id, StartedUtc = DateTime.UtcNow };
             db.SnapshotRuns.Add(run);
             await db.SaveChangesAsync(ct);
 
             try
             {
                 var now = DateTime.UtcNow;
-                var users = await _client.GetEnterpriseUsersAsync(enterprise, ct);
-                var costCenters = await _client.GetCostCentersAsync(enterprise, ct);
+                var client = await _clientFactory.GetClientAsync(enterprise, ct);
+                var users = await client.GetEnterpriseUsersAsync(enterprise.Slug, ct);
+                var costCenters = await client.GetCostCentersAsync(enterprise.Slug, ct);
                 var userToCc = BuildUserCostCenterMap(costCenters);
 
                 var written = 0;
@@ -79,7 +120,7 @@ namespace GhcpCreditVisibility.Services
                     ct.ThrowIfCancellationRequested();
                     if (string.IsNullOrWhiteSpace(u.GitHubComLogin)) continue;
 
-                    var usage = await _client.GetCurrentMonthUsageForUserAsync(enterprise, u.GitHubComLogin, ct);
+                    var usage = await client.GetCurrentMonthUsageForUserAsync(enterprise.Slug, u.GitHubComLogin, ct);
                     if (usage?.UsageItems is null) continue;
 
                     var (ccId, ccName) = usage.CostCenter is not null
@@ -89,6 +130,7 @@ namespace GhcpCreditVisibility.Services
                     foreach (var item in usage.UsageItems)
                     {
                         var existing = await db.UsageSnapshots.FirstOrDefaultAsync(x =>
+                            x.EnterpriseId == enterprise.Id &&
                             x.Year == now.Year && x.Month == now.Month && x.Day == 1 &&
                             x.UserLogin == u.GitHubComLogin && x.Model == item.Model && x.Sku == item.Sku, ct);
 
@@ -96,6 +138,7 @@ namespace GhcpCreditVisibility.Services
                         {
                             db.UsageSnapshots.Add(new UsageSnapshot
                             {
+                                EnterpriseId = enterprise.Id,
                                 SnapshotUtc = now, Year = now.Year, Month = now.Month, Day = 1,
                                 UserLogin = u.GitHubComLogin, UserName = u.GitHubComName,
                                 CostCenterId = ccId, CostCenterName = ccName,
@@ -114,10 +157,12 @@ namespace GhcpCreditVisibility.Services
                     await db.SaveChangesAsync(ct);
                 }
 
-                // ── Cost-center directory (current names, keyed by GitHub's stable id) ──
+                // ── Cost-center directory (current names, keyed by (enterprise, GitHub's stable id)) ──
                 // Refreshed every run so a rename in GitHub propagates to reports/trends/the admin
                 // mapping dropdown without rewriting the frozen historical name on past snapshot rows.
-                var existingDirectory = await db.CostCenterDirectory.ToDictionaryAsync(x => x.CostCenterId, ct);
+                var existingDirectory = await db.CostCenterDirectory
+                    .Where(x => x.EnterpriseId == enterprise.Id)
+                    .ToDictionaryAsync(x => x.CostCenterId, ct);
                 foreach (var cc in costCenters)
                 {
                     if (existingDirectory.TryGetValue(cc.Id, out var dirEntry))
@@ -127,7 +172,7 @@ namespace GhcpCreditVisibility.Services
                     }
                     else
                     {
-                        var newEntry = new CostCenterDirectoryEntry { CostCenterId = cc.Id, CurrentName = cc.Name, LastSeenUtc = now };
+                        var newEntry = new CostCenterDirectoryEntry { EnterpriseId = enterprise.Id, CostCenterId = cc.Id, CurrentName = cc.Name, LastSeenUtc = now };
                         db.CostCenterDirectory.Add(newEntry);
                         existingDirectory[cc.Id] = newEntry;
                     }
@@ -136,12 +181,14 @@ namespace GhcpCreditVisibility.Services
 
                 // ── Budgets (GOVERNED IN GITHUB; snapshotted here for read-only display) ──
                 var ccNameById = costCenters.ToDictionary(c => c.Id, c => c.Name, StringComparer.OrdinalIgnoreCase);
-                // Load existing rows once, then track adds made during THIS run too — querying the DB per
-                // iteration misses not-yet-saved Adds, so duplicate scopes/cost-centers in the same batch
-                // (e.g. more than one "org" budget) would otherwise insert twice and violate the unique
-                // index on (Scope, CostCenterId).
-                var existingBudgets = await db.BudgetSnapshots.ToDictionaryAsync(x => (x.Scope, x.CostCenterId), ct);
-                foreach (var gb in await _client.GetBudgetsAsync(enterprise, ct))
+                // Load THIS enterprise's existing rows once, then track adds made during the run too —
+                // querying the DB per iteration misses not-yet-saved Adds, so duplicate scopes/cost-
+                // centers in the same batch would otherwise insert twice and violate the unique
+                // index on (EnterpriseId, Scope, CostCenterId).
+                var existingBudgets = await db.BudgetSnapshots
+                    .Where(x => x.EnterpriseId == enterprise.Id)
+                    .ToDictionaryAsync(x => (x.Scope, x.CostCenterId), ct);
+                foreach (var gb in await client.GetBudgetsAsync(enterprise.Slug, ct))
                 {
                     var isCc = string.Equals(gb.BudgetScope, "cost_center", StringComparison.OrdinalIgnoreCase);
                     var scopeVal = isCc ? BudgetScopes.CostCenter : BudgetScopes.Org;
@@ -154,19 +201,20 @@ namespace GhcpCreditVisibility.Services
                     }
                     else
                     {
-                        var newB = new BudgetSnapshot { Scope = scopeVal, CostCenterId = ccId, CostCenterName = ccName, Amount = gb.BudgetAmount, ConsumedAmount = gb.ConsumedAmount ?? 0m, SnapshotUtc = now };
+                        var newB = new BudgetSnapshot { EnterpriseId = enterprise.Id, Scope = scopeVal, CostCenterId = ccId, CostCenterName = ccName, Amount = gb.BudgetAmount, ConsumedAmount = gb.ConsumedAmount ?? 0m, SnapshotUtc = now };
                         db.BudgetSnapshots.Add(newB);
                         existingBudgets[key] = newB;
                     }
                 }
                 await db.SaveChangesAsync(ct);
 
-                // Retention purge (>= 3 months kept). Comparing Year/Month as integers (rather than
+                // Retention purge (>= 3 months kept), scoped to THIS enterprise so the purge count on
+                // the run row stays meaningful. Comparing Year/Month as integers (rather than
                 // constructing a DateTime from column values inside the query) is what SQL Server's
-                // EF Core provider can actually translate for ExecuteDelete — same class of bug as the
-                // BudgetSnapshots ExecuteDelete fix.
+                // EF Core provider can actually translate for ExecuteDelete.
                 var (cutoffYear, cutoffMonth) = ComputeRetentionCutoff(now, retentionMonths);
                 var stale = db.UsageSnapshots
+                    .Where(x => x.EnterpriseId == enterprise.Id)
                     .Where(x => x.Year < cutoffYear || (x.Year == cutoffYear && x.Month < cutoffMonth));
 
                 int purged;
@@ -192,12 +240,15 @@ namespace GhcpCreditVisibility.Services
                 run.Status = "succeeded";
                 run.CompletedUtc = DateTime.UtcNow;
                 await db.SaveChangesAsync(ct);
-                _logger.LogInformation("Snapshot complete: {Written} rows written, {Purged} purged.", written, purged);
+                await _registry.MarkSnapshotCompletedAsync(enterprise.Id, run.CompletedUtc.Value, ct);
+                _logger.LogInformation("Snapshot complete for '{Slug}': {Written} rows written, {Purged} purged.", enterprise.Slug, written, purged);
 
-                // Point-in-time signal for the SRE agent / alert rules: which instance ran, how long
-                // it took, and what it wrote. Complements the periodic gauge in SreDiagnosticsPublisher.
+                // Point-in-time signal for the SRE agent / alert rules: WHICH ENTERPRISE, which
+                // instance ran, how long it took, and what it wrote. One completion per enterprise
+                // per cycle is the healthy pattern (the cross-instance lease still guarantees a
+                // single instance runs the whole cycle).
                 _telemetry?.TrackEvent("SnapshotRunCompleted",
-                    new Dictionary<string, string> { ["status"] = "succeeded", ["instanceId"] = InstanceId },
+                    new Dictionary<string, string> { ["status"] = "succeeded", ["instanceId"] = InstanceId, ["enterprise"] = enterprise.Slug },
                     new Dictionary<string, double>
                     {
                         ["rowsWritten"] = written,
@@ -211,10 +262,10 @@ namespace GhcpCreditVisibility.Services
                 run.Error = ex.Message;
                 run.CompletedUtc = DateTime.UtcNow;
                 await db.SaveChangesAsync(CancellationToken.None);
-                _logger.LogError(ex, "Snapshot run failed.");
+                _logger.LogError(ex, "Snapshot run failed for enterprise '{Slug}'.", enterprise.Slug);
 
                 _telemetry?.TrackEvent("SnapshotFailed",
-                    new Dictionary<string, string> { ["error"] = ex.Message, ["instanceId"] = InstanceId },
+                    new Dictionary<string, string> { ["error"] = ex.Message, ["instanceId"] = InstanceId, ["enterprise"] = enterprise.Slug },
                     new Dictionary<string, double>
                     {
                         ["durationMs"] = (DateTime.UtcNow - run.StartedUtc).TotalMilliseconds,

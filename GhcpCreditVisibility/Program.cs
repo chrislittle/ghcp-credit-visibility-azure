@@ -32,28 +32,27 @@ builder.Services.AddDbContextFactory<BillingDbContext>(o =>
     }
 });
 
-// Last-seen GitHub rate-limit state, shared between the HTTP client (writer) and the SRE
-// diagnostics collector (reader). Singleton so it survives across scoped snapshot runs.
-builder.Services.AddSingleton<GitHubRateLimitState>();
+// Per-enterprise last-seen GitHub rate-limit state (rate limits are per PAT), shared between the
+// HTTP clients (writers) and the SRE diagnostics collector (reader). Singleton so it survives
+// across scoped snapshot runs.
+builder.Services.AddSingleton<GitHubRateLimitRegistry>();
 
-// ── GitHub billing client: mock (no PAT/Copilot needed) or the resilient real client.
+// ── GitHub billing clients: routed PER REGISTRY ENTERPRISE by the client factory — the shared
+// synthetic mock for UseMockData rows (no PAT/Copilot needed), or a per-enterprise real client.
+// This is what enables hybrid deployments (real + demo/fire-drill enterprises side by side).
 var useMock = builder.Configuration.GetValue("GitHub:UseMock", true);
-if (useMock)
-{
-    builder.Services.AddSingleton<IGitHubBillingClient, MockGitHubBillingClient>();
-}
-else
-{
-    // Standard resilience handler = retry w/ exponential backoff + jitter (honours
-    // Retry-After), circuit breaker, and total-request timeout. Token is read from
-    // GitHub:Token (Key Vault reference).
-    builder.Services
-        .AddHttpClient<IGitHubBillingClient, RealGitHubBillingClient>(c =>
-            c.BaseAddress = new Uri("https://api.github.com"))
-        .AddStandardResilienceHandler();
-}
+builder.Services.AddSingleton<MockGitHubBillingClient>();
+builder.Services.AddSingleton<IGitHubPatResolver, GitHubPatResolver>();
+builder.Services.AddSingleton<IEnterpriseBillingClientFactory, EnterpriseBillingClientFactory>();
+// Standard resilience (retry w/ exponential backoff + jitter honouring Retry-After, circuit
+// breaker, total-request timeout) on every factory-produced HttpClient. The pipeline is built PER
+// CLIENT NAME and the factory names clients "github:<slug>", so each enterprise gets its OWN
+// circuit breaker — enterprise A tripping never blocks enterprise B. (Names are dynamic registry
+// data, so per-name AddHttpClient registration at startup isn't possible.)
+builder.Services.ConfigureHttpClientDefaults(http => http.AddStandardResilienceHandler());
 
-// ── Snapshot pipeline (the only GitHub caller; UI reads from the DB) ──
+// ── Enterprise registry + snapshot pipeline (the only GitHub caller; UI reads from the DB) ──
+builder.Services.AddScoped<EnterpriseRegistryService>();
 builder.Services.AddScoped<SnapshotService>();
 builder.Services.AddHostedService<SnapshotHostedService>();
 
@@ -128,26 +127,45 @@ var app = builder.Build();
 //   so a not-yet-granted identity or a warming database never blocks/crash-loops startup.
 //   Local dev (in-memory): EnsureCreated is synchronous and always succeeds — do it here.
 
-// Local dev (in-memory) convenience: ensure the schema exists and seed example
-// group→cost-center mappings + an admin group so the Admin console renders with content.
-// Never runs in Azure (SQL Server path).
+// Local dev (in-memory) convenience: ensure the schema exists and seed TWO mock enterprises
+// (contoso + fabrikam — overlapping user logins and a colliding "Engineering" cost-center name,
+// by design) plus example principal mappings and an admin group so the Admin console and the
+// multi-enterprise UI render with content. Never runs in Azure (SQL Server path).
 if (app.Environment.IsDevelopment() && useLocalDevDb)
 {
     using var scope = app.Services.CreateScope();
     var factory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<BillingDbContext>>();
     using var db = factory.CreateDbContext();
     db.Database.EnsureCreated();
-    // Backfill synthetic usage history so the trend + month selector have data locally.
+
+    if (!db.Enterprises.Any())
+    {
+        db.Enterprises.AddRange(
+            new GhcpCreditVisibility.Data.Enterprise { Slug = "contoso", DisplayName = "Contoso", UseMockData = true, Enabled = true, ModifiedBy = "seed" },
+            new GhcpCreditVisibility.Data.Enterprise { Slug = "fabrikam", DisplayName = "Fabrikam", UseMockData = true, Enabled = true, ModifiedBy = "seed" });
+        db.SaveChanges();
+    }
+    var seedEnterprises = db.Enterprises.OrderBy(e => e.Id).ToList();
+
+    // Backfill synthetic usage history per enterprise so the trend + month selector have data locally.
     if (!db.UsageSnapshots.Any())
     {
-        db.UsageSnapshots.AddRange(GhcpCreditVisibility.Services.MockGitHubBillingClient.BuildHistorySnapshots(12, DateTime.UtcNow));
+        foreach (var e in seedEnterprises)
+        {
+            db.UsageSnapshots.AddRange(
+                GhcpCreditVisibility.Services.MockGitHubBillingClient.BuildHistorySnapshots(12, DateTime.UtcNow, e.Id, e.Slug));
+        }
     }
     if (!db.PrincipalCostCenterMappings.Any())
     {
+        var contosoId = seedEnterprises.First(e => e.Slug == "contoso").Id;
+        var fabrikamId = seedEnterprises.First(e => e.Slug == "fabrikam").Id;
         db.PrincipalCostCenterMappings.AddRange(
-            new GhcpCreditVisibility.Data.PrincipalCostCenterMapping { PrincipalType = "Group", PrincipalObjectId = "11111111-1111-1111-1111-111111111111", PrincipalDisplayName = "SG-Finance", CostCenterId = "cost-center-a", CostCenterName = "Cost Center A", ModifiedBy = "seed" },
-            new GhcpCreditVisibility.Data.PrincipalCostCenterMapping { PrincipalType = "Group", PrincipalObjectId = "22222222-2222-2222-2222-222222222222", PrincipalDisplayName = "SG-Engineering", CostCenterId = "cost-center-b", CostCenterName = "Cost Center B", ModifiedBy = "seed" },
-            new GhcpCreditVisibility.Data.PrincipalCostCenterMapping { PrincipalType = "User", PrincipalObjectId = "33333333-3333-3333-3333-333333333333", PrincipalDisplayName = "Dana Manager (individual)", CostCenterId = "cost-center-c", CostCenterName = "Cost Center C", ModifiedBy = "seed" });
+            new GhcpCreditVisibility.Data.PrincipalCostCenterMapping { PrincipalType = "Group", PrincipalObjectId = "11111111-1111-1111-1111-111111111111", PrincipalDisplayName = "SG-Finance", EnterpriseId = contosoId, CostCenterId = "cc-contoso-finance", CostCenterName = "Finance", ModifiedBy = "seed" },
+            new GhcpCreditVisibility.Data.PrincipalCostCenterMapping { PrincipalType = "Group", PrincipalObjectId = "22222222-2222-2222-2222-222222222222", PrincipalDisplayName = "SG-Engineering", EnterpriseId = contosoId, CostCenterId = "cc-contoso-eng", CostCenterName = "Engineering", ModifiedBy = "seed" },
+            // Cross-enterprise exec view: one group mapped into BOTH enterprises' cost centers.
+            new GhcpCreditVisibility.Data.PrincipalCostCenterMapping { PrincipalType = "Group", PrincipalObjectId = "22222222-2222-2222-2222-222222222222", PrincipalDisplayName = "SG-Engineering", EnterpriseId = fabrikamId, CostCenterId = "cc-fabrikam-eng", CostCenterName = "Engineering", ModifiedBy = "seed" },
+            new GhcpCreditVisibility.Data.PrincipalCostCenterMapping { PrincipalType = "User", PrincipalObjectId = "33333333-3333-3333-3333-333333333333", PrincipalDisplayName = "Dana Manager (individual)", EnterpriseId = fabrikamId, CostCenterId = "cc-fabrikam-research", CostCenterName = "Research", ModifiedBy = "seed" });
     }
     if (!db.AdminPrincipals.Any())
     {
@@ -156,20 +174,30 @@ if (app.Environment.IsDevelopment() && useLocalDevDb)
     if (!db.BudgetSnapshots.Any())
     {
         // Budgets are GitHub-governed; in local dev we snapshot them from the mock client
-        // exactly as the snapshot job would in Azure.
-        var mock = new GhcpCreditVisibility.Services.MockGitHubBillingClient();
-        var ccName = mock.GetCostCentersAsync("dev").Result.ToDictionary(c => c.Id, c => c.Name);
-        foreach (var gb in mock.GetBudgetsAsync("dev").Result)
+        // exactly as the snapshot job would in Azure — per enterprise.
+        var mock = scope.ServiceProvider.GetRequiredService<GhcpCreditVisibility.Services.MockGitHubBillingClient>();
+        foreach (var e in seedEnterprises)
         {
-            var isCc = gb.BudgetScope == "cost_center";
-            db.BudgetSnapshots.Add(new GhcpCreditVisibility.Data.BudgetSnapshot
+            var ccName = mock.GetCostCentersAsync(e.Slug).Result.ToDictionary(c => c.Id, c => c.Name);
+            var dirNow = DateTime.UtcNow;
+            foreach (var cc in ccName)
             {
-                Scope = isCc ? "CostCenter" : "Org",
-                CostCenterId = isCc ? (gb.BudgetEntityName ?? "") : "",
-                CostCenterName = isCc ? ccName.GetValueOrDefault(gb.BudgetEntityName ?? "") : null,
-                Amount = gb.BudgetAmount,
-                ConsumedAmount = gb.ConsumedAmount ?? 0m
-            });
+                if (!db.CostCenterDirectory.Any(d => d.EnterpriseId == e.Id && d.CostCenterId == cc.Key))
+                    db.CostCenterDirectory.Add(new GhcpCreditVisibility.Data.CostCenterDirectoryEntry { EnterpriseId = e.Id, CostCenterId = cc.Key, CurrentName = cc.Value, LastSeenUtc = dirNow });
+            }
+            foreach (var gb in mock.GetBudgetsAsync(e.Slug).Result)
+            {
+                var isCc = gb.BudgetScope == "cost_center";
+                db.BudgetSnapshots.Add(new GhcpCreditVisibility.Data.BudgetSnapshot
+                {
+                    EnterpriseId = e.Id,
+                    Scope = isCc ? "CostCenter" : "Org",
+                    CostCenterId = isCc ? (gb.BudgetEntityName ?? "") : "",
+                    CostCenterName = isCc ? ccName.GetValueOrDefault(gb.BudgetEntityName ?? "") : null,
+                    Amount = gb.BudgetAmount,
+                    ConsumedAmount = gb.ConsumedAmount ?? 0m
+                });
+            }
         }
     }
     db.SaveChanges();

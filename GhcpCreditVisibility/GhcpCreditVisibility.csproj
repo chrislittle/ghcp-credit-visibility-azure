@@ -28,6 +28,11 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.0" />
     <!-- Resilience for the real GitHub client: retry/backoff, circuit breaker, timeout -->
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="9.5.0" />
+    <!-- Per-enterprise PAT resolution: reads github-pat-<slug> secrets from Key Vault via the app's
+         managed identity (the same vault-scope read that resolves the app-setting reference), so a
+         NEW enterprise's secret is readable the moment it exists - no infra change, no redeploy. -->
+    <PackageReference Include="Azure.Identity" Version="1.14.2" />
+    <PackageReference Include="Azure.Security.KeyVault.Secrets" Version="4.7.0" />
     <!-- Telemetry -->
     <PackageReference Include="Microsoft.ApplicationInsights.AspNetCore" Version="2.22.0" />
   </ItemGroup>

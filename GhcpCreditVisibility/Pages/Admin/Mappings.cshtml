@@ -42,6 +42,93 @@
     </div>
 </div>
 
+<!-- Enterprise registry -->
+<div class="gh-card">
+    <div class="ch">
+        <h2>GitHub enterprises</h2>
+        <span class="hint">registry — snapshots run per enabled enterprise; no redeploy to add one</span>
+    </div>
+    <table>
+        <thead><tr><th>Slug</th><th>Display name</th><th>Data source</th><th>PAT secret</th><th>PAT status</th><th>Last snapshot</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+            @foreach (var row in Model.Enterprises)
+            {
+                var e = row.Enterprise;
+                <tr>
+                    <td><code>@e.Slug</code></td>
+                    <td>@(e.DisplayName ?? "—")</td>
+                    <td>@(e.UseMockData ? "Mock (demo)" : "Live GitHub")</td>
+                    <td>@if (e.UseMockData) { <span style="color:#66707d">n/a</span> } else { <code>@e.PatSecretName</code> }</td>
+                    <td>
+                        @if (row.PatResolved is null) { <span style="color:#66707d">n/a (mock)</span> }
+                        else if (row.PatResolved == true) { <span class="badge text-bg-success">resolved</span> }
+                        else { <span class="badge text-bg-danger">PAT missing</span> }
+                    </td>
+                    <td style="color:#66707d">
+                        @if (row.LastRunUtc is DateTime lr)
+                        {
+                            @lr.ToString("yyyy-MM-dd HH:mm")<text> UTC</text>
+                            @if (row.LastRunStatus == "failed") { <span class="badge text-bg-danger ms-1">failed</span> }
+                            else if (row.LastRunRowsWritten == 0) { <span class="badge text-bg-warning ms-1">0 rows</span> }
+                        }
+                        else { <span>never</span> }
+                    </td>
+                    <td>
+                        @if (e.Enabled) { <span class="badge text-bg-success">enabled</span> }
+                        else { <span class="badge text-bg-secondary">disabled</span> }
+                    </td>
+                    <td style="text-align:right;white-space:nowrap">
+                        <form method="post" asp-page-handler="SetEnterpriseEnabled" style="display:inline">
+                            <input type="hidden" name="id" value="@e.Id" />
+                            <input type="hidden" name="enabled" value="@((!e.Enabled).ToString())" />
+                            <button class="btn btn-sm btn-outline-secondary" type="submit">@(e.Enabled ? "Disable" : "Enable")</button>
+                        </form>
+                        <form method="post" asp-page-handler="DeleteEnterprise" style="display:inline" class="js-confirm"
+                              data-confirm="Remove enterprise @e.Slug AND PURGE ALL OF ITS DATA (usage history, budgets, mappings)? Purged history cannot be re-fetched from GitHub.">
+                            <input type="hidden" name="id" value="@e.Id" />
+                            <button class="btn btn-sm btn-outline-danger" type="submit">Remove…</button>
+                        </form>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);background:#fafbff;">
+        <form method="post" asp-page-handler="AddEnterprise" class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label mb-0 gh-note">Slug (API)</label>
+                <input name="slug" class="form-control form-control-sm" placeholder="my-enterprise" required />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-0 gh-note">Display name</label>
+                <input name="displayName" class="form-control form-control-sm" placeholder="Contoso" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-0 gh-note">PAT secret name (Key Vault)</label>
+                <input name="patSecretName" class="form-control form-control-sm" placeholder="github-pat-&lt;slug&gt; (default)" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label mb-0 gh-note">Data source</label>
+                <select name="useMockData" class="form-select form-select-sm">
+                    <option value="false">Live GitHub</option>
+                    <option value="true">Mock (demo)</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-sm btn-primary w-100" type="submit">Add enterprise</button>
+            </div>
+        </form>
+        <div class="gh-note mt-2">
+            New enterprises start <strong>disabled</strong>: seed the PAT out-of-band
+            (<code>./deploy.ps1 -Task set-pat -Enterprise &lt;slug&gt;</code> — the PAT value is never entered in this console),
+            wait for "PAT status: resolved", <strong>Enable</strong>, verify the first snapshot above, then map principals below.
+            Nobody sees an enterprise's data until mappings exist. The snapshot job re-reads this registry every cycle — no restart.
+            Mock enterprises named <code>contoso</code> / <code>fabrikam</code> come with demo data; the mock slug
+            <code>demo-broken</code> always fails — register it to fire-drill the per-enterprise alerts safely.
+        </div>
+    </div>
+</div>
+
 <!-- Principal -> Cost Center mappings -->
 <div class="gh-card">
     <div class="ch">
@@ -66,10 +153,10 @@
                     <td>@(first.PrincipalDisplayName ?? "—")</td>
                     <td style="color:#66707d"><code>@first.PrincipalObjectId</code></td>
                     <td>
-                        @foreach (var m in g.OrderBy(x => x.CostCenterName ?? x.CostCenterId))
+                        @foreach (var m in g.OrderBy(x => x.EnterpriseId).ThenBy(x => x.CostCenterName ?? x.CostCenterId))
                         {
                             <span class="badge rounded-pill text-bg-light border me-1 mb-1" style="font-weight:500;">
-                                @(m.CostCenterName ?? m.CostCenterId)
+                                @(m.CostCenterName ?? m.CostCenterId)@if (Model.MultiEnterprise) {<span style="color:#66707d;font-weight:400"> · @(Model.EnterpriseNames.TryGetValue(m.EnterpriseId, out var en) ? en : $"enterprise {m.EnterpriseId}")</span>}
                                 @* Confirmation text goes in a data-* attribute, NOT inline JS: these values carry
                                    GitHub cost-center names and operator-supplied labels, and Razor's HTML encoding
                                    does not survive the browser decoding an attribute before parsing it as script.
@@ -111,10 +198,15 @@
             </div>
             <div class="col-md-2">
                 <label class="form-label mb-0 gh-note">Cost center(s)</label>
-                <select name="costCenterIds" class="form-select form-select-sm" multiple size="3" required>
-                    @foreach (var c in Model.CostCenters)
+                <select name="costCenterKeys" class="form-select form-select-sm" multiple size="4" required>
+                    @foreach (var entGroup in Model.CostCenters.GroupBy(c => new { c.EnterpriseId, c.EnterpriseName }))
                     {
-                        <option value="@c.Id">@(c.Name ?? c.Id)</option>
+                        <optgroup label="@(entGroup.Key.EnterpriseName ?? $"enterprise {entGroup.Key.EnterpriseId}")">
+                            @foreach (var c in entGroup)
+                            {
+                                <option value="@c.Key">@(c.Name ?? c.Id)</option>
+                            }
+                        </optgroup>
                     }
                 </select>
             </div>
@@ -228,8 +320,8 @@
     <table>
         <tbody>
             <tr><td><strong>Organization display name</strong></td><td>@(string.IsNullOrWhiteSpace(Model.OrgDisplayName) ? "— not set — (set it above)" : Model.OrgDisplayName)</td></tr>
-            <tr><td><strong>Data source</strong></td><td>@(Model.UseMock ? "Mock data (demo — no GitHub token required)" : "Live GitHub billing API")</td></tr>
-            <tr><td><strong>GitHub enterprise</strong></td><td><code>@(string.IsNullOrWhiteSpace(Model.Enterprise) ? "not configured" : Model.Enterprise)</code></td></tr>
+            <tr><td><strong>Default data source</strong></td><td>@(Model.UseMock ? "Mock data (demo — no GitHub token required)" : "Live GitHub billing API") <span style="color:#98a2b3">(per-enterprise override in the registry above)</span></td></tr>
+            <tr><td><strong>GitHub enterprises</strong></td><td>@Model.Enterprises.Count registered (@Model.Enterprises.Count(e => e.Enterprise.Enabled) enabled) — managed in the registry above</td></tr>
             <tr><td><strong>Access model</strong></td><td>@Model.ScopingStrategyLabel <span style="color:#98a2b3">(<code>@Model.ScopingStrategy</code>)</span></td></tr>
             <tr><td><strong>History retained</strong></td><td>@Model.RetentionMonths months</td></tr>
             <tr><td><strong>Persistence</strong></td><td>@(Model.UsingSqlServer ? "Azure SQL (managed identity)" : "In-memory (local preview)")</td></tr>

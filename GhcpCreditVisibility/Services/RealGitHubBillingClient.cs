@@ -5,12 +5,14 @@ using GhcpCreditVisibility.Models;
 namespace GhcpCreditVisibility.Services
 {
     /// <summary>
-    /// Real GitHub enterprise-billing client.
-    /// Resilience (retry with exponential backoff + jitter, honoring Retry-After,
-    /// circuit breaker and timeout) is applied to the injected <see cref="HttpClient"/>
-    /// via <c>AddStandardResilienceHandler()</c> in Program.cs. The dashboard itself
-    /// never calls this client directly; only the background snapshot job does, so
-    /// per-user N+1 live traffic is gone.
+    /// Real GitHub enterprise-billing client for ONE enterprise. Constructed per enterprise by
+    /// <see cref="EnterpriseBillingClientFactory"/> with that enterprise's PAT and its own
+    /// rate-limit state (rate limits are per PAT). Resilience (retry with exponential backoff +
+    /// jitter, honoring Retry-After, circuit breaker and timeout) is applied to the injected
+    /// <see cref="HttpClient"/> via <c>ConfigureHttpClientDefaults(...AddStandardResilienceHandler())</c>
+    /// in Program.cs — the pipeline is built per client NAME, so each enterprise gets its own
+    /// circuit breaker. The dashboard itself never calls this client directly; only the background
+    /// snapshot job does, so per-user N+1 live traffic is gone.
     /// </summary>
     public sealed class RealGitHubBillingClient : IGitHubBillingClient
     {
@@ -21,12 +23,10 @@ namespace GhcpCreditVisibility.Services
         private readonly ILogger<RealGitHubBillingClient> _logger;
         private readonly GitHubRateLimitState _rateLimit;
 
-        // Typed-client ctor: token is read from configuration (GitHub:Token), which in
-        // Azure is a Key Vault reference resolved via the app's managed identity.
-        public RealGitHubBillingClient(HttpClient http, IConfiguration config, ILogger<RealGitHubBillingClient> logger, GitHubRateLimitState rateLimit)
+        public RealGitHubBillingClient(HttpClient http, string token, ILogger<RealGitHubBillingClient> logger, GitHubRateLimitState rateLimit)
         {
             _http = http;
-            _token = config["GitHub:Token"] ?? string.Empty;
+            _token = token;
             _logger = logger;
             _rateLimit = rateLimit;
         }
