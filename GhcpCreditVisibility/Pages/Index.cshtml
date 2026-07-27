@@ -366,11 +366,11 @@
                     {
                         <text>…and @Model.HiddenAttentionBudgetCount more need@(Model.HiddenAttentionBudgetCount == 1 ? "s" : "") attention. </text>
                     }
-                    <text>On-track budgets are summarized above, not listed. Budgets are set in GitHub; alert emails are sent by GitHub.</text>
+                    <text>Only budgets needing attention are shown here.</text>
                 }
                 else
                 {
-                    <text>Budgets are set in GitHub; alert emails are sent by GitHub. This is a read-only view of current-month utilization.</text>
+                    <text>Current-month utilization across your budgets.</text>
                 }
             </div>
             <a href="@Url.Page("Budgets", new { Period = Model.PeriodValue, Ent = Model.Ent })" style="font-weight:600;font-size:13px;white-space:nowrap;">View all @Model.Budgets.Count budgets →</a>
