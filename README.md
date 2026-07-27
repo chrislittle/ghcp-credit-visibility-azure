@@ -61,17 +61,20 @@ This app closes that gap:
 
 ## Screenshots
 
-| Usage dashboard | Reports (trend builder) |
+| Usage dashboard — two enterprises, enterprise filter | Reports — breakdown by enterprise |
 |---|---|
-| ![Usage dashboard](docs/images/dashboard.png) | ![Reports page](docs/images/reports.png) |
+| ![Usage dashboard with the enterprise filter and enterprise-qualified cost centers](docs/images/dashboard.png) | ![Reports page breaking spend down by enterprise](docs/images/reports.png) |
 
-| Admin console — access mappings | About page (in-app documentation) |
+| Admin console — enterprise registry + access mappings | About page (in-app documentation) |
 |---|---|
-| ![Admin mappings console](docs/images/admin-mappings.png) | ![About page](docs/images/about.png) |
+| ![Admin console with the GitHub enterprises registry and mappings](docs/images/admin-mappings.png) | ![About page](docs/images/about.png) |
 
-*(Screenshots above were captured from a local run against the built-in synthetic demo data —
-see [Demo / mock data](#demo--mock-data). Your real deployment will show your organization's
-actual users, cost centers, and spend.)*
+*(Screenshots above were captured from a local run against the built-in synthetic demo data — two
+mock enterprises, **Contoso** and **Fabrikam**, seeded automatically; note the enterprise dropdown,
+the `Engineering · Contoso` vs `Engineering · Fabrikam` disambiguation, the same users appearing
+once per enterprise, and the admin console's enterprise registry. See
+[Demo / mock data](#demo--mock-data). Your real deployment will show your organization's actual
+enterprises, users, cost centers, and spend.)*
 
 ## Features
 

@@ -18,8 +18,11 @@
         <p>
             <strong>GitHub Copilot Credit Visibility</strong> reports your organization's spend on
             <strong>GitHub Copilot</strong> — the AI pair-programmer in the IDE, on github.com and in the CLI.
-            It shows <strong>AI-credit / premium-request usage</strong> per user, per model and per cost center, with month-over-month
-            trends and budget alerts.
+            It shows <strong>AI-credit / premium-request usage</strong> per user, per model and per cost center — across
+            <strong>one or more GitHub enterprises</strong> — with month-over-month trends and budget alerts. With several
+            enterprises registered, cost centers are always enterprise-qualified (two enterprises can both have an
+            "Engineering"), an enterprise filter appears in the header, and the same person licensed in two enterprises
+            is shown once per enterprise, matching how GitHub bills.
         </p>
         <p class="mb-0" style="padding:10px 14px;background:#eef4ff;border:1px solid #dbe6ff;border-radius:10px;">
             ⚠️ <strong>This is GitHub Copilot — not Microsoft 365 Copilot.</strong> The two are separate products with separate billing.
@@ -46,9 +49,10 @@
             <div class="ch"><h2>Reports</h2></div>
             <div class="gh-cardbody">
                 <p class="mb-0">
-                    The <a asp-page="/Reports">Reports</a> page is the trend workbench. Group spend by <strong>total, user, model
-                    or cost center</strong>, bucket it by <strong>day, week or month</strong>, then pin optional filters that
-                    <em>compose</em> — e.g. one user broken down by model over the last 90 days — as a chart or a table.
+                    The <a asp-page="/Reports">Reports</a> page is the trend workbench. Group spend by <strong>total, user, model,
+                    cost center or enterprise</strong>, bucket it by <strong>day, week or month</strong>, then pin optional filters
+                    that <em>compose</em> — e.g. one user broken down by model over the last 90 days, or one enterprise's cost
+                    centers over a year — as a chart or a table.
                 </p>
             </div>
         </div>
@@ -68,8 +72,10 @@
             <div class="ch"><h2>Admin</h2></div>
             <div class="gh-cardbody">
                 <p class="mb-0">
-                    The <strong>Admin</strong> console (admins only) sets the organization name, maps Entra groups/users to GitHub cost
-                    centers (who sees what), designates administrators, and manages <strong>budgets &amp; alert thresholds</strong>.
+                    The <strong>Admin</strong> console (admins only) manages the <strong>GitHub enterprise registry</strong> (add,
+                    enable/disable or remove enterprises — a runtime operation, no redeploy), sets the organization name, maps Entra
+                    groups/users to enterprise-qualified GitHub cost centers (who sees what), designates administrators, and manages
+                    <strong>budgets &amp; alert thresholds</strong>.
                 </p>
             </div>
         </div>
