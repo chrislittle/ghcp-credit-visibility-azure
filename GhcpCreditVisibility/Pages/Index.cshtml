@@ -298,6 +298,7 @@
             <h2>Budgets</h2>
             <span class="hint">@Model.MonthLabel · actual vs GitHub budget</span>
         </div>
+        <div class="gh-budgets">
         @foreach (var b in Model.Budgets)
         {
             var pct = Math.Min(100, (int)Math.Round(b.Pct));
@@ -319,6 +320,7 @@
                 </div>
             </div>
         }
+        </div>
         <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
             <div class="gh-note mb-0">Budgets are set in GitHub; alert emails are sent by GitHub. This is a read-only view of current-month utilization.</div>
         </div>

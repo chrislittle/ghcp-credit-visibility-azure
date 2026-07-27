@@ -142,8 +142,11 @@ body { background:var(--gh-bg); color:var(--gh-ink); font-family:'Segoe UI',-app
 .gh-signout{color:#cdd7ea;text-decoration:none;font-size:13px;font-weight:500;padding:6px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.18);}
 .gh-signout:hover{background:rgba(255,255,255,.08);color:#fff;}
 
-/* Page shell */
-.gh-wrap{max-width:1180px;margin:0 auto;padding:26px 24px 60px;}
+/* Page shell — fluid: use the viewer's screen width rather than a fixed narrow column.
+   Capped at 1760px so ultra-wide monitors don't produce unreadably long text lines;
+   below the cap the content tracks the window (with slightly larger gutters on big screens). */
+.gh-wrap{max-width:1760px;margin:0 auto;padding:26px 24px 60px;}
+@media(min-width:1400px){.gh-wrap{padding-left:36px;padding-right:36px;}}
 .gh-pagehead{display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:18px;}
 .gh-pagehead h1{font-size:22px;margin:0 0 3px;font-weight:700;display:flex;align-items:center;gap:9px;}
 .gh-pagehead h1 .gh-gh{color:#141a22;display:inline-grid;place-items:center;}
@@ -155,8 +158,9 @@ body { background:var(--gh-bg); color:var(--gh-ink); font-family:'Segoe UI',-app
 .gh-mpick .cal{color:var(--gh-brand);}
 .gh-mpick select{border:0;background:transparent;font-weight:600;color:var(--gh-ink);padding:2px 4px;outline:none;cursor:pointer;font-size:13.5px;}
 
-/* KPI cards */
-.gh-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:20px;}
+/* KPI cards — auto-fit so 4 OR 5 cards (Dashboard:ShowGrossUsage) always fill one row on
+   wide screens instead of wrapping an orphan, and wrap gracefully as the window narrows. */
+.gh-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:16px;margin-bottom:20px;}
 @media(max-width:900px){.gh-kpis{grid-template-columns:repeat(2,1fr);}}
 .gh-kpi{background:var(--gh-card);border:1px solid var(--gh-line);border-radius:14px;padding:16px 18px;box-shadow:var(--gh-shadow);position:relative;overflow:hidden;}
 .gh-kpi .ic{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-size:18px;margin-bottom:10px;}
@@ -167,8 +171,10 @@ body { background:var(--gh-bg); color:var(--gh-ink); font-family:'Segoe UI',-app
 .gh-kpi.b1 .ic{background:#e0edff;color:#2563eb;} .gh-kpi.b2 .ic{background:#efe6ff;color:#7c3aed;}
 .gh-kpi.b3 .ic{background:#d9f5ee;color:#0d9488;} .gh-kpi.b4 .ic{background:#fdeede;color:#d9822b;}
 
-/* Content grid + cards */
-.gh-grid{display:grid;grid-template-columns:1.55fr 1fr;gap:16px;}
+/* Content grid + cards — the MAIN column (per-user table / breakdown) absorbs the extra
+   horizontal space on wide screens; the side column (donut/legend cards) grows only up to a
+   sensible cap so charts don't balloon. */
+.gh-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,440px);gap:16px;}
 @media(max-width:900px){.gh-grid{grid-template-columns:1fr;}}
 .gh-card{background:var(--gh-card);border:1px solid var(--gh-line);border-radius:14px;box-shadow:var(--gh-shadow);overflow:hidden;margin-bottom:16px;}
 .gh-card .ch{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 18px;border-bottom:1px solid var(--gh-line);flex-wrap:wrap;}
@@ -210,6 +216,13 @@ body { background:var(--gh-bg); color:var(--gh-ink); font-family:'Segoe UI',-app
 .gh-note{color:var(--gh-muted);font-size:12.5px;}
 
 /* Budgets & alerts */
+/* Budgets: single stacked list by default; on wide screens flow two per row so the meters
+   stay a readable length instead of stretching across the whole viewport. */
+.gh-budgets{display:grid;grid-template-columns:1fr;}
+@media(min-width:1280px){
+  .gh-budgets{grid-template-columns:1fr 1fr;column-gap:0;}
+  .gh-budgets .gh-budget:nth-child(odd){border-right:1px solid #f1f4f9;}
+}
 .gh-budget{padding:14px 18px;border-bottom:1px solid #f1f4f9;}
 .gh-budget:last-child{border-bottom:0;}
 .gh-budget .top{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13.5px;}
