@@ -99,11 +99,11 @@ else
                 <tbody>
                     @foreach (var b in group.Rows)
                     {
-                        <tr>
+                        <tr style="@(b.IsOrg ? "background:#fafbff;border-bottom:2px solid var(--gh-line);" : "")">
                             <td>
                                 @if (b.IsOrg)
                                 {
-                                    <strong>🏦 Enterprise-wide</strong>
+                                    <strong>🏦 Enterprise-wide</strong> <span class="gh-note">(roll-up ceiling for all of @(group.EnterpriseName ?? "this enterprise"))</span>
                                 }
                                 else
                                 {

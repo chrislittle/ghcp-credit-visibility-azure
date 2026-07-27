@@ -104,7 +104,10 @@ namespace GhcpCreditVisibility.Pages
                 .OrderBy(g => g.Key.EnterpriseId)
                 .Select(g => (g.Key.EnterpriseId, g.Key.EnterpriseName,
                     (IReadOnlyList<BudgetService.BudgetStatus>)g
-                        .OrderBy(b => SeverityRank(b.Level))
+                        // The enterprise-wide budget is the roll-up ceiling, not a peer of the
+                        // cost-center budgets — pin it first instead of interleaving by severity.
+                        .OrderBy(b => b.IsOrg ? 0 : 1)
+                        .ThenBy(b => SeverityRank(b.Level))
                         .ThenByDescending(b => b.Pct)
                         .ToList()))
                 .ToList();

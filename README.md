@@ -69,10 +69,6 @@ This app closes that gap:
 |---|---|
 | ![Budgets page with all budgets grouped by enterprise, filterable by status](docs/images/budgets.png) | ![Admin console with the GitHub enterprises registry and mappings](docs/images/admin-mappings.png) |
 
-| About page (in-app documentation) |
-|---|
-| ![About page](docs/images/about.png) |
-
 *(Screenshots above were captured from a local run against the built-in synthetic demo data — two
 mock enterprises, **Contoso** and **Fabrikam**, seeded automatically; note the enterprise dropdown,
 the `Engineering · Contoso` vs `Engineering · Fabrikam` disambiguation, the same users appearing
