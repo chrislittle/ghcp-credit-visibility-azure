@@ -85,7 +85,7 @@ Go to the HTTPS URL printed in the console (e.g. `https://localhost:5001`).
   (Easy Auth/Entra sign-in only applies once the app is deployed behind Azure App Service — see
   the root [README](../README.md) and [infra/README.md](../infra/README.md).)
 - You should land on the **Usage** dashboard, pre-populated with 12 months of synthetic AI-credit
-  spend across **two demo GitHub enterprises** — Contoso (12 users) and Fabrikam (8 users, two of
+  spend across **two demo GitHub enterprises** — Contoso (20 users) and Fabrikam (8 users, two of
   whom deliberately share logins with Contoso users, plus a cost center also named "Engineering")
   — so the multi-enterprise UI has something real to show: the **enterprise dropdown** in the
   header, enterprise-qualified cost-center labels (`Engineering · Contoso` vs

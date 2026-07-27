@@ -30,6 +30,8 @@ namespace GhcpCreditVisibility.Services
             decimal OrgBudget,
             IReadOnlyDictionary<string, decimal> CostCenterBudgets);
 
+        // 20 users: combined with fabrikam's 8 the demo exceeds one dashboard page (25/page), so
+        // the per-user table's pagination is exercised locally, not just in real deployments.
         private static readonly EnterpriseSeed ContosoSeed = new(
             Users: new[]
             {
@@ -37,14 +39,22 @@ namespace GhcpCreditVisibility.Services
                 ("bwright",    "Ben Wright",      "cc-contoso-eng"),
                 ("cpatel",     "Chandni Patel",   "cc-contoso-eng"),
                 ("dkim",       "Daniel Kim",      "cc-contoso-eng"),
+                ("squinn",     "Sam Quinn",       "cc-contoso-eng"),
+                ("tberg",      "Tova Berg",       "cc-contoso-eng"),
+                ("uadeyemi",   "Uche Adeyemi",    "cc-contoso-eng"),
                 ("efischer",   "Erik Fischer",    "cc-contoso-product"),
                 ("fgomez",     "Fernanda Gomez",  "cc-contoso-product"),
                 ("gsingh",     "Gita Singh",      "cc-contoso-product"),
                 ("hmuller",    "Hans Muller",     "cc-contoso-product"),
+                ("vpetrov",    "Vera Petrov",     "cc-contoso-product"),
+                ("wlarsen",    "Wim Larsen",      "cc-contoso-product"),
+                ("xhuang",     "Xin Huang",       "cc-contoso-product"),
                 ("iolsen",     "Ida Olsen",       "cc-contoso-finance"),
                 ("jchen",      "Jun Chen",        "cc-contoso-finance"),
                 ("krossi",     "Katya Rossi",     "cc-contoso-finance"),
                 ("lnguyen",    "Linh Nguyen",     "cc-contoso-finance"),
+                ("ymendez",    "Yara Mendez",     "cc-contoso-finance"),
+                ("zokafor",    "Zara Okafor",     "cc-contoso-finance"),
             },
             CostCenters: new[]
             {
@@ -52,10 +62,12 @@ namespace GhcpCreditVisibility.Services
                 ("cc-contoso-product", "Product"),
                 ("cc-contoso-finance", "Finance"),
             },
-            OrgBudget: 700m,
+            // Budgets sized for 20 users (~$40/user/month of synthetic spend) so the demo shows a
+            // realistic status mix rather than everything blowing over.
+            OrgBudget: 1050m,
             CostCenterBudgets: new Dictionary<string, decimal>
             {
-                ["cc-contoso-eng"] = 250m, ["cc-contoso-product"] = 250m, ["cc-contoso-finance"] = 300m
+                ["cc-contoso-eng"] = 320m, ["cc-contoso-product"] = 380m, ["cc-contoso-finance"] = 330m
             });
 
         // fabrikam deliberately overlaps: "dkim" and "jchen" exist in BOTH enterprises (distinct

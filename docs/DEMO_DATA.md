@@ -12,7 +12,7 @@ implements the same `IGitHubBillingClient` interface the real GitHub billing API
 (`RealGitHubBillingClient.cs`) implements. It serves **distinct data per enterprise slug**,
 deliberately exercising the multi-enterprise collision cases:
 
-- **`contoso`** — 12 fake users (e.g. `ahernandez` / Ana Hernandez) across three cost centers
+- **`contoso`** — 20 fake users (e.g. `ahernandez` / Ana Hernandez) across three cost centers
   (**Engineering**, **Product**, **Finance**)
 - **`fabrikam`** — 8 fake users, **two of whom (`dkim`, `jchen`) share logins with contoso users**
   (the same GitHub login legitimately existing in two enterprises — billed separately in each), and
