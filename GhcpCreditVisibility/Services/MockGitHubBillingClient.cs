@@ -259,12 +259,19 @@ namespace GhcpCreditVisibility.Services
                 bool weekend = day.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
                 foreach (var s in seed.Users)
                 {
+                    // "mtanaka" (fabrikam) is a deliberate recent joiner: no fabricated history, so
+                    // her first snapshot month renders the "new" badge in the per-user delta column.
+                    if (string.Equals(s.Login, "mtanaka", StringComparison.OrdinalIgnoreCase)) continue;
                     var cc = seed.CostCenters.First(c => c.Id == s.CostCenterId);
                     var rng = new Random(StableSeed(enterpriseSlug + "|" + s.Login) + day.Year * 10000 + day.Month * 100 + day.Day);
                     foreach (var (model, price) in Models)
                     {
-                        var qty = rng.Next(0, weekend ? 6 : 22); // credits used that day for this model
-                        if (qty == 0) continue;                  // some days a user doesn't touch a model
+                        // Daily quantities are tuned so a full fabricated month lands in the same
+                        // ballpark as the snapshot job's current-month aggregates (avg ~$40/user) —
+                        // month-over-month deltas then spread realistically around zero instead of
+                        // uniformly spiking on the seam between fabricated and snapshotted months.
+                        var qty = rng.Next(0, weekend ? 10 : 38); // credits used that day for this model
+                        if (qty == 0) continue;                   // some days a user doesn't touch a model
                         var net = Math.Round(qty * price, 2);
                         rows.Add(new Data.UsageSnapshot
                         {

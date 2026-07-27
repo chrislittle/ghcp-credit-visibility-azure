@@ -28,6 +28,9 @@ namespace GhcpCreditVisibility.Pages
         [BindProperty(SupportsGet = true)] public long? Ent { get; set; }           // enterprise filter (null = all in scope)
 
         public const int UserPageSize = 25;
+        /// <summary>A month-over-month move of at least this % renders as a highlighted pill in the
+        /// per-user table — the "who suddenly changed" signal.</summary>
+        public const double BigMoveThresholdPct = 50;
 
         public int Year { get; private set; }
         public int Month { get; private set; }
@@ -42,6 +45,8 @@ namespace GhcpCreditVisibility.Pages
         public IReadOnlyList<UsageQueryService.UserMonthTotal> DisplayUsers { get; private set; } = Array.Empty<UsageQueryService.UserMonthTotal>();
         /// <summary>Count of users matching <see cref="UserSearch"/> (all users if no search term) — drives the pagination controls and the "N match" label.</summary>
         public int MatchingUserCount { get; private set; }
+        /// <summary>False when the previous month has no data in scope — per-user deltas render as em-dashes instead of flagging everyone "new".</summary>
+        public bool HasPrevUserDeltas { get; private set; }
         public int UserPageCount { get; private set; } = 1;
         public IReadOnlyList<UsageQueryService.CostCenterTotal> CostCenters { get; private set; } = Array.Empty<UsageQueryService.CostCenterTotal>();
         public IReadOnlyList<UsageQueryService.ModelTotal> Models { get; private set; } = Array.Empty<UsageQueryService.ModelTotal>();
@@ -122,6 +127,7 @@ namespace GhcpCreditVisibility.Pages
             }
             DisplayUsers = userPage.Items;
             MatchingUserCount = userPage.MatchingUserCount;
+            HasPrevUserDeltas = userPage.HasPrevMonthData;
 
             // Headline KPIs derived from the scoped month (independent of search/paging).
             TotalSpend = userPage.TotalSpend;

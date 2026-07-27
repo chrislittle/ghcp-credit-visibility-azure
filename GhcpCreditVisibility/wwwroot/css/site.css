@@ -188,16 +188,23 @@ body { background:var(--gh-bg); color:var(--gh-ink); font-family:'Segoe UI',-app
 .gh-card table{width:100%;border-collapse:collapse;}
 .gh-card th,.gh-card td{padding:10px 18px;text-align:left;font-size:13px;}
 .gh-card thead th{color:var(--gh-muted);font-size:11px;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid var(--gh-line);}
+/* Numeric column HEADERS align with their right-aligned values — without this the header sits
+   left-aligned over right-aligned numbers and the column reads as offset. */
+.gh-card th.num{text-align:right;}
 .gh-card tbody tr{border-bottom:1px solid #f1f4f9;}
 .gh-card tbody tr:hover{background:#fafbff;}
 .gh-card td.num{text-align:right;font-variant-numeric:tabular-nums;font-weight:600;}
 .gh-card tfoot td{font-weight:800;border-top:2px solid var(--gh-line);background:#fafbff;}
 .gh-who{display:flex;align-items:center;gap:10px;}
 .gh-mini{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:700;font-size:11px;flex:0 0 auto;}
-.gh-barcell{min-width:120px;}
-.gh-bar{height:8px;border-radius:6px;background:#eef1f6;overflow:hidden;}
-.gh-bar > i{display:block;height:100%;border-radius:6px;background:linear-gradient(90deg,var(--gh-brand),var(--gh-brand2));}
 .gh-ccpill{font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;display:inline-block;}
+/* Month-over-month delta column: quiet arrows for normal movement; a tinted pill for big
+   movers (>= threshold); a "new" badge for first-month spend. */
+.gh-delta{font-variant-numeric:tabular-nums;font-weight:700;font-size:12.5px;white-space:nowrap;}
+.gh-delta.up{color:var(--gh-bad);} .gh-delta.down{color:var(--gh-good);}
+.gh-delta-pill{padding:2px 9px;border-radius:999px;display:inline-block;}
+.gh-delta-pill.up{background:#fdecea;} .gh-delta-pill.down{background:#e6f4ea;}
+.gh-new{font-size:11px;font-weight:700;color:#1e40af;background:#eef4ff;border:1px solid #dbe6ff;padding:2px 9px;border-radius:999px;display:inline-block;}
 
 /* Per-user table search + pagination */
 .gh-usersearch{display:flex;align-items:center;gap:10px;padding:12px 18px;border-bottom:1px solid var(--gh-line);}

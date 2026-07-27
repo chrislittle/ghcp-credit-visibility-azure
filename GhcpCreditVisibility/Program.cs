@@ -147,13 +147,18 @@ if (app.Environment.IsDevelopment() && useLocalDevDb)
     }
     var seedEnterprises = db.Enterprises.OrderBy(e => e.Id).ToList();
 
-    // Backfill synthetic usage history per enterprise so the trend + month selector have data locally.
+    // Backfill synthetic usage history per enterprise so the trend + month selector have data
+    // locally — but only up to the END OF LAST MONTH. The snapshot job owns the current month
+    // (it writes the monthly aggregate rows on startup); seeding daily rows for the current month
+    // too would DOUBLE-COUNT it, spiking the trend chart and flagging every user as a big
+    // month-over-month mover.
     if (!db.UsageSnapshots.Any())
     {
+        var endOfLastMonth = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddDays(-1);
         foreach (var e in seedEnterprises)
         {
             db.UsageSnapshots.AddRange(
-                GhcpCreditVisibility.Services.MockGitHubBillingClient.BuildHistorySnapshots(12, DateTime.UtcNow, e.Id, e.Slug));
+                GhcpCreditVisibility.Services.MockGitHubBillingClient.BuildHistorySnapshots(12, endOfLastMonth, e.Id, e.Slug));
         }
     }
     if (!db.PrincipalCostCenterMappings.Any())

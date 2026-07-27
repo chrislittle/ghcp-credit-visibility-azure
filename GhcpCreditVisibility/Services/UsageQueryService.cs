@@ -18,7 +18,10 @@ namespace GhcpCreditVisibility.Services
         // GrossAmount is carried alongside NetAmount so the dashboard can optionally show real
         // usage activity even when it's fully covered by an included allowance (NetAmount = 0) —
         // see the "Dashboard:ShowGrossUsage" feature flag.
-        public sealed record UserMonthTotal(string UserLogin, string? UserName, string? CostCenterId, string? CostCenterName, decimal NetAmount, decimal GrossAmount = 0m, long EnterpriseId = 0, string? EnterpriseName = null);
+        /// <summary>PrevMonthNetAmount: the same (enterprise, login)'s total for the previous month —
+        /// null when the user had no rows then. Only populated by the paged dashboard query, and only
+        /// meaningful when the page reports the previous month has data at all.</summary>
+        public sealed record UserMonthTotal(string UserLogin, string? UserName, string? CostCenterId, string? CostCenterName, decimal NetAmount, decimal GrossAmount = 0m, long EnterpriseId = 0, string? EnterpriseName = null, decimal? PrevMonthNetAmount = null);
         public sealed record CostCenterTotal(string? CostCenterId, string? CostCenterName, decimal NetAmount, decimal GrossAmount = 0m, long EnterpriseId = 0, string? EnterpriseName = null);
         public sealed record ModelTotal(string Model, decimal NetAmount, decimal GrossAmount = 0m);
         public sealed record TrendPoint(int Year, int Month, decimal NetAmount);
@@ -140,7 +143,11 @@ namespace GhcpCreditVisibility.Services
             decimal TotalSpend,
             decimal TotalGrossSpend,
             decimal MaxUserNet,
-            UserMonthTotal? TopUser);
+            UserMonthTotal? TopUser,
+            // False when the previous month has no rows in scope at all (first month of a
+            // deployment / newly onboarded enterprise): per-user deltas would then flag EVERY
+            // user as "new", which is noise — the UI renders em-dashes instead.
+            bool HasPrevMonthData = false);
 
         /// <summary>
         /// Search + page the per-user monthly breakdown entirely in the database: the GROUP BY, search
@@ -190,10 +197,31 @@ namespace GhcpCreditVisibility.Services
                 .ToListAsync(ct);
             var currentNames = await LoadCurrentNamesAsync(db, ct);
             var entNames = await LoadEnterpriseNamesAsync(db, ct);
+
+            // ── Previous-month per-user totals, for the "vs <prev month>" delta column ──
+            // Same scope, previous calendar month, grouped by (enterprise, login) — the login alone
+            // is NOT the identity (the same login in two enterprises is two billed seats). Only the
+            // current page's logins are fetched.
+            var prevMonthStart = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-1);
+            var prevScoped = ApplyScope(db.UsageSnapshots.Where(x => x.Year == prevMonthStart.Year && x.Month == prevMonthStart.Month), scope);
+            var hasPrevMonthData = await prevScoped.AnyAsync(ct);
+            var prevByUser = new Dictionary<(long EnterpriseId, string UserLogin), decimal>();
+            if (hasPrevMonthData && pageRows.Count > 0)
+            {
+                var pageLogins = pageRows.Select(r => r.UserLogin).Distinct().ToList();
+                var prevRows = await prevScoped
+                    .Where(x => pageLogins.Contains(x.UserLogin))
+                    .GroupBy(x => new { x.EnterpriseId, x.UserLogin })
+                    .Select(g => new { g.Key.EnterpriseId, g.Key.UserLogin, Net = g.Sum(v => v.NetAmount) })
+                    .ToListAsync(ct);
+                prevByUser = prevRows.ToDictionary(r => (r.EnterpriseId, r.UserLogin), r => r.Net);
+            }
+
             var items = pageRows
                 .Select(r => new UserMonthTotal(r.UserLogin, r.UserName, r.CostCenterId,
                     ResolveName(currentNames, r.EnterpriseId, r.CostCenterId, r.CostCenterName),
-                    r.NetAmount, r.GrossAmount, r.EnterpriseId, entNames.GetValueOrDefault(r.EnterpriseId)))
+                    r.NetAmount, r.GrossAmount, r.EnterpriseId, entNames.GetValueOrDefault(r.EnterpriseId),
+                    prevByUser.TryGetValue((r.EnterpriseId, r.UserLogin), out var prevNet) ? prevNet : null))
                 .ToList();
 
             // Month-level KPIs (total spend, top user, distinct user count) are independent of the
@@ -213,7 +241,7 @@ namespace GhcpCreditVisibility.Services
                     ResolveName(currentNames, topRow.EnterpriseId, topRow.CostCenterId, topRow.CostCenterName),
                     topRow.NetAmount, topRow.GrossAmount, topRow.EnterpriseId, entNames.GetValueOrDefault(topRow.EnterpriseId));
 
-            return new UserMonthPage(items, matchingUserCount, totalUserCount, totalSpend, totalGrossSpend, maxUserNet, topUser);
+            return new UserMonthPage(items, matchingUserCount, totalUserCount, totalSpend, totalGrossSpend, maxUserNet, topUser, hasPrevMonthData);
         }
 
         public async Task<IReadOnlyList<CostCenterTotal>> GetCostCenterTotalsAsync(int year, int month, UserScope scope, CancellationToken ct = default)

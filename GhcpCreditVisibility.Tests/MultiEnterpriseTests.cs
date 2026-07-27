@@ -301,6 +301,53 @@ public class EnterpriseScopeTests
     }
 
     [Fact]
+    public async Task Prev_month_deltas_join_by_enterprise_and_login()
+    {
+        var factory = NewFactory();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            db.Enterprises.Add(new Enterprise { Slug = "contoso", DisplayName = "Contoso", UseMockData = true });
+            db.Enterprises.Add(new Enterprise { Slug = "fabrikam", DisplayName = "Fabrikam", UseMockData = true });
+            // July rows: dkim exists in BOTH enterprises; mtanaka only has July (a "new" user).
+            db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 1, Year = 2026, Month = 7, Day = 1, UserLogin = "dkim", CostCenterId = "cc-a", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 50m });
+            db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 2, Year = 2026, Month = 7, Day = 1, UserLogin = "dkim", CostCenterId = "cc-b", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 40m });
+            db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 1, Year = 2026, Month = 7, Day = 1, UserLogin = "mtanaka", CostCenterId = "cc-a", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 10m });
+            // June rows: dkim spent 25 in enterprise 1 and 80 in enterprise 2 — the deltas must NOT mix.
+            db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 1, Year = 2026, Month = 6, Day = 1, UserLogin = "dkim", CostCenterId = "cc-a", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 25m });
+            db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 2, Year = 2026, Month = 6, Day = 1, UserLogin = "dkim", CostCenterId = "cc-b", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 80m });
+            await db.SaveChangesAsync();
+        }
+        var query = new UsageQueryService(factory);
+
+        var page = await query.GetUserTotalsPagedAsync(2026, 7, UserScope.All(), search: null, page: 1, pageSize: 25);
+
+        Assert.True(page.HasPrevMonthData);
+        var dkimEnt1 = page.Items.Single(i => i.UserLogin == "dkim" && i.EnterpriseId == 1);
+        var dkimEnt2 = page.Items.Single(i => i.UserLogin == "dkim" && i.EnterpriseId == 2);
+        Assert.Equal(25m, dkimEnt1.PrevMonthNetAmount); // enterprise 1's June, never enterprise 2's
+        Assert.Equal(80m, dkimEnt2.PrevMonthNetAmount);
+        Assert.Null(page.Items.Single(i => i.UserLogin == "mtanaka").PrevMonthNetAmount); // "new"
+    }
+
+    [Fact]
+    public async Task First_month_of_data_reports_no_prev_month()
+    {
+        var factory = NewFactory();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            db.Enterprises.Add(new Enterprise { Slug = "contoso", DisplayName = "Contoso", UseMockData = true });
+            db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = 1, Year = 2026, Month = 7, Day = 1, UserLogin = "a", CostCenterId = "cc-a", Model = "gpt-5", Sku = "ai_credits", Product = "copilot", NetAmount = 10m });
+            await db.SaveChangesAsync();
+        }
+        var query = new UsageQueryService(factory);
+
+        var page = await query.GetUserTotalsPagedAsync(2026, 7, UserScope.All(), search: null, page: 1, pageSize: 25);
+
+        // No June data at all: the UI must render em-dashes, not flag every user "new".
+        Assert.False(page.HasPrevMonthData);
+    }
+
+    [Fact]
     public async Task Cross_enterprise_scope_unions_pairs()
     {
         var factory = await SeedTwoEnterprisesAsync();

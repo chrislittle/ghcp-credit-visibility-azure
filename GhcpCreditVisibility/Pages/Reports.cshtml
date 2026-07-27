@@ -205,24 +205,22 @@ else
                 </div>
                 <table>
                     <thead>
-                        <tr><th>@(Model.DimLabel.Substring(0,1).ToUpper() + Model.DimLabel.Substring(1))</th><th style="width:34%" title="Bar length = share of the (filtered) total — matches the % of total column.">Share</th><th class="num">% of total</th><th class="num">Net&nbsp;($)</th></tr>
+                        <tr><th>@(Model.DimLabel.Substring(0,1).ToUpper() + Model.DimLabel.Substring(1))</th><th class="num">% of total</th><th class="num">Net&nbsp;($)</th></tr>
                     </thead>
                     <tbody>
                         @foreach (var s in ranked)
                         {
                             var col = ColorKey(s.Key);
                             var sharePct = Model.GrandTotal > 0 ? (double)(s.Total / Model.GrandTotal) * 100 : 0;
-                            var barW = sharePct.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
                             <tr>
                                 <td><span class="gh-ccpill" style="background:@(col)1a;color:@col">@s.Key</span></td>
-                                <td class="gh-barcell"><div class="gh-bar" title="Share of the (filtered) total — matches the % of total column."><i style="width:@(barW)%;background:@col"></i></div></td>
                                 <td class="num">@sharePct.ToString("N1")%</td>
                                 <td class="num">@s.Total.ToString("N2")</td>
                             </tr>
                         }
                     </tbody>
                     <tfoot>
-                        <tr><td colspan="3">Total — @ranked.Count @Model.DimLabel@(ranked.Count == 1 ? "" : "s")</td><td class="num">$@Model.GrandTotal.ToString("N2")</td></tr>
+                        <tr><td colspan="2">Total — @ranked.Count @Model.DimLabel@(ranked.Count == 1 ? "" : "s")</td><td class="num">$@Model.GrandTotal.ToString("N2")</td></tr>
                     </tfoot>
                 </table>
             </div>

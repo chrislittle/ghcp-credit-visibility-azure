@@ -164,7 +164,7 @@
             <table>
                 <thead>
                     <tr>
-                        <th>User</th><th>Cost center</th><th style="width:26%" title="Bar length = share of this month's total spend — matches the % of total column.">Share</th><th class="num">% of total</th><th class="num">Net&nbsp;($)</th>
+                        <th>User</th><th>Cost center</th><th class="num">% of total</th><th class="num" title="Change vs the same user's total last month. A move of ±@((int)IndexModel.BigMoveThresholdPct)% or more is highlighted; 'new' = no spend last month.">vs @Model.PrevMonthLabel</th><th class="num">Net&nbsp;($)</th>
                         @if (Model.ShowGrossUsage)
                         {
                             <th class="num">Gross&nbsp;($)</th>
@@ -176,7 +176,6 @@
                     {
                         var col = ColorFor(u.EnterpriseId, u.CostCenterId, u.CostCenterName);
                         var sharePct = Model.TotalSpend > 0 ? (double)(u.NetAmount / Model.TotalSpend) * 100 : 0;
-                        var barW = sharePct.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
                         var ccName = CcLabel(u.CostCenterName, u.CostCenterId, u.EnterpriseName);
                         <tr>
                             <td>
@@ -186,8 +185,33 @@
                                 </div>
                             </td>
                             <td><span class="gh-ccpill" style="background:@(col)1a;color:@col">@ccName</span></td>
-                            <td class="gh-barcell"><div class="gh-bar" title="Share of this month's total spend — matches the % of total column."><i style="width:@(barW)%"></i></div></td>
                             <td class="num">@sharePct.ToString("N1")%</td>
+                            <td class="num">
+                                @if (!Model.HasPrevUserDeltas)
+                                {
+                                    <span style="color:#98a2b3">—</span>
+                                }
+                                else if (u.PrevMonthNetAmount is not decimal prev || prev <= 0)
+                                {
+                                    <span class="gh-new" title="No spend last month">new</span>
+                                }
+                                else
+                                {
+                                    var deltaPct = (double)((u.NetAmount - prev) / prev) * 100.0;
+                                    var up = deltaPct >= 0;
+                                    var big = Math.Abs(deltaPct) >= IndexModel.BigMoveThresholdPct;
+                                    var arrow = up ? "▲" : "▼";
+                                    var dir = up ? "up" : "down";
+                                    if (big)
+                                    {
+                                        <span class="gh-delta-pill @dir"><span class="gh-delta @dir">@arrow @Math.Abs(deltaPct).ToString("N0")%</span></span>
+                                    }
+                                    else
+                                    {
+                                        <span class="gh-delta @dir">@arrow @Math.Abs(deltaPct).ToString("N0")%</span>
+                                    }
+                                }
+                            </td>
                             <td class="num">@u.NetAmount.ToString("N2")</td>
                             @if (Model.ShowGrossUsage)
                             {
@@ -197,11 +221,11 @@
                     }
                     @if (Model.UserCount == 0)
                     {
-                        <tr><td colspan="4" style="text-align:center;color:#66707d;padding:22px 0;">No usage records for this month.</td></tr>
+                        <tr><td colspan="5" style="text-align:center;color:#66707d;padding:22px 0;">No usage records for this month.</td></tr>
                     }
                     else if (Model.MatchingUserCount == 0)
                     {
-                        <tr><td colspan="4" style="text-align:center;color:#66707d;padding:22px 0;">No users match "@Model.UserSearch".</td></tr>
+                        <tr><td colspan="5" style="text-align:center;color:#66707d;padding:22px 0;">No users match "@Model.UserSearch".</td></tr>
                     }
                 </tbody>
                 @if (Model.UserCount > 0)
