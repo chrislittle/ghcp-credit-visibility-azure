@@ -61,9 +61,9 @@ This app closes that gap:
 
 ## Screenshots
 
-| Usage dashboard — two enterprises, enterprise filter | Reports — breakdown by enterprise |
+| Usage dashboard — two enterprises, enterprise filter | Reports — cost centers across enterprises |
 |---|---|
-| ![Usage dashboard with the enterprise filter and enterprise-qualified cost centers](docs/images/dashboard.png) | ![Reports page breaking spend down by enterprise](docs/images/reports.png) |
+| ![Usage dashboard with the enterprise filter and enterprise-qualified cost centers](docs/images/dashboard.png) | ![Reports page breaking spend down by cost center across enterprises, with the enterprise filter](docs/images/reports.png) |
 
 | Admin console — enterprise registry + access mappings | About page (in-app documentation) |
 |---|---|
