@@ -61,9 +61,12 @@ az keyvault show -n <kv-name> --query "properties.privateEndpointConnections"
 az role assignment list --scope <kv-id> --query "[?roleDefinitionName=='Key Vault Secrets User']"
 ```
 
-The app identity needs **Key Vault Secrets User**. Note the timing trap: if the app started *before*
-the `github-pat` secret existed, App Service cached the failed resolution — a restart fixes it once
-the secret is present.
+The app identity needs **Key Vault Secrets User** at VAULT scope (that's also what lets it read
+per-enterprise `github-pat-<slug>` secrets the moment they're created — no per-secret grants).
+Note the timing trap: if the app started *before* the `github-pat` secret existed, App Service
+cached the failed app-setting resolution — a restart fixes it once the secret is present. This
+trap only applies to the app-setting REFERENCE (row-1 legacy path); per-enterprise secrets read via
+the Key Vault SDK are re-tried every snapshot cycle with a 5-minute cache, no restart needed.
 
 ## Step 3 — Outbound egress to GitHub
 

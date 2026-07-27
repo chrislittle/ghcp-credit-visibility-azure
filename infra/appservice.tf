@@ -83,8 +83,15 @@ resource "azurerm_linux_web_app" "app" {
     {
       "APPLICATIONINSIGHTS_CONNECTION_STRING" = azurerm_application_insights.appi.connection_string
       "WEBSITES_PORT"                         = "8080"
-      "GitHub__Enterprise"                    = var.github_enterprise_slug
-      "GitHub__UseMock"                       = tostring(var.use_mock_data)
+      # BOOTSTRAP SEED ONLY: fills the enterprise registry's first row on upgrade/first run. After
+      # that, enterprises are managed at RUNTIME in the admin console (registry table) — adding
+      # enterprise N+1 is a day-2 operation touching no Terraform. This value is inert once seeded.
+      "GitHub__Enterprise" = var.github_enterprise_slug
+      "GitHub__UseMock"    = tostring(var.use_mock_data)
+      # Vault URI for the per-enterprise PAT resolver: the app's managed identity reads
+      # github-pat-<slug> secrets via the Key Vault SDK using its existing VAULT-SCOPE secret-read
+      # role, so a new enterprise's secret is readable the moment it exists — no infra change.
+      "KeyVault__Uri" = azurerm_key_vault.kv.vault_uri
       "Retention__Months"                     = tostring(var.retention_months)
       # Tells the container whether the platform Easy Auth module is actually in front of it.
       # The app derives identity from the X-MS-CLIENT-PRINCIPAL request header, which is only

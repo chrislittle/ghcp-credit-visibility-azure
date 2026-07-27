@@ -76,8 +76,17 @@ actual users, cost centers, and spend.)*
 ## Features
 
 - **Per-user, per-cost-center, and per-model spend breakdown**, with multi-month trend history
-  and a flexible report builder (break down by user/model/cost center; bucket by day/week/month;
-  filter and compare).
+  and a flexible report builder (break down by user/model/cost center/enterprise; bucket by
+  day/week/month; filter and compare).
+- **Multiple GitHub enterprises in one deployment** — an in-app enterprise registry (admin
+  console) is the single source of truth. Each enterprise has its own PAT (Key Vault secret),
+  its own rate-limit budget and circuit breaker, and fully isolated snapshots: one enterprise's
+  expired PAT or API outage never touches the others. **Adding an enterprise is a day-2 runtime
+  operation** — add it (disabled) in the console, seed its PAT with
+  `./deploy.ps1 -Task set-pat -Enterprise <slug>`, enable it, verify the first snapshot, map
+  principals — no redeploy, no Terraform, no restart. Alerts split by an enterprise telemetry
+  dimension, so enterprise N+1 is alertable automatically. Hybrid deployments (real enterprises
+  alongside mock demo/fire-drill ones) are first-class.
 - **Budget tracking** — reads the budgets and thresholds you've configured *in GitHub* (this app
   never creates or edits budgets) and shows current-month utilization with near-limit/over-budget
   callouts. GitHub still sends the actual alert emails.
@@ -238,7 +247,9 @@ identical for mock vs. real data: **[docs/DEMO_DATA.md](docs/DEMO_DATA.md)**.
 
 ## Going live against real GitHub data
 
-1. Set `use_mock_data = false` and `github_enterprise_slug = "<your-enterprise>"`.
+1. Set `use_mock_data = false` and `github_enterprise_slug = "<your-enterprise>"`. (These seed the
+   **first row** of the in-app enterprise registry; after that, enterprises are managed entirely in
+   the admin console — see below for adding more.)
 2. Provide an enterprise PAT as the Key Vault secret `github-pat` — run `./deploy.ps1 -Task set-pat`,
    or seed it at apply time via `github_pat_secret_value` in `terraform.tfvars`. For a **private**
    Key Vault, `deploy.ps1` walks you through how: try direct access (if you're already on the VNet),
@@ -250,6 +261,30 @@ identical for mock vs. real data: **[docs/DEMO_DATA.md](docs/DEMO_DATA.md)**.
    in app settings or Terraform state.
 
 Full details: [infra/README.md](infra/README.md#going-live-against-real-github-data).
+
+### Adding more GitHub enterprises (day-2, no redeploy)
+
+Large organizations often have several GitHub enterprises. Onboarding another one never touches
+Terraform or the deployment — the snapshot job re-reads the registry every cycle, alert rules split
+on the enterprise telemetry dimension, and the app's managed identity reads Key Vault at vault
+scope, so a new `github-pat-<slug>` secret is usable the moment it exists:
+
+1. **Admin console → GitHub enterprises → Add** — slug, display name, data source. New enterprises
+   start **disabled**, and the console shows "PAT missing".
+2. **Seed the PAT out-of-band**: `./deploy.ps1 -Task set-pat -Enterprise <slug>` (the PAT value is
+   never entered in the web console, by design). The console's PAT status flips to "resolved".
+3. **Enable** the enterprise and watch its first snapshot (`/health/diag` → `enterprises[]`, or the
+   console's last-snapshot column).
+4. **Inspect, then map principals** — nobody sees an enterprise's data until mappings exist, so a
+   bad first snapshot is invisible to users and reversible by disabling the row.
+
+Removing an enterprise (decommission/consolidation) is the reverse: **Remove** in the console
+cascade-purges all of its usage history, budgets, mappings and run history — with a confirmation,
+since GitHub's API only serves the current month and purged history is unrecoverable.
+
+Same user in two enterprises? They appear as **distinct rows per enterprise** — that's how GitHub
+bills them — and identically-named cost centers ("Engineering" in both) are always
+enterprise-qualified in the UI.
 
 ## Repository layout
 

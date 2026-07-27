@@ -39,6 +39,8 @@
 .EXAMPLE
   ./deploy.ps1 -Task set-pat      # seed the GitHub PAT into Key Vault (real-data mode)
 .EXAMPLE
+  ./deploy.ps1 -Task set-pat -Enterprise fabrikam   # seed a NEW enterprise's PAT (github-pat-fabrikam) — day-2 onboarding, no redeploy
+.EXAMPLE
   ./deploy.ps1 -Task status       # probe the health endpoints
 #>
 [CmdletBinding()]
@@ -55,7 +57,14 @@ param(
   [switch]$Force,
   [switch]$SkipPreflight,
   [switch]$SkipImage,
-  [switch]$Register
+  [switch]$Register,
+  # set-pat only: which enterprise's PAT to seed. Adding an enterprise is a DAY-2 runtime operation
+  # (admin console registry row + this secret) — no terraform apply, no redeploy. The secret name
+  # follows the registry convention github-pat-<slug>; omit for the original/default enterprise
+  # (legacy secret name github-pat). Override the name entirely with -SecretName if the registry
+  # row uses a custom one.
+  [string]$Enterprise = '',
+  [string]$SecretName = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -192,31 +201,31 @@ Write-Output "GRANT_OK"
   Write-Ok 'SQL grant applied via the jump box — the app picks it up within ~30s (migrations retry). No RDP needed.'
 }
 
-function Invoke-PatSetViaJumpbox([string]$ResourceGroup, [string]$VmName, [string]$VaultName, [string]$PatValue, [string]$IdentityClientId) {
+function Invoke-PatSetViaJumpbox([string]$ResourceGroup, [string]$VmName, [string]$VaultName, [string]$PatValue, [string]$IdentityClientId, [string]$PatSecretName = 'github-pat') {
   # Uses the jump box's OWN user-assigned managed identity (via the Instance Metadata Service)
   # rather than your identity — Terraform grants it Key Vault Secrets Officer scoped to just this
   # vault. No az CLI / Az PowerShell module install needed: pure REST calls built into PowerShell.
   # client_id is required in the IMDS token request for a user-assigned identity (unlike
   # system-assigned, IMDS can't infer which identity to use without it).
   $script = @'
-param([string]$VaultName, [string]$SecretValue, [string]$ClientId)
+param([string]$VaultName, [string]$SecretValue, [string]$ClientId, [string]$SecretName)
 $ErrorActionPreference = 'Stop'
 $idResp = Invoke-RestMethod -Method Get -Headers @{Metadata = "true" } `
   -Uri "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net&client_id=$ClientId"
 $body = @{ value = $SecretValue } | ConvertTo-Json
 $authHeader = "Bearer " + $idResp.access_token
 Invoke-RestMethod -Method Put -Headers @{Authorization = $authHeader } `
-  -Uri "https://$VaultName.vault.azure.net/secrets/github-pat?api-version=7.4" `
+  -Uri "https://$VaultName.vault.azure.net/secrets/$($SecretName)?api-version=7.4" `
   -Body $body -ContentType "application/json" | Out-Null
 Write-Output "PAT_SET_OK"
 '@
 
   Write-Info "Setting the PAT via $VmName's own managed identity (value passed as a protected parameter — never logged or returned)..."
   Invoke-JumpboxRunCommand -ResourceGroup $ResourceGroup -VmName $VmName -NamePrefix 'set-pat' -ScriptBody $script `
-    -Parameters @("VaultName=$VaultName", "ClientId=$IdentityClientId") `
+    -Parameters @("VaultName=$VaultName", "ClientId=$IdentityClientId", "SecretName=$PatSecretName") `
     -ProtectedParameters @("SecretValue=$PatValue") `
     -SuccessMarker 'PAT_SET_OK' | Out-Null
-  Write-Ok "GitHub PAT stored in Key Vault ($VaultName/github-pat) via the jump box. No RDP needed."
+  Write-Ok "GitHub PAT stored in Key Vault ($VaultName/$PatSecretName) via the jump box. No RDP needed."
 }
 
 # ── Private-networking access patterns (shared by grant-sql + set-pat) ───────
@@ -340,8 +349,8 @@ IF IS_ROLEMEMBER('db_ddladmin',  @app) = 0 EXEC('ALTER ROLE db_ddladmin  ADD MEM
   Write-Ok 'SQL grant applied — the app picks it up within ~30s (migrations retry).'
 }
 
-function Invoke-PatSetDirect([string]$VaultName, [string]$PatValue) {
-  if ($DryRun) { Write-Host "  DRYRUN> az keyvault secret set --vault-name $VaultName --name github-pat --file <temp file holding the PAT>" -ForegroundColor DarkGray; return }
+function Invoke-PatSetDirect([string]$VaultName, [string]$PatValue, [string]$PatSecretName = 'github-pat') {
+  if ($DryRun) { Write-Host "  DRYRUN> az keyvault secret set --vault-name $VaultName --name $PatSecretName --file <temp file holding the PAT>" -ForegroundColor DarkGray; return }
   # NOT --value: a process argument list is readable by any other local process and is captured
   # wholesale by EDR/Sysmon command-line logging, which would defeat Read-PatSecurely reading it
   # as a SecureString in the first place. --file keeps it out of argv; the temp copy is
@@ -351,7 +360,7 @@ function Invoke-PatSetDirect([string]$VaultName, [string]$PatValue) {
     # utf8NoBOM and -NoNewline are both load-bearing: a BOM or a trailing newline would be
     # stored as part of the secret and the GitHub API would reject the token.
     Set-Content -Path $tmp -Value $PatValue -NoNewline -Encoding utf8NoBOM
-    $errOutput = az keyvault secret set --vault-name $VaultName --name github-pat --file $tmp --only-show-errors 2>&1 | Out-String
+    $errOutput = az keyvault secret set --vault-name $VaultName --name $PatSecretName --file $tmp --only-show-errors 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) { throw "Failed to set the secret: $($errOutput.Trim())" }
   }
   finally {
@@ -396,7 +405,7 @@ function Invoke-SqlGrantViaTempPublicAccess([string]$ResourceGroup, [string]$Sql
 
 # Same idea as the SQL version, but for Key Vault: adds a scoped network-rule IP allow instead of
 # flipping the whole default_action to Allow (keeps the exposure window as narrow as possible).
-function Invoke-PatSetViaTempPublicAccess([string]$ResourceGroup, [string]$VaultName, [string]$PatValue) {
+function Invoke-PatSetViaTempPublicAccess([string]$ResourceGroup, [string]$VaultName, [string]$PatValue, [string]$PatSecretName = 'github-pat') {
   $myIp = Get-MyPublicIp
   if (-not $myIp) { throw "Couldn't auto-detect your public IP — required to scope the temporary network rule." }
   Write-Info "Current state: public network access = Disabled. Will re-disable when finished."
@@ -404,7 +413,7 @@ function Invoke-PatSetViaTempPublicAccess([string]$ResourceGroup, [string]$Vault
   if ($DryRun) {
     Write-Host "  DRYRUN> az keyvault update -n $VaultName --public-network-access Enabled" -ForegroundColor DarkGray
     Write-Host "  DRYRUN> az keyvault network-rule add -n $VaultName --ip-address $myIp" -ForegroundColor DarkGray
-    Invoke-PatSetDirect -VaultName $VaultName -PatValue $PatValue
+    Invoke-PatSetDirect -VaultName $VaultName -PatValue $PatValue -PatSecretName $PatSecretName
     return
   }
   az keyvault update -n $VaultName --public-network-access Enabled --only-show-errors | Out-Null
@@ -412,7 +421,7 @@ function Invoke-PatSetViaTempPublicAccess([string]$ResourceGroup, [string]$Vault
   try {
     Write-Ok 'Public access temporarily enabled. Waiting ~20s for the rule to propagate...'
     Start-Sleep -Seconds 20
-    Invoke-PatSetDirect -VaultName $VaultName -PatValue $PatValue
+    Invoke-PatSetDirect -VaultName $VaultName -PatValue $PatValue -PatSecretName $PatSecretName
   } finally {
     Write-Info 'Reverting: removing your network rule and disabling public access again...'
     az keyvault network-rule remove -n $VaultName --ip-address $myIp --only-show-errors 2>$null | Out-Null
@@ -1209,21 +1218,31 @@ function Phase-SreSync {
 # ── PHASE: seed GitHub PAT into Key Vault (real data) ────────────
 function Phase-SetPat {
   Write-Step 6 'Seed the GitHub PAT into Key Vault (real-data mode)'
+  # Per-enterprise secret name: -Enterprise <slug> follows the registry convention
+  # github-pat-<slug>; -SecretName overrides outright (registry rows can use custom names);
+  # neither = the original/default enterprise's legacy github-pat.
+  $patSecret = if ($SecretName) { $SecretName } elseif ($Enterprise) { "github-pat-$Enterprise" } else { 'github-pat' }
   $mock = Get-TfVar 'use_mock_data'
-  if ($mock -eq 'true') { Write-Ok 'Mock data mode — no PAT needed. Skipping.'; return }
+  if ($mock -eq 'true' -and -not $Enterprise -and -not $SecretName) {
+    # A named enterprise overrides the mock skip: hybrid deployments keep use_mock_data=true for
+    # the bootstrap row while onboarding real enterprises in the registry.
+    Write-Ok 'Mock data mode — no PAT needed. Skipping. (Onboarding a real enterprise? Re-run with -Enterprise <slug>.)'
+    return
+  }
   $kv = Get-TfOutput 'key_vault_name'
   if (-not $kv) { Write-Warn 'key_vault_name output not available (infra not applied?). Skipping.'; return }
-  Write-Info "Key Vault: $kv  (secret name: github-pat)"
-  if (-not (AskYesNo 'Set the GitHub PAT secret now?' $true)) { Write-Warn "Skipped. Later: ./deploy.ps1 -Task set-pat  (or az keyvault secret set)"; return }
+  Write-Info "Key Vault: $kv  (secret name: $patSecret)"
+  if ($Enterprise) { Write-Info "Enterprise: $Enterprise — after seeding, its registry row's 'PAT status' flips to resolved (admin console); then Enable it, verify the first snapshot, and map principals." }
+  if (-not (AskYesNo 'Set the GitHub PAT secret now?' $true)) { Write-Warn "Skipped. Later: ./deploy.ps1 -Task set-pat$(if ($Enterprise) { " -Enterprise $Enterprise" })  (or az keyvault secret set)"; return }
 
-  $manualInstructions = "Run this from any host with a path to the Key Vault private endpoint:`n`n  az keyvault secret set --vault-name $kv --name github-pat --value <PAT>"
+  $manualInstructions = "Run this from any host with a path to the Key Vault private endpoint:`n`n  az keyvault secret set --vault-name $kv --name $patSecret --value <PAT>"
 
   # PUBLIC pattern: unchanged.
   if ((Get-TfVar 'use_private_networking') -ne 'true') {
-    if ($DryRun) { Invoke-PatSetDirect -VaultName $kv -PatValue '<PAT>'; return }
+    if ($DryRun) { Invoke-PatSetDirect -VaultName $kv -PatValue '<PAT>' -PatSecretName $patSecret; return }
     $pat = Read-PatSecurely
     if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return }
-    Invoke-PatSetDirect -VaultName $kv -PatValue $pat
+    Invoke-PatSetDirect -VaultName $kv -PatValue $pat -PatSecretName $patSecret
     return
   }
 
@@ -1235,7 +1254,7 @@ function Phase-SetPat {
   $pat = $null
 
   if ($mode -eq 'Direct') {
-    if ($DryRun) { Invoke-PatSetDirect -VaultName $kv -PatValue '<PAT>'; return }
+    if ($DryRun) { Invoke-PatSetDirect -VaultName $kv -PatValue '<PAT>' -PatSecretName $patSecret; return }
     # Same reasoning as the SQL grant: Key Vault's shared front-end accepts the TCP/TLS
     # connection and denies at the HTTP layer (403) when public access is disabled — a bare
     # port-open check can't detect that, so attempt the real write and interpret the outcome.
@@ -1243,7 +1262,7 @@ function Phase-SetPat {
     if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return }
     Write-Info 'Trying direct access...'
     try {
-      Invoke-PatSetDirect -VaultName $kv -PatValue $pat
+      Invoke-PatSetDirect -VaultName $kv -PatValue $pat -PatSecretName $patSecret
       return
     } catch {
       if ($_.Exception.Message -match 'Public network access is disabled|Forbidden|403') {
@@ -1260,12 +1279,12 @@ function Phase-SetPat {
       if (-not $jumpboxVm) { Write-Warn 'No jump box available (enable_jumpbox=false).'; Show-ManualInstructionsAndMaybePause $manualInstructions; return }
       if ($DryRun) { Write-Host "  DRYRUN> az vm run-command create ... (set PAT via jump box $jumpboxVm)" -ForegroundColor DarkGray; return }
       if (-not $pat) { $pat = Read-PatSecurely; if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return } }
-      Invoke-PatSetViaJumpbox -ResourceGroup $rg -VmName $jumpboxVm -VaultName $kv -PatValue $pat -IdentityClientId (Get-TfOutput 'jumpbox_identity_client_id')
+      Invoke-PatSetViaJumpbox -ResourceGroup $rg -VmName $jumpboxVm -VaultName $kv -PatValue $pat -IdentityClientId (Get-TfOutput 'jumpbox_identity_client_id') -PatSecretName $patSecret
     }
     'TempPublic' {
-      if ($DryRun) { Invoke-PatSetViaTempPublicAccess -ResourceGroup $rg -VaultName $kv -PatValue '<PAT>'; return }
+      if ($DryRun) { Invoke-PatSetViaTempPublicAccess -ResourceGroup $rg -VaultName $kv -PatValue '<PAT>' -PatSecretName $patSecret; return }
       if (-not $pat) { $pat = Read-PatSecurely; if (-not $pat) { Write-Warn 'Empty PAT — skipped.'; return } }
-      Invoke-PatSetViaTempPublicAccess -ResourceGroup $rg -VaultName $kv -PatValue $pat
+      Invoke-PatSetViaTempPublicAccess -ResourceGroup $rg -VaultName $kv -PatValue $pat -PatSecretName $patSecret
     }
     'Manual' {
       Show-ManualInstructionsAndMaybePause $manualInstructions

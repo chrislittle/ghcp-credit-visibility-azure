@@ -275,7 +275,18 @@ When there's **no central DNS/DINE policy** in this subscription, set `create_pr
    - **Terraform-seeded (turnkey):** set `github_pat_secret_value` in `terraform.tfvars` before apply. Same private-vault caveat — the **apply host** must reach the private endpoint.
 3. The app's **`GitHub__Token`** app setting is a Key Vault reference to `github-pat` — **wired automatically whenever `use_mock_data = false`** (independent of how the secret was seeded) — resolved at runtime by the app's managed identity (`Key Vault Secrets User`). The secret value never lands in app settings or Terraform state.
 
-> The PAT is read **only by the background snapshot job**, never on a user request. Control-plane operations (creating the vault, RBAC, app settings) work from anywhere; only the **secret value read/write** is gated by the private endpoint.
+### Additional enterprises (day-2 — no Terraform)
+
+`github_enterprise_slug` / `use_mock_data` / `github-pat` only seed the **first row** of the app's
+enterprise registry. Every further enterprise is a runtime operation: add it (disabled) in the
+admin console, seed its PAT with **`./deploy.ps1 -Task set-pat -Enterprise <slug>`** (writes the
+`github-pat-<slug>` secret using the same four private-vault access modes; `-SecretName` overrides
+the name), enable it, verify its first snapshot, then map principals. The app reads per-enterprise
+secrets with its existing **vault-scope** `Key Vault Secrets User` role via the `KeyVault__Uri` app
+setting, and the alert rules split on the enterprise telemetry dimension — so **no Terraform
+resources exist per enterprise, by design**, and nothing here needs re-applying to add one.
+
+> Each PAT is read **only by the background snapshot job**, never on a user request. Control-plane operations (creating the vault, RBAC, app settings) work from anywhere; only the **secret value read/write** is gated by the private endpoint.
 
 ## Cost notes
 - App Service defaults to **Standard (S1)** with a **CPU-based autoscale** rule (1→3 instances) for production headroom — Standard is the minimum tier that supports autoscale. It also covers the inbound private endpoint, VNet integration, Always On, and deployment slots. **Premium is not required** (private endpoints are supported on Basic/Standard/PremiumV2+); step up to P-series only for higher scale-out or Premium-only features. For a cheaper truly-private option, **Azure Container Apps** (internal ingress, scale-to-zero) is an alternative since the app is already containerized.
