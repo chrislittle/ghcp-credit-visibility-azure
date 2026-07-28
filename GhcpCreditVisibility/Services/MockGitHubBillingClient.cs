@@ -24,11 +24,15 @@ namespace GhcpCreditVisibility.Services
         /// <summary>Registering an enterprise with this slug (mock) simulates a hard outage.</summary>
         public const string BrokenEnterpriseSlug = "demo-broken";
 
+        // BudgetsUseEntityNames: the REAL GitHub budgets API sets budget_entity_name to the cost
+        // center's display NAME, not its id — fabrikam mirrors that shape so the snapshot's
+        // name→id resolution stays exercised; contoso keeps the id-shaped variant for coverage.
         private sealed record EnterpriseSeed(
             (string Login, string Name, string CostCenterId)[] Users,
             (string Id, string Name)[] CostCenters,
             decimal OrgBudget,
-            IReadOnlyDictionary<string, decimal> CostCenterBudgets);
+            IReadOnlyDictionary<string, decimal> CostCenterBudgets,
+            bool BudgetsUseEntityNames = false);
 
         // 20 users: combined with fabrikam's 8 the demo exceeds one dashboard page (25/page), so
         // the per-user table's pagination is exercised locally, not just in real deployments.
@@ -94,7 +98,8 @@ namespace GhcpCreditVisibility.Services
             CostCenterBudgets: new Dictionary<string, decimal>
             {
                 ["cc-fabrikam-eng"] = 220m, ["cc-fabrikam-research"] = 200m
-            });
+            },
+            BudgetsUseEntityNames: true);
 
         // Classic seed — served for any unrecognized slug so existing single-enterprise
         // deployments/demos (and tests) see exactly the data they always did.
@@ -186,7 +191,7 @@ namespace GhcpCreditVisibility.Services
             {
                 BudgetProductSku = "ai_credits",
                 BudgetScope = "cost_center",
-                BudgetEntityName = c.Id,
+                BudgetEntityName = seed.BudgetsUseEntityNames ? c.Name : c.Id,
                 BudgetAmount = seed.CostCenterBudgets.GetValueOrDefault(c.Id, 250m),
                 ConsumedAmount = ConsumedForCostCenter(seed, enterprise, c.Id)
             }));

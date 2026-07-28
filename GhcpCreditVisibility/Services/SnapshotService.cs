@@ -180,7 +180,6 @@ namespace GhcpCreditVisibility.Services
                 await db.SaveChangesAsync(ct);
 
                 // ── Budgets (GOVERNED IN GITHUB; snapshotted here for read-only display) ──
-                var ccNameById = costCenters.ToDictionary(c => c.Id, c => c.Name, StringComparer.OrdinalIgnoreCase);
                 // Load THIS enterprise's existing rows once, then track adds made during the run too —
                 // querying the DB per iteration misses not-yet-saved Adds, so duplicate scopes/cost-
                 // centers in the same batch would otherwise insert twice and violate the unique
@@ -188,13 +187,27 @@ namespace GhcpCreditVisibility.Services
                 var existingBudgets = await db.BudgetSnapshots
                     .Where(x => x.EnterpriseId == enterprise.Id)
                     .ToDictionaryAsync(x => (x.Scope, x.CostCenterId), ct);
+                var seenBudgetKeys = new HashSet<(string, string)>();
                 foreach (var gb in await client.GetBudgetsAsync(enterprise.Slug, ct))
                 {
                     var isCc = string.Equals(gb.BudgetScope, "cost_center", StringComparison.OrdinalIgnoreCase);
                     var scopeVal = isCc ? BudgetScopes.CostCenter : BudgetScopes.Org;
-                    var ccId = isCc ? (gb.BudgetEntityName ?? "") : "";
-                    var ccName = isCc ? ccNameById.GetValueOrDefault(ccId) : null;
+                    // budget_entity_name is the entity's display NAME in the real GitHub API, not the
+                    // stable cost-center GUID id. Everything downstream (access-scope pair matching,
+                    // per-budget actuals) keys off the ID, so resolve NAME → ID here: exact id match
+                    // first (defensive), then case-insensitive name match; only an entity naming a
+                    // cost center this enterprise doesn't have falls back to the raw value.
+                    string ccId = ""; string? ccName = null;
+                    if (isCc)
+                    {
+                        var entity = gb.BudgetEntityName ?? "";
+                        var match = costCenters.FirstOrDefault(c => string.Equals(c.Id, entity, StringComparison.OrdinalIgnoreCase))
+                                 ?? costCenters.FirstOrDefault(c => string.Equals(c.Name, entity, StringComparison.OrdinalIgnoreCase));
+                        ccId = match?.Id ?? entity;
+                        ccName = match?.Name;
+                    }
                     var key = (scopeVal, ccId);
+                    seenBudgetKeys.Add(key);
                     if (existingBudgets.TryGetValue(key, out var existingB))
                     {
                         existingB.Amount = gb.BudgetAmount; existingB.ConsumedAmount = gb.ConsumedAmount ?? 0m; existingB.CostCenterName = ccName ?? existingB.CostCenterName; existingB.SnapshotUtc = now;
@@ -206,6 +219,14 @@ namespace GhcpCreditVisibility.Services
                         existingBudgets[key] = newB;
                     }
                 }
+                // Budgets that GitHub no longer reports for this enterprise are removed — this covers
+                // budgets deleted in GitHub AND self-heals rows persisted under a stale key (e.g. the
+                // pre-fix rows keyed by entity NAME instead of cost-center id).
+                var staleBudgets = existingBudgets
+                    .Where(kv => !seenBudgetKeys.Contains(kv.Key))
+                    .Select(kv => kv.Value)
+                    .ToList();
+                if (staleBudgets.Count > 0) db.BudgetSnapshots.RemoveRange(staleBudgets);
                 await db.SaveChangesAsync(ct);
 
                 // Retention purge (>= 3 months kept), scoped to THIS enterprise so the purge count on

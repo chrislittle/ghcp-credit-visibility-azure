@@ -224,6 +224,48 @@ public class MultiEnterprisePipelineTests
     }
 
     [Fact]
+    public async Task Budget_entity_names_resolve_to_cost_center_ids()
+    {
+        // The REAL GitHub budgets API reports budget_entity_name as the cost center's display
+        // NAME; fabrikam's mock mirrors that. Rows must still be keyed by the stable ID — the
+        // access-scope pair match and per-budget actuals both depend on it.
+        var factory = NewFactory();
+        var registry = Registry(factory, slug: "fabrikam");
+        await registry.EnsureBootstrapAsync();
+
+        await Service(factory, registry).RunAsync();
+
+        await using var db = await factory.CreateDbContextAsync();
+        var ccBudgets = await db.BudgetSnapshots.Where(b => b.Scope == BudgetScopes.CostCenter).ToListAsync();
+        Assert.Equal(2, ccBudgets.Count);
+        Assert.Contains(ccBudgets, b => b.CostCenterId == "cc-fabrikam-eng" && b.CostCenterName == "Engineering");
+        Assert.Contains(ccBudgets, b => b.CostCenterId == "cc-fabrikam-research" && b.CostCenterName == "Research");
+        // Never keyed by the display name the API sent.
+        Assert.DoesNotContain(ccBudgets, b => b.CostCenterId == "Engineering" || b.CostCenterId == "Research");
+    }
+
+    [Fact]
+    public async Task Stale_budget_rows_are_removed_on_the_next_run()
+    {
+        var factory = NewFactory();
+        var registry = Registry(factory, slug: "fabrikam");
+        await registry.EnsureBootstrapAsync();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            // Simulates a pre-fix row keyed by entity NAME (or a budget since deleted in GitHub).
+            db.BudgetSnapshots.Add(new BudgetSnapshot { EnterpriseId = 1, Scope = BudgetScopes.CostCenter, CostCenterId = "Engineering", Amount = 220m });
+            await db.SaveChangesAsync();
+        }
+
+        await Service(factory, registry).RunAsync();
+
+        await using var check = await factory.CreateDbContextAsync();
+        Assert.False(await check.BudgetSnapshots.AnyAsync(b => b.CostCenterId == "Engineering"),
+            "the name-keyed row must be replaced by the id-keyed row, not left to linger");
+        Assert.True(await check.BudgetSnapshots.AnyAsync(b => b.CostCenterId == "cc-fabrikam-eng"));
+    }
+
+    [Fact]
     public async Task Remove_enterprise_purges_exactly_its_own_data()
     {
         var factory = NewFactory();
