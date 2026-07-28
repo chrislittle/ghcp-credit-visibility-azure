@@ -395,6 +395,11 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "sre" {
   evaluation_frequency = "PT15M"
   window_duration      = "PT1H"
 
+  # Fire ONCE per incident and auto-resolve when the condition clears, instead of re-firing (and
+  # re-emailing) every 15-minute evaluation while a data point remains in the 1h lookback window.
+  # A sustained PAT failure is one incident, not an email every quarter hour.
+  auto_mitigation_enabled = true
+
   criteria {
     query                   = each.value.query
     time_aggregation_method = "Maximum"

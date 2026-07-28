@@ -139,6 +139,26 @@ public class SreDiagnosticsCollectorTests
     }
 
     [Fact]
+    public async Task Bootstrap_placeholder_row_is_never_reported()
+    {
+        // The migration seeds row #1 with a placeholder slug that the first registry bootstrap
+        // renames from config. A diagnostics tick can race that rename; emitting the placeholder
+        // as an "enterprise" fired a false Sev1 token_unresolved alert in a real deployment.
+        var factory = NewFactory();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            db.Enterprises.Add(new Enterprise { Slug = Enterprise.BootstrapPlaceholderSlug, DisplayName = "Default enterprise", UseMockData = false, Enabled = true });
+            db.Enterprises.Add(new Enterprise { Slug = "contoso", DisplayName = "Contoso", UseMockData = true, Enabled = true });
+            await db.SaveChangesAsync();
+        }
+
+        var snap = await Collector(factory, Config(useMock: true)).CollectAsync();
+
+        var reported = Assert.Single(snap.Enterprises);
+        Assert.Equal("contoso", reported.Slug);
+    }
+
+    [Fact]
     public async Task Reports_per_enterprise_health_independently()
     {
         var factory = NewFactory();

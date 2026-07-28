@@ -143,7 +143,15 @@ namespace GhcpCreditVisibility.Services
             }
 
             // ── Per-enterprise health ──
-            var enterprises = await db.Enterprises.OrderBy(e => e.Id).ToListAsync(ct);
+            // The migration-seeded placeholder row (slug "__bootstrap__") is pre-bootstrap state,
+            // not an operational enterprise — it exists only until the first registry bootstrap
+            // renames it from config. Reporting it here once caused a false Sev1 token_unresolved
+            // alert: a diagnostics tick raced the rename and emitted token_resolved=0 for a row
+            // that stopped existing seconds later.
+            var enterprises = await db.Enterprises
+                .Where(e => e.Slug != Enterprise.BootstrapPlaceholderSlug)
+                .OrderBy(e => e.Id)
+                .ToListAsync(ct);
             var perEnterprise = new List<EnterpriseDiagnostics>(enterprises.Count);
             if (enterprises.Count > 0)
             {
