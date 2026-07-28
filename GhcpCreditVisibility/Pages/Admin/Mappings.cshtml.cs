@@ -61,6 +61,11 @@ namespace GhcpCreditVisibility.Pages.Admin
 
         public IReadOnlyList<EnterpriseRow> Enterprises { get; private set; } = Array.Empty<EnterpriseRow>();
         public bool MultiEnterprise => Enterprises.Count > 1;
+        /// <summary>?EditEnterprise=&lt;id&gt; swaps the add-enterprise form for a pre-filled edit form —
+        /// fixing a display name, PAT secret name, or a wrong data source must not require
+        /// remove-with-purge and re-add.</summary>
+        [BindProperty(SupportsGet = true)] public long? EditEnterprise { get; set; }
+        public Enterprise? EditingEnterprise { get; private set; }
         /// <summary>Id → display label for enterprise badges on mapping rows.</summary>
         public IReadOnlyDictionary<long, string> EnterpriseNames { get; private set; } = new Dictionary<long, string>();
 
@@ -113,6 +118,9 @@ namespace GhcpCreditVisibility.Pages.Admin
                 rows.Add(new EnterpriseRow(e, run?.Status, run?.CompletedUtc ?? run?.StartedUtc, run?.RowsWritten, patResolved));
             }
             Enterprises = rows;
+            EditingEnterprise = EditEnterprise is long editId
+                ? enterprises.FirstOrDefault(e => e.Id == editId)
+                : null;
 
             RetentionMonths = _config.GetValue("Retention:Months", 12);
             UseMock = _config.GetValue("GitHub:UseMock", true);

@@ -78,6 +78,7 @@
                         else { <span class="badge text-bg-secondary">disabled</span> }
                     </td>
                     <td style="text-align:right;white-space:nowrap">
+                        <a class="btn btn-sm btn-outline-secondary" href="?EditEnterprise=@e.Id">Edit</a>
                         <form method="post" asp-page-handler="SetEnterpriseEnabled" style="display:inline">
                             <input type="hidden" name="id" value="@e.Id" />
                             <input type="hidden" name="enabled" value="@((!e.Enabled).ToString())" />
@@ -94,6 +95,42 @@
         </tbody>
     </table>
     <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);background:#fafbff;">
+        @if (Model.EditingEnterprise is { } editing)
+        {
+            <form method="post" asp-page-handler="UpdateEnterprise" class="row g-2 align-items-end">
+                <input type="hidden" name="id" value="@editing.Id" />
+                <div class="col-md-2">
+                    <label class="form-label mb-0 gh-note">Slug (API)</label>
+                    <input name="slug" class="form-control form-control-sm" value="@editing.Slug" required />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label mb-0 gh-note">Display name</label>
+                    <input name="displayName" class="form-control form-control-sm" value="@editing.DisplayName" />
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label mb-0 gh-note">PAT secret name (Key Vault)</label>
+                    <input name="patSecretName" class="form-control form-control-sm" value="@editing.PatSecretName" />
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label mb-0 gh-note">Data source</label>
+                    <select name="useMockData" class="form-select form-select-sm">
+                        <option value="false" selected="@(!editing.UseMockData)">Live GitHub</option>
+                        <option value="true" selected="@(editing.UseMockData)">Mock (demo)</option>
+                    </select>
+                </div>
+                <div class="col-md-2 d-flex gap-2">
+                    <button class="btn btn-sm btn-primary flex-fill" type="submit">Save</button>
+                    <a class="btn btn-sm btn-outline-secondary" href="?">Cancel</a>
+                </div>
+            </form>
+            <div class="gh-note mt-2">
+                Editing <strong>@editing.Slug</strong>. Changing the slug or data source changes what the <em>next</em> snapshot
+                ingests — existing history stays attached to this enterprise either way. Switching Live → Mock (or renaming the
+                slug of a mock enterprise) can mix differently-shaped current-month data until retention ages it out.
+            </div>
+        }
+        else
+        {
         <form method="post" asp-page-handler="AddEnterprise" class="row g-2 align-items-end">
             <div class="col-md-2">
                 <label class="form-label mb-0 gh-note">Slug (API)</label>
@@ -113,11 +150,13 @@
                     <option value="false">Live GitHub</option>
                     <option value="true">Mock (demo)</option>
                 </select>
+                <div class="gh-note mt-1" style="color:#d9822b">Live needs a PAT seeded before it can snapshot; Mock needs none.</div>
             </div>
             <div class="col-md-2">
                 <button class="btn btn-sm btn-primary w-100" type="submit">Add enterprise</button>
             </div>
         </form>
+        }
         <div class="gh-note mt-2">
             New enterprises start <strong>disabled</strong>: seed the PAT out-of-band
             (<code>./deploy.ps1 -Task set-pat -Enterprise &lt;slug&gt;</code> — the PAT value is never entered in this console),
