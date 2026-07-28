@@ -29,7 +29,11 @@ AppMetrics
 
 The same numbers are in `GET /health/diag` → `enterprises[]`, per enterprise, with slugs.
 
-With the read-only SQL grant (`deploy.ps1 -Task grant-sre-sql`), go deeper:
+With the read-only SQL grant (`deploy.ps1 -Task grant-sre-sql`), go deeper — **but only if a SQL
+execution tool is available in your session**. Your sandbox has no `sqlcmd`/ODBC and pip installs
+are blocked (see `ghcp-sql-deep-dive`, "Executing SQL from this agent"); without a SQL tool,
+answer from the telemetry above and `/health/diag`, and output the queries below clearly labeled
+for the OPERATOR to run:
 
 ## Check 1 — Month-over-month volume swing (per enterprise)
 
