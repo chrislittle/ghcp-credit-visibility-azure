@@ -301,6 +301,41 @@ public class EnterpriseScopeTests
     }
 
     [Fact]
+    public async Task Scope_label_resolves_guid_ids_to_names_and_qualifies_enterprises()
+    {
+        var factory = NewFactory();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            db.Enterprises.Add(new Enterprise { Slug = "contoso", DisplayName = "Contoso", UseMockData = true });
+            db.Enterprises.Add(new Enterprise { Slug = "demoent", DisplayName = "DemoEnt", UseMockData = false });
+            // Real GitHub cost-center ids are GUIDs — the directory maps them to display names.
+            db.CostCenterDirectory.Add(new CostCenterDirectoryEntry { EnterpriseId = 2, CostCenterId = "02ed281f-d3b9-4d98-b2fe-38fef467062f", CurrentName = "Platform Team" });
+            db.CostCenterDirectory.Add(new CostCenterDirectoryEntry { EnterpriseId = 1, CostCenterId = "cc-contoso-eng", CurrentName = "Engineering" });
+            await db.SaveChangesAsync();
+        }
+        var query = new UsageQueryService(factory);
+
+        var scope = new UserScope(false, new[]
+        {
+            new EnterpriseCostCenter(1, "cc-contoso-eng"),
+            new EnterpriseCostCenter(2, "02ed281f-d3b9-4d98-b2fe-38fef467062f"),
+            new EnterpriseCostCenter(2, "11111111-2222-3333-4444-555555555555"), // not in directory yet
+        }, Array.Empty<string>());
+
+        var label = await query.GetScopeLabelAsync(scope);
+
+        // Names, enterprise-qualified (scope spans two enterprises) — never the raw GUID when a name exists.
+        Assert.Contains("Platform Team · DemoEnt", label);
+        Assert.Contains("Engineering · Contoso", label);
+        Assert.DoesNotContain("02ed281f", label);
+        // An id the snapshot hasn't discovered yet falls back to the id itself rather than vanishing.
+        Assert.Contains("11111111-2222-3333-4444-555555555555 · DemoEnt", label);
+
+        Assert.Equal("All cost centers", await query.GetScopeLabelAsync(UserScope.All()));
+        Assert.Equal("No assigned scope", await query.GetScopeLabelAsync(UserScope.None()));
+    }
+
+    [Fact]
     public async Task Prev_month_deltas_join_by_enterprise_and_login()
     {
         var factory = NewFactory();

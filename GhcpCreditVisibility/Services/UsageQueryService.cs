@@ -39,6 +39,39 @@ namespace GhcpCreditVisibility.Services
                 .ToList();
         }
 
+        /// <summary>
+        /// Human-readable scope description for the header pill. Cost centers are shown by their
+        /// CURRENT display name from the directory — never by raw id: real GitHub cost-center ids
+        /// are GUIDs, and a non-admin's scope pill would otherwise read like a debug dump. Names are
+        /// enterprise-qualified when the scope spans more than one enterprise; long lists are capped
+        /// with "+N more"; an id not (yet) in the directory falls back to the id itself.
+        /// </summary>
+        public async Task<string> GetScopeLabelAsync(UserScope scope, CancellationToken ct = default)
+        {
+            if (scope.SeesAll) return "All cost centers";
+            if (scope.CostCenters.Count == 0) return "No assigned scope";
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var currentNames = await LoadCurrentNamesAsync(db, ct);
+            var entNames = await LoadEnterpriseNamesAsync(db, ct);
+            var multiEnterprise = scope.EnterpriseIds.Count > 1;
+            var labels = scope.CostCenters
+                .Select(p =>
+                {
+                    var name = ResolveName(currentNames, p.EnterpriseId, p.CostCenterId, null) ?? p.CostCenterId;
+                    return multiEnterprise
+                        ? $"{name} · {entNames.GetValueOrDefault(p.EnterpriseId, $"enterprise {p.EnterpriseId}")}"
+                        : name;
+                })
+                .Distinct()
+                .OrderBy(l => l, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            const int maxShown = 4;
+            var shown = labels.Count > maxShown
+                ? string.Join(", ", labels.Take(maxShown - 1)) + $", +{labels.Count - (maxShown - 1)} more"
+                : string.Join(", ", labels);
+            return $"Cost centers: {shown}";
+        }
+
         /// <summary>The enterprises whose data the caller can see (drives the UI's enterprise filter;
         /// hidden when only one). SeesAll → every registered enterprise with any visibility value.</summary>
         public async Task<IReadOnlyList<EnterpriseOption>> GetVisibleEnterprisesAsync(UserScope scope, CancellationToken ct = default)

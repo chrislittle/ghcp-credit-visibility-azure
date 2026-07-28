@@ -114,10 +114,7 @@ namespace GhcpCreditVisibility.Pages
 
             var scope = await _scopeResolver.ResolveAsync(User, ct);
             SeesAll = scope.SeesAll;
-            ScopeLabel = scope.SeesAll
-                ? "All cost centers"
-                : scope.CostCenterIds.Count > 0 ? $"Cost centers: {string.Join(", ", scope.CostCenterIds)}"
-                : "No assigned scope";
+            ScopeLabel = await _query.GetScopeLabelAsync(scope, ct);
 
             // Enterprise filter: only applies when the chosen enterprise is within the caller's
             // visibility (a bookmarked ?Ent= for an enterprise they can't see silently resets to all).
