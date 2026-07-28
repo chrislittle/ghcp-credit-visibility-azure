@@ -1377,13 +1377,15 @@ function Phase-Status {
 
   $hint = if ($isPrivate) { '503 = still warming up: grant/migrations' } else { '503 = still warming up: grant/migrations (not DNS — this is the PUBLIC pattern)' }
   foreach ($p in '/health/live', '/health/ready') {
-    # /health/ready can take up to a couple of minutes to come up on the very first hit after a
-    # deploy (cold-start DB connection/pool warm-up), which otherwise gets misreported as a
-    # failure. Retry with a short backoff before giving up — worst case here is 8 * 20s timeout +
-    # 7 * 5s sleeps = ~195s (~3.3 min) of headroom. /health/live is expected to be instant, so it
-    # stays single-shot.
-    $maxAttempts = if ($p -eq '/health/ready') { 8 } else { 1 }
-    $delaySec = 5
+    # /health/ready legitimately takes SEVERAL MINUTES on a first deploy: App Service may retry
+    # the initial ACR image pull (~3-4 min), the SQL managed-identity grant takes a while to
+    # propagate through Entra (the migrator retries through 18456 login failures by design), and
+    # only then do migrations apply. Observed real-world first boot: ~9 minutes end to end. The
+    # growing delays below give ~8 minutes of headroom; a genuinely broken app typically fails
+    # fast (connection refused / immediate 5xx) rather than consuming full timeouts.
+    # /health/live is expected to be instant, so it stays single-shot.
+    $delays = @(5, 5, 10, 10, 15, 15, 20, 20, 30, 30, 45, 45, 60, 60)
+    $maxAttempts = if ($p -eq '/health/ready') { $delays.Count + 1 } else { 1 }
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
       try {
         $r = Invoke-WebRequest "$url$p" -UseBasicParsing -TimeoutSec 20
@@ -1392,14 +1394,24 @@ function Phase-Status {
       }
       catch {
         $code = $_.Exception.Response.StatusCode.value__
+        # A 503 from readiness carries a JSON body saying exactly WHY it isn't ready (e.g.
+        # "Database reachable; 3 migration(s) pending (schema warming up)") — surface that
+        # instead of a bare status code so the operator can tell progress from failure.
+        $why = $null
+        if ($_.ErrorDetails.Message) {
+          try { $why = ((($_.ErrorDetails.Message | ConvertFrom-Json).checks) | Select-Object -First 1).description } catch {}
+        }
+        $shown = if ($code) { "$code$(if ($why) { " — $why" })" } else { 'no response' }
         $isLast = ($attempt -eq $maxAttempts)
         if (-not $isLast) {
-          Write-Info "$p → $(if ($code) { $code } else { 'no response' }) (attempt $attempt/$maxAttempts, retrying in ${delaySec}s — likely still warming up)"
+          $delaySec = $delays[[Math]::Min($attempt - 1, $delays.Count - 1)]
+          Write-Info "$p → $shown (attempt $attempt/$maxAttempts, retrying in ${delaySec}s — likely still warming up)"
           Start-Sleep -Seconds $delaySec
           continue
         }
-        if ($code) { Write-Warn "$p → $code ($hint)" }
+        if ($code) { Write-Warn "$p → $shown ($hint)" }
         else { Write-Warn "$p → no response ($($_.Exception.Message))" }
+        Write-Info "This is not necessarily a failure: a FIRST deploy can take ~10 minutes to come ready (ACR image pull retries, SQL grant propagating through Entra, then migrations — the app retries all of these itself). Re-check any time with: ./deploy.ps1 -Task status"
       }
     }
   }
