@@ -33,6 +33,8 @@ namespace GhcpCreditVisibility.Pages
 
         public bool SeesAll { get; private set; }
         public string ScopeLabel { get; private set; } = "";
+        /// <summary>Full resolved cost-center list for the pill's tooltip when the label is summarized (null otherwise).</summary>
+        public string? ScopeDetail { get; private set; }
         public IReadOnlyList<EnterpriseOption> VisibleEnterprises { get; private set; } = Array.Empty<EnterpriseOption>();
         public bool MultiEnterprise => VisibleEnterprises.Count > 1;
         public FilterOptions Options { get; private set; } = new(Array.Empty<UserOption>(), Array.Empty<string>(), Array.Empty<CostCenterFilterOption>(), Array.Empty<EnterpriseOption>());
@@ -78,7 +80,9 @@ namespace GhcpCreditVisibility.Pages
         {
             var scope = await _scopeResolver.ResolveAsync(User, ct);
             SeesAll = scope.SeesAll;
-            ScopeLabel = await _query.GetScopeLabelAsync(scope, ct);
+            var scopeDesc = await _query.GetScopeDescriptionAsync(scope, ct);
+            ScopeLabel = scopeDesc.Label;
+            ScopeDetail = scopeDesc.Detail;
 
             // Enterprise filter: validated against the caller's visibility, then applied to the
             // scope itself so filter options AND series both narrow to the chosen enterprise.

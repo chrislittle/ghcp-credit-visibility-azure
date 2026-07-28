@@ -52,7 +52,7 @@
         <div class="sub">GitHub Copilot AI-credit spend across your organization</div>
     </div>
     <div class="gh-headtools">
-        <span class="gh-scope"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
+        <span class="gh-scope" title="@Model.ScopeDetail"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
         @if (Model.MultiEnterprise)
         {
             <form method="get" class="gh-mpick mb-0">

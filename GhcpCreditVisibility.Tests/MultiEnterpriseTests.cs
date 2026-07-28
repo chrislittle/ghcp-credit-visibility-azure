@@ -364,17 +364,26 @@ public class EnterpriseScopeTests
             new EnterpriseCostCenter(2, "11111111-2222-3333-4444-555555555555"), // not in directory yet
         }, Array.Empty<string>());
 
-        var label = await query.GetScopeLabelAsync(scope);
+        var desc = await query.GetScopeDescriptionAsync(scope);
 
+        // Three cost centers → the pill stays compact; the resolved names move to the tooltip.
+        Assert.Equal("3 cost centers across 2 enterprises", desc.Label);
+        Assert.NotNull(desc.Detail);
         // Names, enterprise-qualified (scope spans two enterprises) — never the raw GUID when a name exists.
-        Assert.Contains("Platform Team · DemoEnt", label);
-        Assert.Contains("Engineering · Contoso", label);
-        Assert.DoesNotContain("02ed281f", label);
+        Assert.Contains("Platform Team · DemoEnt", desc.Detail);
+        Assert.Contains("Engineering · Contoso", desc.Detail);
+        Assert.DoesNotContain("02ed281f", desc.Detail);
         // An id the snapshot hasn't discovered yet falls back to the id itself rather than vanishing.
-        Assert.Contains("11111111-2222-3333-4444-555555555555 · DemoEnt", label);
+        Assert.Contains("11111111-2222-3333-4444-555555555555 · DemoEnt", desc.Detail);
 
-        Assert.Equal("All cost centers", await query.GetScopeLabelAsync(UserScope.All()));
-        Assert.Equal("No assigned scope", await query.GetScopeLabelAsync(UserScope.None()));
+        // One or two cost centers → names inline, no tooltip needed.
+        var small = await query.GetScopeDescriptionAsync(
+            new UserScope(false, new[] { new EnterpriseCostCenter(2, "02ed281f-d3b9-4d98-b2fe-38fef467062f") }, Array.Empty<string>()));
+        Assert.Equal("Cost centers: Platform Team", small.Label);
+        Assert.Null(small.Detail);
+
+        Assert.Equal("All cost centers", (await query.GetScopeDescriptionAsync(UserScope.All())).Label);
+        Assert.Equal("No assigned scope", (await query.GetScopeDescriptionAsync(UserScope.None())).Label);
     }
 
     [Fact]

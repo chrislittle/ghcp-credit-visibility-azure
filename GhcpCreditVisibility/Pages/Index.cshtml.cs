@@ -62,6 +62,8 @@ namespace GhcpCreditVisibility.Pages
         public int Month { get; private set; }
         public bool SeesAll { get; private set; }
         public string ScopeLabel { get; private set; } = "";
+        /// <summary>Full resolved cost-center list for the pill's tooltip when the label is summarized (null otherwise).</summary>
+        public string? ScopeDetail { get; private set; }
         /// <summary>Enterprises whose data the caller can see; the filter dropdown renders only when there's more than one.</summary>
         public IReadOnlyList<UsageQueryService.EnterpriseOption> VisibleEnterprises { get; private set; } = Array.Empty<UsageQueryService.EnterpriseOption>();
         public bool MultiEnterprise => VisibleEnterprises.Count > 1;
@@ -114,7 +116,9 @@ namespace GhcpCreditVisibility.Pages
 
             var scope = await _scopeResolver.ResolveAsync(User, ct);
             SeesAll = scope.SeesAll;
-            ScopeLabel = await _query.GetScopeLabelAsync(scope, ct);
+            var scopeDesc = await _query.GetScopeDescriptionAsync(scope, ct);
+            ScopeLabel = scopeDesc.Label;
+            ScopeDetail = scopeDesc.Detail;
 
             // Enterprise filter: only applies when the chosen enterprise is within the caller's
             // visibility (a bookmarked ?Ent= for an enterprise they can't see silently resets to all).

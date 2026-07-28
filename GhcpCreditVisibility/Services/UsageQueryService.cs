@@ -39,21 +39,28 @@ namespace GhcpCreditVisibility.Services
                 .ToList();
         }
 
+        /// <summary>Header scope pill content: <see cref="Label"/> is what the pill shows;
+        /// <see cref="Detail"/> (when set) is the full resolved list, rendered as a tooltip.</summary>
+        public sealed record ScopeDescription(string Label, string? Detail = null);
+
         /// <summary>
         /// Human-readable scope description for the header pill. Cost centers are shown by their
         /// CURRENT display name from the directory — never by raw id: real GitHub cost-center ids
         /// are GUIDs, and a non-admin's scope pill would otherwise read like a debug dump. Names are
-        /// enterprise-qualified when the scope spans more than one enterprise; long lists are capped
-        /// with "+N more"; an id not (yet) in the directory falls back to the id itself.
+        /// enterprise-qualified when the scope spans more than one enterprise. Up to two cost
+        /// centers are named inline; beyond that the pill stays compact ("N cost centers across M
+        /// enterprises") and the full list moves to the tooltip — an exec mapped to a dozen cost
+        /// centers must not get a paragraph-length pill.
         /// </summary>
-        public async Task<string> GetScopeLabelAsync(UserScope scope, CancellationToken ct = default)
+        public async Task<ScopeDescription> GetScopeDescriptionAsync(UserScope scope, CancellationToken ct = default)
         {
-            if (scope.SeesAll) return "All cost centers";
-            if (scope.CostCenters.Count == 0) return "No assigned scope";
+            if (scope.SeesAll) return new ScopeDescription("All cost centers");
+            if (scope.CostCenters.Count == 0) return new ScopeDescription("No assigned scope");
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
             var currentNames = await LoadCurrentNamesAsync(db, ct);
             var entNames = await LoadEnterpriseNamesAsync(db, ct);
-            var multiEnterprise = scope.EnterpriseIds.Count > 1;
+            var enterpriseCount = scope.EnterpriseIds.Count;
+            var multiEnterprise = enterpriseCount > 1;
             var labels = scope.CostCenters
                 .Select(p =>
                 {
@@ -65,11 +72,12 @@ namespace GhcpCreditVisibility.Services
                 .Distinct()
                 .OrderBy(l => l, StringComparer.OrdinalIgnoreCase)
                 .ToList();
-            const int maxShown = 4;
-            var shown = labels.Count > maxShown
-                ? string.Join(", ", labels.Take(maxShown - 1)) + $", +{labels.Count - (maxShown - 1)} more"
-                : string.Join(", ", labels);
-            return $"Cost centers: {shown}";
+
+            if (labels.Count <= 2)
+                return new ScopeDescription($"Cost centers: {string.Join(", ", labels)}");
+
+            var summary = $"{labels.Count} cost centers" + (multiEnterprise ? $" across {enterpriseCount} enterprises" : "");
+            return new ScopeDescription(summary, string.Join(", ", labels));
         }
 
         /// <summary>The enterprises whose data the caller can see (drives the UI's enterprise filter;
