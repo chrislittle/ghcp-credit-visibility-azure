@@ -25,19 +25,56 @@ namespace GhcpCreditVisibility.Pages
         [BindProperty(SupportsGet = true)] public string? Period { get; set; }      // "YYYY-MM" for the per-user table
         [BindProperty(SupportsGet = true)] public string? UserSearch { get; set; }  // filter the per-user table by name/login/cost center
         [BindProperty(SupportsGet = true)] public int UserPage { get; set; } = 1;   // 1-based page index for the per-user table
+        [BindProperty(SupportsGet = true)] public long? Ent { get; set; }           // enterprise filter (null = all in scope)
 
         public const int UserPageSize = 25;
+        /// <summary>A month-over-month move of at least this % renders as a highlighted pill in the
+        /// per-user table — the "who suddenly changed" signal.</summary>
+        public const double BigMoveThresholdPct = 50;
+
+        // ── Budgets at scale ──
+        // A SeesAll exec across several enterprises can face dozens of budgets; a wall of on-track
+        // meters buries the two red ones. The dashboard therefore surfaces EXCEPTIONS: when more
+        // than BudgetInlineLimit budgets are visible, only over/near-limit ones get meters (capped
+        // at BudgetAttentionCap, worst first) and the rest collapse into summary counts; the full
+        // list lives on the Budgets page. Small deployments (<= the limit) see every meter, exactly
+        // as before — no regression for a single-cost-center manager.
+        public const int BudgetInlineLimit = 6;
+        public const int BudgetAttentionCap = 6;
+
+        /// <summary>Splits budgets for the dashboard card. ExceptionsMode=false → Shown is ALL
+        /// budgets (small scale). Otherwise Shown is only over/near-limit, worst first, capped;
+        /// HiddenAttention counts capped-out attention budgets ("…and N more").</summary>
+        public static (IReadOnlyList<BudgetService.BudgetStatus> Shown, int HiddenAttention, bool ExceptionsMode) PartitionBudgets(
+            IReadOnlyList<BudgetService.BudgetStatus> all, int inlineLimit = BudgetInlineLimit, int cap = BudgetAttentionCap)
+        {
+            if (all.Count <= inlineLimit) return (all, 0, false);
+            var attention = all
+                .Where(b => b.Level is "over" or "critical")
+                .OrderBy(b => b.Level == "over" ? 0 : 1)
+                .ThenByDescending(b => b.Pct)
+                .ToList();
+            var shown = attention.Take(cap).ToList();
+            return (shown, attention.Count - shown.Count, true);
+        }
 
         public int Year { get; private set; }
         public int Month { get; private set; }
         public bool SeesAll { get; private set; }
         public string ScopeLabel { get; private set; } = "";
+        /// <summary>Full resolved cost-center list for the pill's tooltip when the label is summarized (null otherwise).</summary>
+        public string? ScopeDetail { get; private set; }
+        /// <summary>Enterprises whose data the caller can see; the filter dropdown renders only when there's more than one.</summary>
+        public IReadOnlyList<UsageQueryService.EnterpriseOption> VisibleEnterprises { get; private set; } = Array.Empty<UsageQueryService.EnterpriseOption>();
+        public bool MultiEnterprise => VisibleEnterprises.Count > 1;
         public IReadOnlyList<UsageQueryService.MonthOption> AvailableMonths { get; private set; } = Array.Empty<UsageQueryService.MonthOption>();
 
         /// <summary>The single page of per-user rows actually rendered in the table (already filtered by <see cref="UserSearch"/> and paged in the database).</summary>
         public IReadOnlyList<UsageQueryService.UserMonthTotal> DisplayUsers { get; private set; } = Array.Empty<UsageQueryService.UserMonthTotal>();
         /// <summary>Count of users matching <see cref="UserSearch"/> (all users if no search term) — drives the pagination controls and the "N match" label.</summary>
         public int MatchingUserCount { get; private set; }
+        /// <summary>False when the previous month has no data in scope — per-user deltas render as em-dashes instead of flagging everyone "new".</summary>
+        public bool HasPrevUserDeltas { get; private set; }
         public int UserPageCount { get; private set; } = 1;
         public IReadOnlyList<UsageQueryService.CostCenterTotal> CostCenters { get; private set; } = Array.Empty<UsageQueryService.CostCenterTotal>();
         public IReadOnlyList<UsageQueryService.ModelTotal> Models { get; private set; } = Array.Empty<UsageQueryService.ModelTotal>();
@@ -59,6 +96,14 @@ namespace GhcpCreditVisibility.Pages
         public double? DeltaPct { get; private set; }
         public string PrevMonthLabel { get; private set; } = "";
         public IReadOnlyList<BudgetService.BudgetStatus> Budgets { get; private set; } = Array.Empty<BudgetService.BudgetStatus>();
+        /// <summary>The budgets actually rendered as meters (see <see cref="PartitionBudgets"/>).</summary>
+        public IReadOnlyList<BudgetService.BudgetStatus> DisplayBudgets { get; private set; } = Array.Empty<BudgetService.BudgetStatus>();
+        public bool BudgetExceptionsMode { get; private set; }
+        public int HiddenAttentionBudgetCount { get; private set; }
+        public int BudgetOverCount { get; private set; }
+        public int BudgetNearLimitCount { get; private set; }
+        public int BudgetOnTrackCount { get; private set; }
+        public int BudgetEnterpriseCount { get; private set; }
 
         public string PeriodValue => $"{Year:D4}-{Month:D2}";
         public string MonthLabel => new DateTime(Year, Month, 1).ToString("MMMM yyyy", CultureInfo.InvariantCulture);
@@ -71,10 +116,17 @@ namespace GhcpCreditVisibility.Pages
 
             var scope = await _scopeResolver.ResolveAsync(User, ct);
             SeesAll = scope.SeesAll;
-            ScopeLabel = scope.SeesAll
-                ? "All cost centers"
-                : scope.CostCenterIds.Count > 0 ? $"Cost centers: {string.Join(", ", scope.CostCenterIds)}"
-                : "No assigned scope";
+            var scopeDesc = await _query.GetScopeDescriptionAsync(scope, ct);
+            ScopeLabel = scopeDesc.Label;
+            ScopeDetail = scopeDesc.Detail;
+
+            // Enterprise filter: only applies when the chosen enterprise is within the caller's
+            // visibility (a bookmarked ?Ent= for an enterprise they can't see silently resets to all).
+            VisibleEnterprises = await _query.GetVisibleEnterprisesAsync(scope, ct);
+            if (Ent is long entFilter && VisibleEnterprises.Any(e => e.Id == entFilter))
+                scope = scope with { EnterpriseFilter = entFilter };
+            else
+                Ent = null;
 
             AvailableMonths = await _query.GetAvailableMonthsAsync(scope, ct);
 
@@ -110,6 +162,7 @@ namespace GhcpCreditVisibility.Pages
             }
             DisplayUsers = userPage.Items;
             MatchingUserCount = userPage.MatchingUserCount;
+            HasPrevUserDeltas = userPage.HasPrevMonthData;
 
             // Headline KPIs derived from the scoped month (independent of search/paging).
             TotalSpend = userPage.TotalSpend;
@@ -126,6 +179,11 @@ namespace GhcpCreditVisibility.Pages
             if (PrevMonthTotal > 0) DeltaPct = (double)((TotalSpend - PrevMonthTotal) / PrevMonthTotal) * 100.0;
 
             Budgets = await _budgets.GetStatusesAsync(scope, Year, Month, ct);
+            (DisplayBudgets, HiddenAttentionBudgetCount, BudgetExceptionsMode) = PartitionBudgets(Budgets);
+            BudgetOverCount = Budgets.Count(b => b.Level == "over");
+            BudgetNearLimitCount = Budgets.Count(b => b.Level == "critical");
+            BudgetOnTrackCount = Budgets.Count - BudgetOverCount - BudgetNearLimitCount;
+            BudgetEnterpriseCount = Budgets.Select(b => b.EnterpriseId).Distinct().Count();
         }
     }
 }

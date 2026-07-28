@@ -48,17 +48,24 @@ the diagnostics layer is for.
 metrics, and `SnapshotService` emits per-run lifecycle events. This is plain app telemetry — it is
 useful on its own and ships whether or not you ever enable the agent.
 
-| Metric / event | Catches |
-|---|---|
-| `ghcp.snapshot.age_hours` | snapshot job stopped (>26h) |
-| `ghcp.snapshot.rows_written` | succeeded-but-wrote-zero |
-| `ghcp.github.token_resolved` | Key Vault PAT reference didn't resolve |
-| `ghcp.github.rate_limit_remaining` | GitHub throttling pressure |
-| `ghcp.db.pending_migrations` | schema warm-up / missing DDL grant |
-| `ghcp.data.{costcenters,budgets,months_with_data}` | data-integrity floor |
-| `SnapshotRunCompleted` / `SnapshotFailed` events | per-run detail (instanceId, duration, error) |
+The app snapshots one or more GitHub enterprises (the in-app registry), and every enterprise-scoped
+signal carries an **`enterprise` dimension** (the slug, in `Properties["enterprise"]`) — one series
+per enterprise under the same metric name. That's what lets the alert rules split per enterprise,
+fire when ANY enterprise degrades, name which one, and automatically cover a newly registered
+enterprise with zero infra changes.
 
-Reach the same values directly at `GET /health/diag` (authenticated) as a JSON dump.
+| Metric / event | Dimension | Catches |
+|---|---|---|
+| `ghcp.snapshot.age_hours` | enterprise | that enterprise's snapshot stopped (>26h) |
+| `ghcp.snapshot.rows_written` | enterprise | succeeded-but-wrote-zero (bad slug / PAT scope) |
+| `ghcp.github.token_resolved` | enterprise | that enterprise's Key Vault PAT secret didn't resolve |
+| `ghcp.github.rate_limit_remaining` | enterprise | GitHub throttling pressure (limits are per PAT) |
+| `ghcp.db.pending_migrations` | — | schema warm-up / missing DDL grant (infra-level) |
+| `ghcp.data.{costcenters,budgets,months_with_data}` | enterprise | data-integrity floor, per enterprise |
+| `SnapshotRunCompleted` / `SnapshotFailed` events | `Properties.enterprise` | per-run detail (instanceId, duration, error) — one completion PER ENTERPRISE per cycle is the healthy pattern |
+
+Reach the same values directly at `GET /health/diag` (authenticated) as a JSON dump — including a
+per-enterprise `enterprises[]` section with slugs, PAT status, and last-run detail.
 
 Enabling the agent also creates **six metric alert rules** over exactly these signals — stale
 snapshot, unresolved PAT reference, failed run, zero-row run, low GitHub rate limit, and
@@ -109,7 +116,7 @@ model justifies an action.
 
 | Hook | Event | Does |
 |---|---|---|
-| `ghcp-policy-gate` | `PostToolUse`, blocking | Blocks the operations that would exfiltrate the GitHub PAT or mutate protected config — `keyvault secret show/set`, app-setting mutation, resource deletion. This is what keeps `github-pat` out of a conversation thread even though the agent can see the vault. |
+| `ghcp-policy-gate` | `PostToolUse`, blocking | Blocks the operations that would exfiltrate a GitHub PAT or mutate protected config — `keyvault secret show/set`, app-setting mutation, resource deletion. The block matches the OPERATION, not a secret name, so every per-enterprise PAT (`github-pat`, `github-pat-<slug>`, …) is inside the boundary automatically, including enterprises added after deploy. |
 | `ghcp-quality-gate` | `Stop`, prompt-based | Holds DATA and INCIDENT answers to a "show your evidence" bar: name the resource, the time window, the query, and the blind spots. A wrong-but-confident answer here reads exactly like a correct one. Deliberately **passes** security refusals and architecture/knowledge answers without demanding evidence, and nudges at most once (`maxRejections: 1`). |
 
 ### Knowledge files — the repo's own docs
@@ -148,7 +155,8 @@ data-plane config — see [`sre/README.md`](../sre/README.md).
 - **Read-only by default.** Reader-tier RBAC; `sre_agent_mode = "Review"` (proposes, waits for
   approval). No sponsor group → no OBO write-elevation path.
 - **Key Vault: control-plane Reader only.** The agent can see the vault's config but **never** read
-  the `github-pat` secret — and the policy hook independently enforces that.
+  any PAT secret (`github-pat`, `github-pat-<slug>`, …) — and the policy hook independently
+  enforces that, by operation rather than by secret name.
 - **Evidence-backed answers.** The quality gate makes investigations cite their resource, time
   window, query, and blind spots.
 

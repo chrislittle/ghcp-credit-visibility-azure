@@ -348,13 +348,13 @@ variable "sql_alert_email_addresses" {
 # ── GitHub / app behaviour ────────────────────────────────────
 variable "github_enterprise_slug" {
   type        = string
-  description = "GitHub enterprise slug to report on. Ignored when use_mock_data=true."
+  description = "BOOTSTRAP SEED ONLY: fills the first row of the app's enterprise registry on upgrade/first run, then becomes inert. All enterprises (including this one, and any added later) are managed at RUNTIME in the admin console — adding enterprise N+1 is a day-2 operation (registry row + './deploy.ps1 -Task set-pat -Enterprise <slug>') that touches no Terraform. Deliberately NOT a list: Terraform owns no per-enterprise resources by design."
   default     = "your-enterprise"
 }
 
 variable "use_mock_data" {
   type        = bool
-  description = "When true, the app serves synthetic data (no PAT / no GitHub Copilot needed). Set false + populate the Key Vault PAT secret to use the real GitHub billing API."
+  description = "Default data source for the BOOTSTRAP registry row: true = synthetic data (no PAT / no GitHub Copilot needed). Per-enterprise override lives in the registry (admin console), so hybrid deployments — real enterprises alongside mock demo/fire-drill ones — are a runtime choice, not a deploy-time one."
   default     = true
 }
 

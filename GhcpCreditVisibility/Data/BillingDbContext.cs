@@ -16,6 +16,13 @@ namespace GhcpCreditVisibility.Data
         public DbSet<UsageSnapshot> UsageSnapshots => Set<UsageSnapshot>();
         public DbSet<SnapshotRun> SnapshotRuns => Set<SnapshotRun>();
 
+        // ── Enterprise registry: the single source of truth for which GitHub enterprises this
+        // deployment snapshots. Adding an enterprise is a DAY-2 RUNTIME operation (admin console +
+        // Key Vault secret), never a redeploy — Terraform owns no per-enterprise resources. The
+        // first row is seeded by migration/bootstrap from the GitHub:Enterprise config value so
+        // existing single-enterprise deployments upgrade losslessly.
+        public DbSet<Enterprise> Enterprises => Set<Enterprise>();
+
         // ── Admin-managed authorization (the "glue" between Entra principals and GitHub cost centers) ──
         // A "principal" is an Entra security GROUP or an individual USER (object ID). Membership of
         // groups is managed in Entra; the MAPPING of a principal to a GitHub cost center — and which
@@ -29,14 +36,31 @@ namespace GhcpCreditVisibility.Data
 
         protected override void OnModelCreating(ModelBuilder b)
         {
+            b.Entity<Enterprise>(e =>
+            {
+                e.HasKey(x => x.Id);
+                // HARD unique constraint: an accidental duplicate registration would silently double
+                // every number for that enterprise — exactly the "wrong numbers are worse than
+                // downtime" failure this app exists to prevent. A rename in GitHub is an UPDATE to
+                // the existing row's slug, which this does not block.
+                e.HasIndex(x => x.Slug).IsUnique();
+                e.Property(x => x.Slug).HasMaxLength(200).IsRequired();
+                e.Property(x => x.DisplayName).HasMaxLength(255);
+                e.Property(x => x.PatSecretName).HasMaxLength(128).IsRequired();
+                e.Property(x => x.ModifiedBy).HasMaxLength(255);
+            });
+
             b.Entity<UsageSnapshot>(e =>
             {
                 e.HasKey(x => x.Id);
-                // Natural key: one row per user/model/sku per day. Day = 1 for whole-month
+                // Natural key: one row per enterprise/user/model/sku per day. Day = 1 for whole-month
                 // (monthly) rows from the live GitHub aggregate; daily rows use the real day.
-                e.HasIndex(x => new { x.Year, x.Month, x.Day, x.UserLogin, x.Model, x.Sku }).IsUnique();
+                // EnterpriseId leads the key: the SAME GitHub login can legitimately exist in two
+                // enterprises, and without the qualifier those rows would silently collapse into one.
+                e.HasIndex(x => new { x.EnterpriseId, x.Year, x.Month, x.Day, x.UserLogin, x.Model, x.Sku }).IsUnique();
                 e.HasIndex(x => new { x.Year, x.Month });
                 e.HasIndex(x => x.CostCenterId);
+                e.HasIndex(x => x.EnterpriseId);
                 e.Property(x => x.UserLogin).HasMaxLength(255);
                 e.Property(x => x.UserName).HasMaxLength(255);
                 e.Property(x => x.CostCenterId).HasMaxLength(128);
@@ -53,6 +77,9 @@ namespace GhcpCreditVisibility.Data
             {
                 e.HasKey(x => x.Id);
                 e.HasIndex(x => x.StartedUtc);
+                // Per-enterprise run history: one enterprise's failure never marks another's
+                // snapshot bad, and freshness is judged per enterprise.
+                e.HasIndex(x => new { x.EnterpriseId, x.StartedUtc });
                 e.Property(x => x.Status).HasMaxLength(32);
                 e.Property(x => x.Error).HasMaxLength(2000);
             });
@@ -60,8 +87,9 @@ namespace GhcpCreditVisibility.Data
             b.Entity<PrincipalCostCenterMapping>(e =>
             {
                 e.HasKey(x => x.Id);
-                // One mapping row per (principal-type, principal, cost center). A principal may map to several cost centers.
-                e.HasIndex(x => new { x.PrincipalType, x.PrincipalObjectId, x.CostCenterId }).IsUnique();
+                // One mapping row per (principal-type, principal, enterprise, cost center). A principal
+                // may map to several cost centers, across any number of enterprises.
+                e.HasIndex(x => new { x.PrincipalType, x.PrincipalObjectId, x.EnterpriseId, x.CostCenterId }).IsUnique();
                 e.HasIndex(x => x.PrincipalObjectId);
                 e.Property(x => x.PrincipalType).HasMaxLength(16).IsRequired();
                 e.Property(x => x.PrincipalObjectId).HasMaxLength(64).IsRequired();
@@ -91,9 +119,11 @@ namespace GhcpCreditVisibility.Data
             b.Entity<BudgetSnapshot>(e =>
             {
                 e.HasKey(x => x.Id);
-                // One budget per (scope, cost center); org-wide budget uses CostCenterId = "".
+                // One budget per (enterprise, scope, cost center); each enterprise's org-wide budget
+                // uses CostCenterId = "" — without the EnterpriseId qualifier two enterprises' org
+                // budgets would collide instantly.
                 // Populated from GitHub's cost-center budgets by the snapshot job — never edited in-app.
-                e.HasIndex(x => new { x.Scope, x.CostCenterId }).IsUnique();
+                e.HasIndex(x => new { x.EnterpriseId, x.Scope, x.CostCenterId }).IsUnique();
                 e.Property(x => x.Scope).HasMaxLength(16).IsRequired();
                 e.Property(x => x.CostCenterId).HasMaxLength(128);
                 e.Property(x => x.CostCenterName).HasMaxLength(255);
@@ -103,12 +133,14 @@ namespace GhcpCreditVisibility.Data
 
             b.Entity<CostCenterDirectoryEntry>(e =>
             {
-                // Keyed by GitHub's stable cost-center GUID — the single source of truth for the
-                // CURRENT display name. Refreshed from the live GitHub cost-centers call on every
-                // snapshot run, so a rename in GitHub is reflected everywhere within one run cycle,
-                // without rewriting the frozen historical name stored on individual UsageSnapshot /
-                // BudgetSnapshot rows (which remain point-in-time accurate for auditing).
-                e.HasKey(x => x.CostCenterId);
+                // Keyed by (enterprise, GitHub's stable cost-center GUID) — the single source of truth
+                // for the CURRENT display name, and for which enterprise owns a cost center (two
+                // enterprises WILL both have an "Engineering"). Refreshed from the live GitHub
+                // cost-centers call on every snapshot run, so a rename in GitHub is reflected
+                // everywhere within one run cycle, without rewriting the frozen historical name stored
+                // on individual UsageSnapshot / BudgetSnapshot rows (which remain point-in-time
+                // accurate for auditing).
+                e.HasKey(x => new { x.EnterpriseId, x.CostCenterId });
                 e.Property(x => x.CostCenterId).HasMaxLength(128);
                 e.Property(x => x.CurrentName).HasMaxLength(255);
             });
@@ -130,6 +162,40 @@ namespace GhcpCreditVisibility.Data
     }
 
     /// <summary>
+    /// One GitHub enterprise this deployment snapshots. The registry is the single source of truth:
+    /// the snapshot job iterates ENABLED rows each cycle, so adding an enterprise is a runtime
+    /// operation (admin console + a Key Vault secret named <see cref="PatSecretName"/>) with no
+    /// redeploy and no Terraform. <see cref="Slug"/> is "how to call GitHub" (the enterprise slug in
+    /// API URLs), not the row's identity — everything downstream keys off <see cref="Id"/>, which is
+    /// what keeps historical data stable across a GitHub-side enterprise rename.
+    /// </summary>
+    public sealed class Enterprise
+    {
+        /// <summary>The EnterpriseId that pre-multi-enterprise rows are backfilled to by migration.</summary>
+        public const long DefaultId = 1;
+        /// <summary>Placeholder slug the migration seeds; replaced from GitHub:Enterprise config at first startup.</summary>
+        public const string BootstrapPlaceholderSlug = "__bootstrap__";
+        /// <summary>The single-enterprise deployments' Key Vault secret name (kept as the row-1 default).</summary>
+        public const string DefaultPatSecretName = "github-pat";
+
+        public long Id { get; set; }
+        public string Slug { get; set; } = "";
+        public string? DisplayName { get; set; }
+        /// <summary>Key Vault secret holding this enterprise's PAT (convention: github-pat-&lt;slug&gt;).
+        /// The secret VALUE is never entered through this app — see the admin console notes.</summary>
+        public string PatSecretName { get; set; } = DefaultPatSecretName;
+        /// <summary>True = this enterprise is served by the synthetic mock client (no PAT needed).
+        /// Enables hybrid deployments: real enterprises and demo/fire-drill mock enterprises side by side.</summary>
+        public bool UseMockData { get; set; }
+        /// <summary>Disabled enterprises are skipped by the snapshot job and hidden from non-admin UI.
+        /// New enterprises start disabled so the first snapshot can be verified before anyone sees data.</summary>
+        public bool Enabled { get; set; } = true;
+        public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
+        public DateTime? LastSnapshotUtc { get; set; }
+        public string? ModifiedBy { get; set; }
+    }
+
+    /// <summary>
     /// Admin-managed mapping of an Entra PRINCIPAL (security group OR individual user) to a GitHub
     /// cost center. Group membership lives in Entra; this row (what a principal can see) is managed
     /// in the app. User-type rows cover cases with no suitable group (e.g. a lone manager).
@@ -140,6 +206,7 @@ namespace GhcpCreditVisibility.Data
         public string PrincipalType { get; set; } = PrincipalTypes.Group; // "Group" | "User"
         public string PrincipalObjectId { get; set; } = "";               // Entra group or user objectId
         public string? PrincipalDisplayName { get; set; }
+        public long EnterpriseId { get; set; } = Enterprise.DefaultId;    // which enterprise owns the cost center
         public string CostCenterId { get; set; } = "";
         public string? CostCenterName { get; set; }
         public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
@@ -176,6 +243,7 @@ namespace GhcpCreditVisibility.Data
     public sealed class BudgetSnapshot
     {
         public long Id { get; set; }
+        public long EnterpriseId { get; set; } = Enterprise.DefaultId;
         public string Scope { get; set; } = BudgetScopes.Org;   // "Org" | "CostCenter"
         public string CostCenterId { get; set; } = "";          // "" for the org/enterprise budget
         public string? CostCenterName { get; set; }
@@ -194,6 +262,7 @@ namespace GhcpCreditVisibility.Data
     /// </summary>
     public sealed class CostCenterDirectoryEntry
     {
+        public long EnterpriseId { get; set; } = Enterprise.DefaultId;
         public string CostCenterId { get; set; } = "";
         public string? CurrentName { get; set; }
         public DateTime LastSeenUtc { get; set; } = DateTime.UtcNow;
@@ -201,7 +270,9 @@ namespace GhcpCreditVisibility.Data
 
     /// <summary>One usage line item for a user, for a given month, captured at snapshot time.</summary>
     public sealed class UsageSnapshot
-    {        public long Id { get; set; }
+    {
+        public long Id { get; set; }
+        public long EnterpriseId { get; set; } = Enterprise.DefaultId;
         public DateTime SnapshotUtc { get; set; }
         public int Year { get; set; }
         public int Month { get; set; }
@@ -218,10 +289,12 @@ namespace GhcpCreditVisibility.Data
         public decimal GrossAmount { get; set; }
     }
 
-    /// <summary>Audit row for each snapshot job execution.</summary>
+    /// <summary>Audit row for each per-enterprise snapshot execution. One row per enterprise per
+    /// cycle — an enterprise's failure never marks another's run bad.</summary>
     public sealed class SnapshotRun
     {
         public long Id { get; set; }
+        public long EnterpriseId { get; set; } = Enterprise.DefaultId;
         public DateTime StartedUtc { get; set; }
         public DateTime? CompletedUtc { get; set; }
         public int RowsWritten { get; set; }

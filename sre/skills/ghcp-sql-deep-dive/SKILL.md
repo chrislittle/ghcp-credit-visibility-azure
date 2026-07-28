@@ -1,5 +1,20 @@
 # GHCP Azure SQL deep dive
 
+## Executing SQL from this agent — read this FIRST
+
+Your sandbox has **no `sqlcmd`, no ODBC/pymssql drivers, and pip installs are blocked** — and
+`az sql db query` **does not exist** as a command. All of this was proven in a live session that
+burned five tool calls discovering it. Do NOT attempt any of those. The read-only SQL grant
+(`db_datareader` + `VIEW DATABASE STATE`) exists so a SQL execution tool can use it **when one is
+available in your session**; when none is:
+
+1. Answer from telemetry first — **Monitor Workspace Log Query** over `AppMetrics`/`AppEvents`
+   (`ghcp.*` series, per-enterprise via `Properties["enterprise"]`) and `AzureMetrics`.
+2. `GET /health/diag` on the app (authenticated) returns per-enterprise JSON diagnostics.
+3. For anything that genuinely needs T-SQL, OUTPUT the exact query below, clearly labeled
+   **"run this as the operator"** (Azure Portal query editor, SSMS, or `Invoke-Sqlcmd`) — do not
+   attempt to run it yourself.
+
 The database is `ghcpvisibility` on `sql-<base>`. It may be **serverless** (`GP_S_*` SKU) with
 auto-pause, or **provisioned** (`GP_Gen5_*`). The serverless case changes how you read "the DB is
 down," so establish which you're on first:

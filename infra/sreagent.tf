@@ -291,74 +291,92 @@ locals {
   # customEvents tables are EMPTY. Verified against live data 2026-07. So the rules scope to the
   # workspace (see `scopes` below) and query App* with the workspace columns: custom-metric values
   # arrive as an aggregate (Min/Max/Sum), and event fields live under Properties/Measurements.
+  # MULTI-ENTERPRISE: enterprise-scoped metrics/events carry an "enterprise" dimension (the slug).
+  # Alerts with `split_by_enterprise = true` group the query by it and declare it as an alert
+  # dimension, so Azure Monitor fires ONE ALERT PER ENTERPRISE and the fired alert names which
+  # enterprise degraded. Because splitting is dimension-based, a newly registered enterprise is
+  # covered automatically — adding enterprise N+1 requires NO Terraform change (that is a design
+  # rule: the registry table in the app is the single source of truth for enterprises).
   sre_alerts = {
     snapshot_stale = {
-      severity    = 1
-      description = "Snapshot data is stale (>26h). The 12h snapshot job has likely stopped; the dashboard is serving old numbers."
-      query       = <<-KQL
+      severity            = 1
+      split_by_enterprise = true
+      description         = "An enterprise's snapshot data is stale (>26h). The 12h snapshot job has stopped FOR THAT ENTERPRISE; its dashboard numbers are old. The alert's enterprise dimension names which one."
+      query               = <<-KQL
         AppMetrics
         | where Name == "ghcp.snapshot.age_hours"
-        | summarize AggregatedValue = max(Max) by bin(TimeGenerated, 15m)
+        | extend enterprise = tostring(Properties["enterprise"])
+        | summarize AggregatedValue = max(Max) by bin(TimeGenerated, 15m), enterprise
       KQL
-      operator    = "GreaterThan"
-      threshold   = 26
+      operator            = "GreaterThan"
+      threshold           = 26
     }
     token_unresolved = {
-      severity    = 1
-      description = "The GitHub PAT Key Vault reference did not resolve (token_resolved=0). GitHub calls will 401 until fixed."
-      query       = <<-KQL
+      severity            = 1
+      split_by_enterprise = true
+      # No angle brackets in alert descriptions: Azure Monitor's HTML email renderer eats "<slug>"
+      # as a tag, leaving "-Enterprise ." in the notification.
+      description         = "An enterprise's GitHub PAT did not resolve (token_resolved=0) — Key Vault secret missing/unreadable or reference unresolved. That enterprise's GitHub calls will 401 until fixed. This alert's enterprise dimension names which one; seed its PAT with: ./deploy.ps1 -Task set-pat -Enterprise THE-SLUG-IN-THIS-ALERTS-ENTERPRISE-DIMENSION."
+      query               = <<-KQL
         AppMetrics
         | where Name == "ghcp.github.token_resolved"
-        | summarize AggregatedValue = min(Min) by bin(TimeGenerated, 15m)
+        | extend enterprise = tostring(Properties["enterprise"])
+        | summarize AggregatedValue = min(Min) by bin(TimeGenerated, 15m), enterprise
       KQL
-      operator    = "LessThan"
-      threshold   = 1
+      operator            = "LessThan"
+      threshold           = 1
     }
     snapshot_failed = {
-      severity    = 2
-      description = "A snapshot run failed (SnapshotFailed event). See the event's error property for the cause."
-      query       = <<-KQL
+      severity            = 2
+      split_by_enterprise = true
+      description         = "A snapshot run failed for an enterprise (SnapshotFailed event). Failure is ISOLATED per enterprise — the others still snapshot. See the event's error property for the cause and its enterprise property for which one."
+      query               = <<-KQL
         AppEvents
         | where Name == "SnapshotFailed"
-        | summarize AggregatedValue = count() by bin(TimeGenerated, 15m)
+        | extend enterprise = tostring(Properties["enterprise"])
+        | summarize AggregatedValue = count() by bin(TimeGenerated, 15m), enterprise
       KQL
-      operator    = "GreaterThan"
-      threshold   = 0
+      operator            = "GreaterThan"
+      threshold           = 0
     }
     zero_rows = {
-      severity    = 2
-      description = "A snapshot completed but wrote 0 rows — likely an empty GitHub user list (bad enterprise slug or PAT scope)."
-      query       = <<-KQL
+      severity            = 2
+      split_by_enterprise = true
+      description         = "A snapshot completed but wrote 0 rows for an enterprise — likely an empty GitHub user list (bad enterprise slug in the registry, or PAT scope). The alert's enterprise dimension names which one."
+      query               = <<-KQL
         AppEvents
         | where Name == "SnapshotRunCompleted"
-        | extend rows = toreal(Measurements["rowsWritten"])
+        | extend rows = toreal(Measurements["rowsWritten"]), enterprise = tostring(Properties["enterprise"])
         | where rows == 0
-        | summarize AggregatedValue = count() by bin(TimeGenerated, 30m)
+        | summarize AggregatedValue = count() by bin(TimeGenerated, 30m), enterprise
       KQL
-      operator    = "GreaterThan"
-      threshold   = 0
+      operator            = "GreaterThan"
+      threshold           = 0
     }
     rate_limit_low = {
-      severity    = 3
-      description = "GitHub rate-limit remaining is low (<200). The per-user snapshot calls may start getting throttled."
-      query       = <<-KQL
+      severity            = 3
+      split_by_enterprise = true
+      description         = "An enterprise's GitHub rate-limit remaining is low (<200). Limits are PER PAT, so this is that enterprise's budget only — the per-user snapshot calls may start getting throttled."
+      query               = <<-KQL
         AppMetrics
         | where Name == "ghcp.github.rate_limit_remaining"
-        | summarize AggregatedValue = min(Min) by bin(TimeGenerated, 15m)
+        | extend enterprise = tostring(Properties["enterprise"])
+        | summarize AggregatedValue = min(Min) by bin(TimeGenerated, 15m), enterprise
       KQL
-      operator    = "LessThan"
-      threshold   = 200
+      operator            = "LessThan"
+      threshold           = 200
     }
     pending_migrations = {
-      severity    = 2
-      description = "Schema migrations have been pending for an extended period — the DDL grant may be missing (system_assigned mode)."
-      query       = <<-KQL
+      severity            = 2
+      split_by_enterprise = false # infra-level signal, not per-enterprise
+      description         = "Schema migrations have been pending for an extended period — the DDL grant may be missing (system_assigned mode)."
+      query               = <<-KQL
         AppMetrics
         | where Name == "ghcp.db.pending_migrations"
         | summarize AggregatedValue = max(Max) by bin(TimeGenerated, 15m)
       KQL
-      operator    = "GreaterThan"
-      threshold   = 0
+      operator            = "GreaterThan"
+      threshold           = 0
     }
   }
 }
@@ -379,12 +397,28 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "sre" {
   evaluation_frequency = "PT15M"
   window_duration      = "PT1H"
 
+  # Fire ONCE per incident and auto-resolve when the condition clears, instead of re-firing (and
+  # re-emailing) every 15-minute evaluation while a data point remains in the 1h lookback window.
+  # A sustained PAT failure is one incident, not an email every quarter hour.
+  auto_mitigation_enabled = true
+
   criteria {
     query                   = each.value.query
     time_aggregation_method = "Maximum"
     metric_measure_column   = "AggregatedValue"
     operator                = each.value.operator
     threshold               = each.value.threshold
+
+    # Split per enterprise: one fired alert per degraded enterprise, named in the alert payload.
+    # "*" covers every value, so a newly registered enterprise is alertable with no infra change.
+    dynamic "dimension" {
+      for_each = each.value.split_by_enterprise ? [1] : []
+      content {
+        name     = "enterprise"
+        operator = "Include"
+        values   = ["*"]
+      }
+    }
 
     failing_periods {
       minimum_failing_periods_to_trigger_alert = 1

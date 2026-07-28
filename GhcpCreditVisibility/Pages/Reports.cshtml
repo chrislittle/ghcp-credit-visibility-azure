@@ -65,12 +65,16 @@
     }
 
     string Q(string dim, string gran, int range, string? fu, string? fm, string? fc, string view)
-        => $"?Dim={dim}&Gran={gran}&Range={range}&FilterUser={Uri.EscapeDataString(fu ?? "")}&FilterModel={Uri.EscapeDataString(fm ?? "")}&FilterCostCenter={Uri.EscapeDataString(fc ?? "")}&View={view}";
+        => $"?Dim={dim}&Gran={gran}&Range={range}&FilterUser={Uri.EscapeDataString(fu ?? "")}&FilterModel={Uri.EscapeDataString(fm ?? "")}&FilterCostCenter={Uri.EscapeDataString(fc ?? "")}&View={view}"
+           + (Model.Ent is long entQ ? $"&Ent={entQ}" : "");
+
+    string CcOptionKey(CostCenterFilterOption c) => $"{c.EnterpriseId}:{c.CostCenterId}";
 
     var pins = new List<string>();
+    if (Model.Ent is long pinnedEnt) pins.Add($"enterprise {Model.VisibleEnterprises.FirstOrDefault(e => e.Id == pinnedEnt)?.Name ?? pinnedEnt.ToString()}");
     if (!string.IsNullOrEmpty(Model.FilterUser)) pins.Add($"user {Model.Options.Users.FirstOrDefault(u => u.Login == Model.FilterUser)?.Name ?? Model.FilterUser}");
     if (!string.IsNullOrEmpty(Model.FilterModel)) pins.Add($"model {Model.FilterModel}");
-    if (!string.IsNullOrEmpty(Model.FilterCostCenter)) pins.Add($"cost center {Model.Options.CostCenters.FirstOrDefault(c => c.CostCenterId == Model.FilterCostCenter)?.CostCenterName ?? Model.FilterCostCenter}");
+    if (!string.IsNullOrEmpty(Model.FilterCostCenter)) pins.Add($"cost center {Model.Options.CostCenters.FirstOrDefault(c => CcOptionKey(c) == Model.FilterCostCenter)?.Label ?? Model.FilterCostCenter}");
 }
 
 <div class="gh-pagehead">
@@ -79,7 +83,7 @@
         <div class="sub">GitHub Copilot AI-credit reporting — break spend down by cost center, user or model, by day, week or month</div>
     </div>
     <div class="gh-headtools">
-        <span class="gh-scope"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
+        <span class="gh-scope" title="@Model.ScopeDetail"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
     </div>
 </div>
 
@@ -94,6 +98,10 @@
                     <option value="costcenter" selected="@(Model.Dim == "costcenter")">Cost center</option>
                     <option value="user" selected="@(Model.Dim == "user")">User</option>
                     <option value="model" selected="@(Model.Dim == "model")">Model</option>
+                    @if (Model.MultiEnterprise)
+                    {
+                        <option value="enterprise" selected="@(Model.Dim == "enterprise")">Enterprise</option>
+                    }
                     <option value="total" selected="@(Model.Dim == "total")">Total (trend only)</option>
                 </select>
             </div>
@@ -140,6 +148,19 @@
                     </select>
                 </div>
             }
+            @if (Model.ShowEnterpriseFilter)
+            {
+                <div class="fld">
+                    <label>Enterprise</label>
+                    <select name="Ent" onchange="this.form.submit()">
+                        <option value="">All enterprises</option>
+                        @foreach (var e in Model.VisibleEnterprises)
+                        {
+                            <option value="@e.Id" selected="@(Model.Ent == e.Id)">@e.Name</option>
+                        }
+                    </select>
+                </div>
+            }
             @if (Model.ShowCostCenterFilter)
             {
                 <div class="fld">
@@ -148,7 +169,7 @@
                         <option value="">Any cost center</option>
                         @foreach (var c in Model.Options.CostCenters)
                         {
-                            <option value="@c.CostCenterId" selected="@(Model.FilterCostCenter == c.CostCenterId)">@(c.CostCenterName ?? c.CostCenterId)</option>
+                            <option value="@CcOptionKey(c)" selected="@(Model.FilterCostCenter == CcOptionKey(c))">@c.Label</option>
                         }
                     </select>
                 </div>
@@ -184,24 +205,22 @@ else
                 </div>
                 <table>
                     <thead>
-                        <tr><th>@(Model.DimLabel.Substring(0,1).ToUpper() + Model.DimLabel.Substring(1))</th><th style="width:34%" title="Bar length = share of the (filtered) total — matches the % of total column.">Share</th><th class="num">% of total</th><th class="num">Net&nbsp;($)</th></tr>
+                        <tr><th>@(Model.DimLabel.Substring(0,1).ToUpper() + Model.DimLabel.Substring(1))</th><th class="num">% of total</th><th class="num">Net&nbsp;($)</th></tr>
                     </thead>
                     <tbody>
                         @foreach (var s in ranked)
                         {
                             var col = ColorKey(s.Key);
                             var sharePct = Model.GrandTotal > 0 ? (double)(s.Total / Model.GrandTotal) * 100 : 0;
-                            var barW = sharePct.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
                             <tr>
                                 <td><span class="gh-ccpill" style="background:@(col)1a;color:@col">@s.Key</span></td>
-                                <td class="gh-barcell"><div class="gh-bar" title="Share of the (filtered) total — matches the % of total column."><i style="width:@(barW)%;background:@col"></i></div></td>
                                 <td class="num">@sharePct.ToString("N1")%</td>
                                 <td class="num">@s.Total.ToString("N2")</td>
                             </tr>
                         }
                     </tbody>
                     <tfoot>
-                        <tr><td colspan="3">Total — @ranked.Count @Model.DimLabel@(ranked.Count == 1 ? "" : "s")</td><td class="num">$@Model.GrandTotal.ToString("N2")</td></tr>
+                        <tr><td colspan="2">Total — @ranked.Count @Model.DimLabel@(ranked.Count == 1 ? "" : "s")</td><td class="num">$@Model.GrandTotal.ToString("N2")</td></tr>
                     </tfoot>
                 </table>
             </div>

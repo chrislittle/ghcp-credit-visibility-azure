@@ -6,11 +6,16 @@
     // ── Colour palette, shared across pills, avatars, donut and legend so a cost
     //    centre is the same colour everywhere on the page. ─────────────────────
     string[] palette = { "#2563eb", "#7c3aed", "#0d9488", "#d9822b", "#0f9d58", "#d93025", "#0ea5e9", "#db2777" };
-    string CcKey(string? id, string? name) => id ?? name ?? "—";
+    // Colour key is the (enterprise, cost-center) PAIR — two enterprises' same-named (or even
+    // same-id) cost centers must never share a colour bucket.
+    string CcKey(long entId, string? id, string? name) => $"{entId}:{id ?? name ?? "—"}";
     var ccColor = new Dictionary<string, string>();
     for (int i = 0; i < Model.CostCenters.Count; i++)
-        ccColor[CcKey(Model.CostCenters[i].CostCenterId, Model.CostCenters[i].CostCenterName)] = palette[i % palette.Length];
-    string ColorFor(string? id, string? name) => ccColor.TryGetValue(CcKey(id, name), out var c) ? c : "#66707d";
+        ccColor[CcKey(Model.CostCenters[i].EnterpriseId, Model.CostCenters[i].CostCenterId, Model.CostCenters[i].CostCenterName)] = palette[i % palette.Length];
+    string ColorFor(long entId, string? id, string? name) => ccColor.TryGetValue(CcKey(entId, id, name), out var c) ? c : "#66707d";
+    // Enterprise-qualified cost-center label, shown whenever more than one enterprise is visible.
+    string CcLabel(string? name, string? id, string? entName) =>
+        (name ?? id ?? "—") + (Model.MultiEnterprise && entName is not null ? $" · {entName}" : "");
 
     Func<string?, string?, string> initials = (name, login) =>
     {
@@ -32,7 +37,7 @@
         foreach (var cc in Model.CostCenters)
         {
             double len = (double)(cc.NetAmount / ccTotal) * C;
-            var col = ColorFor(cc.CostCenterId, cc.CostCenterName);
+            var col = ColorFor(cc.EnterpriseId, cc.CostCenterId, cc.CostCenterName);
             donut.Append($"<circle cx='21' cy='21' r='15.9' fill='none' stroke='{col}' stroke-width='6' stroke-dasharray='{len.ToString("F2")} {(C - len).ToString("F2")}' stroke-dashoffset='{(-off).ToString("F2")}' transform='rotate(-90 21 21)'></circle>");
             off += len;
         }
@@ -47,8 +52,26 @@
         <div class="sub">GitHub Copilot AI-credit spend across your organization</div>
     </div>
     <div class="gh-headtools">
-        <span class="gh-scope"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
+        <span class="gh-scope" title="@Model.ScopeDetail"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
+        @if (Model.MultiEnterprise)
+        {
+            <form method="get" class="gh-mpick mb-0">
+                <input type="hidden" name="Period" value="@Model.PeriodValue" />
+                <span class="cal" aria-hidden="true">🏢</span>
+                <select name="Ent" onchange="this.form.submit()" aria-label="Enterprise">
+                    <option value="">All enterprises</option>
+                    @foreach (var e in Model.VisibleEnterprises)
+                    {
+                        <option value="@e.Id" selected="@(Model.Ent == e.Id)">@e.Name</option>
+                    }
+                </select>
+            </form>
+        }
         <form method="get" class="gh-mpick mb-0">
+            @if (Model.Ent is long)
+            {
+                <input type="hidden" name="Ent" value="@Model.Ent" />
+            }
             <span class="cal" aria-hidden="true">🗓</span>
             <select name="Period" onchange="this.form.submit()" aria-label="Month">
                 @if (Model.AvailableMonths.Count == 0)
@@ -128,16 +151,20 @@
             </div>
             <form method="get" class="gh-usersearch">
                 <input type="hidden" name="Period" value="@Model.PeriodValue" />
+                @if (Model.Ent is long)
+                {
+                    <input type="hidden" name="Ent" value="@Model.Ent" />
+                }
                 <input type="search" name="UserSearch" value="@Model.UserSearch" placeholder="Search by name, login, or cost center…" aria-label="Search users" />
                 @if (!string.IsNullOrWhiteSpace(Model.UserSearch))
                 {
-                    <a class="gh-clear" href="@Url.Page("Index", new { Period = Model.PeriodValue })">Clear</a>
+                    <a class="gh-clear" href="@Url.Page("Index", new { Period = Model.PeriodValue, Ent = Model.Ent })">Clear</a>
                 }
             </form>
             <table>
                 <thead>
                     <tr>
-                        <th>User</th><th>Cost center</th><th style="width:26%" title="Bar length = share of this month's total spend — matches the % of total column.">Share</th><th class="num">% of total</th><th class="num">Net&nbsp;($)</th>
+                        <th>User</th><th>Cost center</th><th class="num">% of total</th><th class="num" title="Change vs the same user's total last month. A move of ±@((int)IndexModel.BigMoveThresholdPct)% or more is highlighted; 'new' = no spend last month.">vs @Model.PrevMonthLabel</th><th class="num">Net&nbsp;($)</th>
                         @if (Model.ShowGrossUsage)
                         {
                             <th class="num">Gross&nbsp;($)</th>
@@ -147,10 +174,9 @@
                 <tbody>
                     @foreach (var u in Model.DisplayUsers)
                     {
-                        var col = ColorFor(u.CostCenterId, u.CostCenterName);
+                        var col = ColorFor(u.EnterpriseId, u.CostCenterId, u.CostCenterName);
                         var sharePct = Model.TotalSpend > 0 ? (double)(u.NetAmount / Model.TotalSpend) * 100 : 0;
-                        var barW = sharePct.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture);
-                        var ccName = u.CostCenterName ?? u.CostCenterId ?? "—";
+                        var ccName = CcLabel(u.CostCenterName, u.CostCenterId, u.EnterpriseName);
                         <tr>
                             <td>
                                 <div class="gh-who">
@@ -159,8 +185,33 @@
                                 </div>
                             </td>
                             <td><span class="gh-ccpill" style="background:@(col)1a;color:@col">@ccName</span></td>
-                            <td class="gh-barcell"><div class="gh-bar" title="Share of this month's total spend — matches the % of total column."><i style="width:@(barW)%"></i></div></td>
                             <td class="num">@sharePct.ToString("N1")%</td>
+                            <td class="num">
+                                @if (!Model.HasPrevUserDeltas)
+                                {
+                                    <span style="color:#98a2b3">—</span>
+                                }
+                                else if (u.PrevMonthNetAmount is not decimal prev || prev <= 0)
+                                {
+                                    <span class="gh-new" title="No spend last month">new</span>
+                                }
+                                else
+                                {
+                                    var deltaPct = (double)((u.NetAmount - prev) / prev) * 100.0;
+                                    var up = deltaPct >= 0;
+                                    var big = Math.Abs(deltaPct) >= IndexModel.BigMoveThresholdPct;
+                                    var arrow = up ? "▲" : "▼";
+                                    var dir = up ? "up" : "down";
+                                    if (big)
+                                    {
+                                        <span class="gh-delta-pill @dir"><span class="gh-delta @dir">@arrow @Math.Abs(deltaPct).ToString("N0")%</span></span>
+                                    }
+                                    else
+                                    {
+                                        <span class="gh-delta @dir">@arrow @Math.Abs(deltaPct).ToString("N0")%</span>
+                                    }
+                                }
+                            </td>
                             <td class="num">@u.NetAmount.ToString("N2")</td>
                             @if (Model.ShowGrossUsage)
                             {
@@ -170,11 +221,11 @@
                     }
                     @if (Model.UserCount == 0)
                     {
-                        <tr><td colspan="4" style="text-align:center;color:#66707d;padding:22px 0;">No usage records for this month.</td></tr>
+                        <tr><td colspan="5" style="text-align:center;color:#66707d;padding:22px 0;">No usage records for this month.</td></tr>
                     }
                     else if (Model.MatchingUserCount == 0)
                     {
-                        <tr><td colspan="4" style="text-align:center;color:#66707d;padding:22px 0;">No users match "@Model.UserSearch".</td></tr>
+                        <tr><td colspan="5" style="text-align:center;color:#66707d;padding:22px 0;">No users match "@Model.UserSearch".</td></tr>
                     }
                 </tbody>
                 @if (Model.UserCount > 0)
@@ -204,11 +255,11 @@
                     <div class="gh-chips">
                         @if (Model.UserPage > 1)
                         {
-                            <a href="@Url.Page("Index", new { Period = Model.PeriodValue, UserSearch = Model.UserSearch, UserPage = Model.UserPage - 1 })">&larr; Prev</a>
+                            <a href="@Url.Page("Index", new { Period = Model.PeriodValue, UserSearch = Model.UserSearch, UserPage = Model.UserPage - 1, Ent = Model.Ent })">&larr; Prev</a>
                         }
                         @if (Model.UserPage < Model.UserPageCount)
                         {
-                            <a href="@Url.Page("Index", new { Period = Model.PeriodValue, UserSearch = Model.UserSearch, UserPage = Model.UserPage + 1 })">Next &rarr;</a>
+                            <a href="@Url.Page("Index", new { Period = Model.PeriodValue, UserSearch = Model.UserSearch, UserPage = Model.UserPage + 1, Ent = Model.Ent })">Next &rarr;</a>
                         }
                     </div>
                 </div>
@@ -228,8 +279,8 @@
                     @foreach (var cc in Model.CostCenters)
                     {
                         <div class="row">
-                            <span class="sw" style="background:@ColorFor(cc.CostCenterId, cc.CostCenterName)"></span>
-                            @(cc.CostCenterName ?? cc.CostCenterId ?? "—")
+                            <span class="sw" style="background:@ColorFor(cc.EnterpriseId, cc.CostCenterId, cc.CostCenterName)"></span>
+                            @CcLabel(cc.CostCenterName, cc.CostCenterId, cc.EnterpriseName)
                             <span class="amt">$@cc.NetAmount.ToString("N2")</span>
                         </div>
                     }
@@ -263,22 +314,38 @@
     </div>
 </div>
 
-<!-- BUDGETS (bottom) -->
+<!-- BUDGETS (bottom): exceptions-first at scale, everything at small scale -->
 @if (Model.Budgets.Count > 0)
 {
     <div class="gh-card">
         <div class="ch">
-            <h2>Budgets</h2>
+            <h2>@(Model.BudgetExceptionsMode ? "Budgets — needs attention" : "Budgets")</h2>
             <span class="hint">@Model.MonthLabel · actual vs GitHub budget</span>
         </div>
-        @foreach (var b in Model.Budgets)
+        @if (Model.BudgetExceptionsMode)
+        {
+            <div class="gh-cardbody" style="border-bottom:1px solid var(--gh-line);display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                <span class="gh-note">@Model.Budgets.Count budgets across @Model.BudgetEnterpriseCount @(Model.BudgetEnterpriseCount == 1 ? "enterprise" : "enterprises"):</span>
+                @if (Model.BudgetOverCount > 0) { <span class="gh-badge over">@Model.BudgetOverCount over</span> }
+                @if (Model.BudgetNearLimitCount > 0) { <span class="gh-badge critical">@Model.BudgetNearLimitCount near limit</span> }
+                <span class="gh-badge ok">@Model.BudgetOnTrackCount on track</span>
+            </div>
+            @if (Model.DisplayBudgets.Count == 0)
+            {
+                <div class="gh-cardbody"><div class="gh-note mb-0">✅ All @Model.Budgets.Count budgets are on track — nothing needs attention this month.</div></div>
+            }
+        }
+        <div class="gh-budgets">
+        @foreach (var b in Model.DisplayBudgets)
         {
             var pct = Math.Min(100, (int)Math.Round(b.Pct));
             var levelLabel = b.Level switch { "over" => "Over budget", "critical" => "Near limit", "warn" => "Watch", _ => "On track" };
             <div class="gh-budget">
                 <div class="top">
                     <span class="name">
-                        @(b.IsOrg ? "🏦 Organization (all cost centers)" : $"🏢 {b.CostCenterName ?? b.CostCenterId}")
+                        @(b.IsOrg
+                            ? (Model.MultiEnterprise && b.EnterpriseName is not null ? $"🏦 {b.EnterpriseName} — enterprise-wide" : "🏦 Organization (all cost centers)")
+                            : $"🏢 {CcLabel(b.CostCenterName, b.CostCenterId, b.EnterpriseName)}")
                         <span class="gh-badge @b.Level">@levelLabel</span>
                     </span>
                     <span style="font-variant-numeric:tabular-nums;font-weight:700;">$@b.Actual.ToString("N2") <span style="color:#98a2b3;font-weight:500">/ $@b.Amount.ToString("N2")</span></span>
@@ -290,8 +357,23 @@
                 </div>
             </div>
         }
-        <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
-            <div class="gh-note mb-0">Budgets are set in GitHub; alert emails are sent by GitHub. This is a read-only view of current-month utilization.</div>
+        </div>
+        <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+            <div class="gh-note mb-0">
+                @if (Model.BudgetExceptionsMode)
+                {
+                    @if (Model.HiddenAttentionBudgetCount > 0)
+                    {
+                        <text>…and @Model.HiddenAttentionBudgetCount more need@(Model.HiddenAttentionBudgetCount == 1 ? "s" : "") attention. </text>
+                    }
+                    <text>Only budgets needing attention are shown here.</text>
+                }
+                else
+                {
+                    <text>Current-month utilization across your budgets.</text>
+                }
+            </div>
+            <a href="@Url.Page("Budgets", new { Period = Model.PeriodValue, Ent = Model.Ent })" style="font-weight:600;font-size:13px;white-space:nowrap;">View all @Model.Budgets.Count budgets →</a>
         </div>
     </div>
 }

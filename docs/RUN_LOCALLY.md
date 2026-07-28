@@ -85,9 +85,17 @@ Go to the HTTPS URL printed in the console (e.g. `https://localhost:5001`).
   (Easy Auth/Entra sign-in only applies once the app is deployed behind Azure App Service — see
   the root [README](../README.md) and [infra/README.md](../infra/README.md).)
 - You should land on the **Usage** dashboard, pre-populated with 12 months of synthetic AI-credit
-  spend across 12 mock users and 3 mock cost centers. Try the **Reports** page (break down by
-  user/model/cost-center, by day/week/month) and **Admin → Access mappings** (map a fake Entra
-  group/user object ID to a cost center — no real Entra tenant needed to try the console itself).
+  spend across **two demo GitHub enterprises** — Contoso (20 users) and Fabrikam (8 users, two of
+  whom deliberately share logins with Contoso users, plus a cost center also named "Engineering")
+  — so the multi-enterprise UI has something real to show: the **enterprise dropdown** in the
+  header, enterprise-qualified cost-center labels (`Engineering · Contoso` vs
+  `Engineering · Fabrikam`), and per-enterprise budgets shown **exceptions-first** (only
+  over/near-limit budgets get meters; the full list is on the **Budgets** page, grouped by
+  enterprise and filterable by status). Try the **Reports** page (break down by
+  user/model/cost-center/**enterprise**, by day/week/month), and **Admin** for both **GitHub
+  enterprises** (the registry — add/disable/remove enterprises, no redeploy) and **Access
+  mappings** (map a fake Entra group/user object ID to cost centers across either enterprise — no
+  real Entra tenant needed to try the console itself).
 
 To stop the app, go back to the terminal and press `Ctrl+C`.
 

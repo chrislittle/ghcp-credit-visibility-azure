@@ -2,9 +2,15 @@
 # PUT {agentEndpoint}/api/v2/extendedAgent/hooks/ghcp-policy-gate
 # Body: { name, type: "GlobalHook", tags: [], properties: <spec> }
 #
-# Blocks the operations that would exfiltrate the GitHub PAT or mutate protected config, regardless
+# Blocks the operations that would exfiltrate a GitHub PAT or mutate protected config, regardless
 # of run mode or how plausibly the agent justifies it. This is the security boundary that keeps the
-# agent from ever reading github-pat into a conversation thread.
+# agent from ever reading a PAT into a conversation thread.
+#
+# MULTI-ENTERPRISE NOTE: PAT secrets are now one per enterprise (github-pat, github-pat-<slug>, or
+# any custom name registered in the app's enterprise registry). The block below is deliberately
+# NAME-AGNOSTIC — it matches the OPERATION (`keyvault secret show/download/set/delete`), not a
+# secret name — so every newly onboarded enterprise's PAT is inside this boundary automatically.
+# Never "improve" this by pinning it to a literal secret name.
 metadata:
   name: ghcp-policy-gate
 spec:
@@ -21,7 +27,7 @@ spec:
       ctx = json.load(sys.stdin)
       cmd = json.dumps(ctx.get("tool_input", {}))
       forbidden = [
-          r"keyvault\s+secret\s+(show|download|set|delete)",  # never surface/alter the PAT value
+          r"keyvault\s+secret\s+(show|download|set|delete)",  # never surface/alter ANY PAT value (github-pat, github-pat-<slug>, ...)
           r"webapp\s+config\s+appsettings\s+set",             # no app-setting mutation
           r"(sql|webapp|group)\s+delete",                     # no resource deletion
           r"sql\s+server\s+ad-admin",                         # no SQL admin changes
