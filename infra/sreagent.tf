@@ -314,7 +314,9 @@ locals {
     token_unresolved = {
       severity            = 1
       split_by_enterprise = true
-      description         = "An enterprise's GitHub PAT did not resolve (token_resolved=0) — Key Vault secret missing/unreadable or reference unresolved. That enterprise's GitHub calls will 401 until fixed. The alert's enterprise dimension names which one; seed with: ./deploy.ps1 -Task set-pat -Enterprise <slug>."
+      # No angle brackets in alert descriptions: Azure Monitor's HTML email renderer eats "<slug>"
+      # as a tag, leaving "-Enterprise ." in the notification.
+      description         = "An enterprise's GitHub PAT did not resolve (token_resolved=0) — Key Vault secret missing/unreadable or reference unresolved. That enterprise's GitHub calls will 401 until fixed. This alert's enterprise dimension names which one; seed its PAT with: ./deploy.ps1 -Task set-pat -Enterprise THE-SLUG-IN-THIS-ALERTS-ENTERPRISE-DIMENSION."
       query               = <<-KQL
         AppMetrics
         | where Name == "ghcp.github.token_resolved"

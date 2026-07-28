@@ -1094,15 +1094,29 @@ function Invoke-SreDataPlanePut([string]$Endpoint, [string]$Token, [string]$Kind
 # Upload ONE knowledge file to AgentMemory (RAG-indexed) via multipart/form-data.
 #   POST {endpoint}/api/v1/AgentMemory/upload?triggerIndexing={bool}   field: files=@<path>
 # Only trigger indexing on the LAST file of a batch, so we don't re-index per file.
-function Invoke-SreKnowledgeUpload([string]$Endpoint, [string]$Token, [string]$Path, [bool]$TriggerIndexing) {
-  $name = Split-Path $Path -Leaf
+# AgentMemory keys documents by FILENAME, so same-named files from different directories
+# (README.md, infra/README.md, sre/README.md) silently overwrite each other — a 7-file manifest
+# indexed as 5. UploadName lets the caller pass a collision-free name; the file is staged to a
+# temp copy under that name so the multipart filename matches.
+function Invoke-SreKnowledgeUpload([string]$Endpoint, [string]$Token, [string]$Path, [bool]$TriggerIndexing, [string]$UploadName = '') {
+  $name = if ($UploadName) { $UploadName } else { Split-Path $Path -Leaf }
   $url = "$Endpoint/api/v1/AgentMemory/upload?triggerIndexing=" + $TriggerIndexing.ToString().ToLower()
   if ($DryRun) { Write-Host "  DRYRUN> POST $url  ($name)" -ForegroundColor DarkGray; return }
+  $staged = $null
   try {
-    Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = "Bearer $Token" } -Form @{ files = Get-Item -LiteralPath $Path } -ErrorAction Stop | Out-Null
+    $sendPath = $Path
+    if ($name -ne (Split-Path $Path -Leaf)) {
+      $staged = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
+      New-Item -ItemType Directory -Path $staged -Force | Out-Null
+      $sendPath = Join-Path $staged $name
+      Copy-Item -LiteralPath $Path -Destination $sendPath -Force
+    }
+    Invoke-RestMethod -Method Post -Uri $url -Headers @{ Authorization = "Bearer $Token" } -Form @{ files = Get-Item -LiteralPath $sendPath } -ErrorAction Stop | Out-Null
     Write-Ok "  knowledge/$name"
   } catch {
     Write-Err "  FAILED knowledge/$name — $($_.Exception.Message)"
+  } finally {
+    if ($staged -and (Test-Path $staged)) { Remove-Item -Recurse -Force $staged -ErrorAction SilentlyContinue }
   }
 }
 
@@ -1204,8 +1218,21 @@ function Phase-SreSync {
     }
     if ($paths.Count -gt 0) {
       Write-Info "Knowledge files: $($paths.Count)"
+      # Collision-free upload names: keep the plain filename when unique in this batch; qualify
+      # duplicates with their repo-relative directory (infra/README.md -> infra__README.md) so the
+      # three READMEs stop overwriting each other in AgentMemory.
+      $repoRoot = $PSScriptRoot.TrimEnd('\', '/')
+      $uploadNames = @{}
+      $leafCounts = @{}
+      foreach ($p in $paths) { $leaf = Split-Path $p -Leaf; $leafCounts[$leaf] = 1 + ($leafCounts[$leaf] ?? 0) }
+      foreach ($p in $paths) {
+        $leaf = Split-Path $p -Leaf
+        if ($leafCounts[$leaf] -le 1) { $uploadNames[$p] = $leaf; continue }
+        $rel = $p.Substring($repoRoot.Length).TrimStart('\', '/')
+        $uploadNames[$p] = ($rel -replace '[\\/]', '__')
+      }
       for ($i = 0; $i -lt $paths.Count; $i++) {
-        Invoke-SreKnowledgeUpload -Endpoint $endpoint -Token $token -Path $paths[$i] -TriggerIndexing:($i -eq $paths.Count - 1)
+        Invoke-SreKnowledgeUpload -Endpoint $endpoint -Token $token -Path $paths[$i] -TriggerIndexing:($i -eq $paths.Count - 1) -UploadName $uploadNames[$paths[$i]]
       }
       Write-Info 'Indexing runs after the final file — progress: GET {endpoint}/api/v1/agentmemory/indexer-status'
     }
