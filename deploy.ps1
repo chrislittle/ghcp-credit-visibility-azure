@@ -741,22 +741,79 @@ function Phase-Configure {
   $prefix = Ask 'Name prefix (short, a-z0-9)' 'ghcpcv'
 
   $skuDefault = if ($Sku) { $Sku } else { (Get-TfVar 'app_service_sku') }; if (-not $skuDefault) { $skuDefault = 'S1' }
-  $appSku = Ask 'App Service Plan SKU (e.g. S1, P1v3, P1mv3, P1v4 — check ./deploy.ps1 -Task preflight for quota first)' $skuDefault
+  # Curated, production-ready tiers (Standard + Premium) with the specs decoded — the raw SKU
+  # codes aren't something most operators memorize. 'Other' keeps any valid code usable.
+  $appSkuCodes = @('S1', 'S2', 'P0v3', 'P1v3', 'P2v3', 'P1mv3', 'P1v4')
+  $appSkuOpts = @(
+    'S1    — Standard,    1 core  / 1.75 GB RAM — older hardware; the long-time default',
+    'S2    — Standard,    2 cores / 3.5 GB RAM',
+    'P0v3  — Premium v3,  1 vCPU  / 4 GB RAM    — more memory than S1 on newer hardware',
+    'P1v3  — Premium v3,  2 vCPU  / 8 GB RAM    — production baseline; zone-redundancy capable',
+    'P2v3  — Premium v3,  4 vCPU  / 16 GB RAM',
+    'P1mv3 — Premium v3,  2 vCPU  / 16 GB RAM   — memory-optimized variant of P1v3',
+    'P1v4  — Premium v4,  2 vCPU  / 8 GB RAM    — newest hardware; not offered in all regions yet',
+    'Other — type any SKU code (e.g. S3, P3v3, P2mv3, P1mv4)'
+  )
+  $appSkuDefaultIdx = [Array]::IndexOf($appSkuCodes, $skuDefault)
+  $appSkuDefaultIdx = if ($appSkuDefaultIdx -ge 0) { $appSkuDefaultIdx + 1 } else { $appSkuOpts.Count }
+  Write-Info 'All listed tiers support autoscale + deployment slots. Check quota first with: ./deploy.ps1 -Task preflight'
+  $appSkuPick = AskChoice 'App Service Plan SKU' $appSkuOpts $appSkuDefaultIdx
+  $appSku = if ($appSkuPick -lt $appSkuOpts.Count) { $appSkuCodes[$appSkuPick - 1] } else { Ask 'App Service SKU code' $skuDefault }
 
   $sqlSkuDefault = if ($SqlSku) { $SqlSku } else { (Get-TfVar 'sql_database_sku') }; if (-not $sqlSkuDefault) { $sqlSkuDefault = 'GP_S_Gen5_1' }
   $sqlModeDefault = if ($sqlSkuDefault -match '_S_') { 1 } else { 2 }
   Write-Info 'Serverless auto-scales/auto-pauses but is billed ~3.4x the per-vCore-hour rate of provisioned (eastus2) — cheaper only if the DB sits idle a meaningful fraction of the time. If it runs 24x7, provisioned is cheaper.'
-  $sqlMode = AskChoice 'Azure SQL compute model' @(
-    'Serverless — auto-scales + auto-pauses when idle (good for dev/test/bursty use)',
-    'Provisioned — fixed vCores, always on, no pause (cheaper for steady 24x7 workloads)') $sqlModeDefault
   $sqlAutoPause = 60
-  if ($sqlMode -eq 1) {
-    $sqlDbSku = Ask 'Azure SQL DB serverless SKU (e.g. GP_S_Gen5_1, GP_S_Gen5_2)' $(if ($sqlSkuDefault -match '_S_') { $sqlSkuDefault } else { 'GP_S_Gen5_1' })
-    $autoPauseDefault = if ($sqlSkuDefault -match '_S_') { (Get-TfVar 'sql_auto_pause_minutes') } else { '' }; if (-not $autoPauseDefault) { $autoPauseDefault = '60' }
-    $sqlAutoPause = [int](Ask 'Auto-pause after idle minutes (60/90/120/240/360/720/1440, or -1 to disable/always-warm)' $autoPauseDefault)
-  }
-  else {
-    $sqlDbSku = Ask 'Azure SQL DB provisioned SKU (e.g. GP_Gen5_2, BC_Gen5_2)' $(if ($sqlSkuDefault -notmatch '_S_') { $sqlSkuDefault } else { 'GP_Gen5_2' })
+  # Mode question + SKU menu run in a loop so each SKU menu can offer 'Back' — pick provisioned,
+  # see the list, realize you wanted serverless (or vice versa) without restarting configure.
+  # 'Back' also flips the mode default so the switch is a single Enter on the next question.
+  while ($true) {
+    $sqlMode = AskChoice 'Azure SQL compute model' @(
+      'Serverless — auto-scales + auto-pauses when idle (good for dev/test/bursty use)',
+      'Provisioned — fixed vCores, always on, no pause (cheaper for steady 24x7 workloads)') $sqlModeDefault
+    if ($sqlMode -eq 1) {
+      $slsDefault = if ($sqlSkuDefault -match '_S_') { $sqlSkuDefault } else { 'GP_S_Gen5_1' }
+      $slsCodes = @('GP_S_Gen5_1', 'GP_S_Gen5_2', 'GP_S_Gen5_4')
+      $slsOpts = @(
+        "GP_S_Gen5_1 — max 1 vCore  / 3 GB memory  — smallest; fine for this app's typical workload",
+        'GP_S_Gen5_2 — max 2 vCores / 6 GB memory  — headroom for heavier report queries',
+        'GP_S_Gen5_4 — max 4 vCores / 12 GB memory',
+        'Other — type any serverless SKU code (e.g. GP_S_Gen5_8)',
+        'Back  — choose a provisioned SKU instead'
+      )
+      $slsIdx = [Array]::IndexOf($slsCodes, $slsDefault); $slsIdx = if ($slsIdx -ge 0) { $slsIdx + 1 } else { $slsOpts.Count - 1 }
+      $slsPick = AskChoice 'Azure SQL serverless SKU (bills per vCore-second used; compute stops billing while paused)' $slsOpts $slsIdx
+      if ($slsPick -eq $slsOpts.Count) { $sqlModeDefault = 2; continue }
+      $sqlDbSku = if ($slsPick -le $slsCodes.Count) { $slsCodes[$slsPick - 1] } else { Ask 'Serverless SKU code' $slsDefault }
+      # The "_S_" segment IS what makes Azure treat the SKU as serverless (see infra/sql.tf) — a
+      # provisioned code typed here would silently drop auto-pause, so catch it now.
+      while ($sqlDbSku -notmatch '_S_') {
+        Write-Warn "'$sqlDbSku' has no _S_ segment, so Azure would treat it as a provisioned SKU — auto-pause would not apply."
+        $sqlDbSku = Ask 'Serverless SKU code (must contain "_S_")' $slsDefault
+      }
+      $autoPauseDefault = if ($sqlSkuDefault -match '_S_') { (Get-TfVar 'sql_auto_pause_minutes') } else { '' }; if (-not $autoPauseDefault) { $autoPauseDefault = '60' }
+      $sqlAutoPause = [int](Ask 'Auto-pause after idle minutes (60/90/120/240/360/720/1440, or -1 to disable/always-warm)' $autoPauseDefault)
+    }
+    else {
+      $provDefault = if ($sqlSkuDefault -notmatch '_S_') { $sqlSkuDefault } else { 'GP_Gen5_2' }
+      $provCodes = @('GP_Gen5_2', 'GP_Gen5_4', 'BC_Gen5_2')
+      $provOpts = @(
+        'GP_Gen5_2 — General Purpose,   2 vCores / ~10 GB memory',
+        'GP_Gen5_4 — General Purpose,   4 vCores / ~21 GB memory',
+        'BC_Gen5_2 — Business Critical, 2 vCores, local SSD + HA replicas — only if you need the lowest latency',
+        'Other — type any provisioned SKU code (e.g. GP_Gen5_8, BC_Gen5_4)',
+        'Back  — choose a serverless SKU instead'
+      )
+      $provIdx = [Array]::IndexOf($provCodes, $provDefault); $provIdx = if ($provIdx -ge 0) { $provIdx + 1 } else { $provOpts.Count - 1 }
+      $provPick = AskChoice 'Azure SQL provisioned SKU (fixed vCores, always on)' $provOpts $provIdx
+      if ($provPick -eq $provOpts.Count) { $sqlModeDefault = 1; continue }
+      $sqlDbSku = if ($provPick -le $provCodes.Count) { $provCodes[$provPick - 1] } else { Ask 'Provisioned SKU code' $provDefault }
+      while ($sqlDbSku -match '_S_') {
+        Write-Warn "'$sqlDbSku' contains _S_, which marks a SERVERLESS SKU — you chose provisioned."
+        $sqlDbSku = Ask 'Provisioned SKU code (no "_S_")' $provDefault
+      }
+    }
+    break
   }
 
   $alertEmailDefault = Get-DisplayEmail $script:Me
