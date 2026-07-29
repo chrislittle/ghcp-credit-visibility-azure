@@ -17,7 +17,10 @@
 .PARAMETER Task
   all (default) | preflight | configure | provision | image | grant-sql | set-pat | status
 
-.PARAMETER Location   Azure region for preflight + apply. Default eastus2.
+.PARAMETER Location   Azure region for preflight + apply. -Task preflight accepts a comma-separated
+                      list to scan several regions. When omitted for a standalone preflight, the
+                      terraform.tfvars region is used if one exists; otherwise you're asked
+                      (default eastus2). Other tasks always follow terraform.tfvars once it exists.
 .PARAMETER Sku        App Service Plan SKU (e.g. S1, P1v3, P1mv3, P1v4). Default: S1 (or existing tfvars value).
 .PARAMETER SqlSku     Azure SQL DB SKU (e.g. GP_S_Gen5_1). Default: GP_S_Gen5_1 (or existing tfvars value).
 .PARAMETER ImageTag   Image tag for the in-cloud build. Default: UTC timestamp.
@@ -486,6 +489,76 @@ function Phase-Prereqs {
   if (-not $DryRun -and -not $Yes) { if (-not (AskYesNo 'Proceed against THIS subscription?' $false)) { throw 'Aborted by user.' } }
 }
 
+# ── Permission precheck (best-effort, warn-only) ─────────────────
+# The apply needs MORE than Contributor (it creates role assignments: AcrPull, Key Vault Secrets
+# User/Officer, the SRE agent's roles) and needs Entra rights to create the app registration
+# (enable_easy_auth). Both failures otherwise surface MID-apply, after most resources already
+# exist — so check up front, alongside the quota preflight, and warn with the fix. Heuristic by
+# design: custom roles, PIM-eligible-but-not-activated roles, or restricted Graph queries can all
+# produce a false warning, so this NEVER blocks the run — it only tells you what to expect.
+# Full requirements table: infra/README.md#required-permissions.
+function Test-DeployPermissions {
+  Write-Host "  ── permissions ──" -ForegroundColor Cyan
+  $sub = $script:Acct.id
+
+  # Azure RBAC: creating role assignments needs Microsoft.Authorization/roleAssignments/write —
+  # held by Owner / User Access Administrator / Role Based Access Control Administrator, NOT by
+  # Contributor. --include-groups needs a Graph directory read; if the query fails we just skip.
+  $assignee = if ($script:Me -and $script:Me.id) { $script:Me.id } else { $script:Acct.user.name }
+  $roleNames = @()
+  try {
+    $roleNames = @(az role assignment list --assignee $assignee --scope "/subscriptions/$sub" --include-inherited --include-groups --query "[].roleDefinitionName" -o tsv 2>$null) | Where-Object { $_ }
+  } catch {}
+  # Two distinct rights are needed: CREATE resources (Owner/Contributor) and WRITE role
+  # assignments (Owner/UAA/RBAC Administrator). Only Owner covers both by itself.
+  $rbacWriters = @('Owner', 'User Access Administrator', 'Role Based Access Control Administrator')
+  $canWriteRbac = @($roleNames | Where-Object { $_ -in $rbacWriters })
+  $canCreate = @($roleNames | Where-Object { $_ -in @('Owner', 'Contributor') })
+  if ($canWriteRbac.Count -gt 0 -and $canCreate.Count -gt 0) {
+    Write-Ok "Azure RBAC: '$(@($canCreate + $canWriteRbac | Select-Object -Unique) -join ''' + ''')' at subscription scope — can create resources AND the role assignments the apply needs"
+  }
+  elseif ($canWriteRbac.Count -gt 0) {
+    Write-Warn "Azure RBAC: '$($canWriteRbac[0])' covers role-assignment writes, but you have neither Owner nor Contributor — creating the resources themselves will fail. See infra/README.md#required-permissions."
+  }
+  elseif ($canCreate.Count -gt 0) {
+    Write-Warn 'Azure RBAC: you have Contributor but no role-assignment-write role (Owner / User Access Administrator / Role Based Access Control Administrator).'
+    Write-Info 'The apply CREATES role assignments (AcrPull, Key Vault Secrets User/Officer, SRE agent roles) and will fail mid-apply without one — see infra/README.md#required-permissions.'
+  }
+  elseif ($roleNames.Count -gt 0) {
+    Write-Warn "Azure RBAC: your subscription roles ($($roleNames -join ', ')) don't obviously include resource-create + role-assignment-write rights — the apply may fail. See infra/README.md#required-permissions."
+  }
+  else { Write-Info 'Azure RBAC: could not enumerate your role assignments (restricted query or custom role) — skipping this check.' }
+
+  # Entra: creating the app registration + service principal (enable_easy_auth, default true) needs
+  # either the tenant default "Users can register applications" = Yes, or an app-creating directory
+  # role. Both Graph reads degrade gracefully — many tenants restrict authorizationPolicy reads.
+  if ((Get-TfVar 'enable_easy_auth') -eq 'false') {
+    Write-Info 'Entra: enable_easy_auth=false — app-registration check skipped. (Note: infra-only mode; the app refuses to serve requests without platform auth.)'
+    return
+  }
+  $appRegOk = $false; $tenantBlocksKnown = $false
+  try {
+    $allowed = az rest --method get --uri 'https://graph.microsoft.com/v1.0/policies/authorizationPolicy' --query 'defaultUserRolePermissions.allowedToCreateApps' -o tsv 2>$null
+    if ($allowed -eq 'true') { $appRegOk = $true; Write-Ok 'Entra: tenant allows users to create app registrations' }
+    elseif ($allowed -eq 'false') { $tenantBlocksKnown = $true }
+  } catch {}
+  if (-not $appRegOk) {
+    # Only ACTIVATED directory roles show up here — a PIM-eligible role won't (activate it first).
+    $appCreatorRoles = @('Global Administrator', 'Application Administrator', 'Cloud Application Administrator', 'Application Developer')
+    $myRoles = @()
+    try {
+      $myRoles = @(az rest --method get --uri 'https://graph.microsoft.com/v1.0/me/memberOf/microsoft.graph.directoryRole?$select=displayName' --query 'value[].displayName' -o tsv 2>$null) | Where-Object { $_ }
+    } catch {}
+    $hit = @($myRoles | Where-Object { $_ -in $appCreatorRoles })
+    if ($hit.Count -gt 0) { Write-Ok "Entra: directory role '$($hit[0])' — can create the app registration" }
+    elseif ($tenantBlocksKnown) {
+      Write-Warn 'Entra: this tenant blocks user app registration and your account holds no app-creating directory role.'
+      Write-Info 'terraform apply will 403 creating the Entra app registration. Ask for the Application Developer role (or have a platform team deploy) — see infra/README.md#required-permissions.'
+    }
+    else { Write-Info 'Entra: could not determine app-registration rights (Graph queries restricted) — if the apply 403s on the app registration, see infra/README.md#required-permissions.' }
+  }
+}
+
 # ── PHASE: preflight (capacity/region) — self-contained ──────────
 # Verifies, per region: resource-provider registration, App Service tier quota
 # (Microsoft.Web usages; localizedValue = tier, limit>0 = deployable) and Azure SQL
@@ -494,8 +567,11 @@ function Phase-Prereqs {
 function Phase-Preflight {
   param([switch]$Gate)
   if ($SkipPreflight) { Write-Info 'Preflight skipped (-SkipPreflight).'; return }
-  Write-Step 1 'Capacity + region precheck'
+  Write-Step 1 'Permissions + capacity + region precheck'
   if (-not $script:Acct) { Ensure-Az }
+  # Permissions are region-independent — check once per run, even when Phase-Preflight re-enters
+  # itself via the interactive "try a different region/SKU" retry loop below.
+  if (-not $script:PermCheckDone) { $script:PermCheckDone = $true; Test-DeployPermissions }
   $sub = $script:Acct.id
   $regions = @($Location | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
   $providers = 'Microsoft.Web', 'Microsoft.Sql', 'Microsoft.ContainerRegistry', 'Microsoft.KeyVault', 'Microsoft.ManagedIdentity', 'Microsoft.OperationalInsights', 'Microsoft.Insights'
@@ -575,14 +651,14 @@ function Phase-Preflight {
       } catch {}
       if ($qLimit -gt 0 -and -not ($null -ne $totalVmsLimit -and $totalVmsCurrent -ge $totalVmsLimit)) {
         $appOk = $true
-        Write-Ok "App Service SKU '$resolvedSku' has quota via Microsoft.Quota ($qLimit) — legacy usages API hasn't caught up yet"
+        Write-Ok "App Service SKU '$resolvedSku' has quota (limit $qLimit) per the Microsoft.Quota API — the authoritative per-SKU source. (The legacy per-tier usages view shows none for this tier; that's normal for per-SKU grants, which may never appear there.)"
       }
       elseif ($wantLimit -le 0) {
         Write-Warn "App Service: no usages data for $loc; confirm in portal (Subscription > Usage + quotas)."
         Write-Err "App Service tier '$wantTier' has 0 quota in $loc"
         if ($availTiers) { Write-Warn "Tiers WITH quota: $($availTiers -join ', ') — set app_service_sku to one of these" }
         else { Write-Warn "No App Service tier has quota here — request at https://aka.ms/antquotahelp or try another region" }
-        Write-Info "If you just approved a quota request, re-run in a few minutes — Microsoft.Quota grants can take time to propagate to the Microsoft.Web usages API."
+        Write-Info "If you just approved a quota request, re-run in a few minutes — a fresh grant can take a little while to show up in the Microsoft.Quota API (checked directly above)."
         if ($uErrLine) { Write-Info "  az rest (usages) error: $uErrLine" }
         $qErrLine = ($qRaw | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | Select-Object -First 1)
         if ($qErrLine) { Write-Info "  az rest (Microsoft.Quota) error: $qErrLine" }
@@ -1453,7 +1529,8 @@ trap {
   Write-Host "Common constrained-subscription causes:" -ForegroundColor Yellow
   Write-Host "  - App Service quota = 0     → https://aka.ms/antquotahelp, or ./deploy.ps1 -Task preflight -Location <region> -Sku <sku>"
   Write-Host "  - Azure SQL disabled in region → re-run with -Location <other-region>"
-  Write-Host "  - Easy Auth SP/secret 403  → deploy where you're tenant admin, or set enable_easy_auth=false"
+  Write-Host "  - Easy Auth app-reg/SP 403 → you need app-registration rights (Application Developer role, or a tenant that allows user app registration) — see infra/README.md#required-permissions. (enable_easy_auth=false is NOT a workaround: the app refuses to serve without platform auth.)"
+  Write-Host "  - Role-assignment 403 (AuthorizationFailed on Microsoft.Authorization) → Contributor isn't enough; add Role Based Access Control Administrator (or User Access Administrator / Owner) — see infra/README.md#required-permissions"
   Write-Host "  - Policy blocks public network access (RequestDisallowedByPolicy) → set use_private_networking = true and re-run (common in governed/landing-zone tenants)"
   break
 }
@@ -1470,6 +1547,22 @@ trap {
 if ($Task -in @('provision', 'image', 'grant-sql', 'set-pat', 'status', 'sre-provision', 'grant-sre-sql', 'sre-sync')) {
   $existingLoc = Get-TfVar 'location'
   if ($existingLoc) { $Location = $existingLoc }
+}
+
+# 'preflight' is region-flexible by design (it accepts a comma-separated scan list), so it is NOT
+# in the hard tfvars sync above — but silently falling back to the -Location parameter DEFAULT
+# (eastus2) is misleading: you could green-light a region your configured deploy doesn't target.
+# Resolution order: an explicitly passed -Location always wins; else the terraform.tfvars region
+# (what a deploy would actually use); else ask interactively (default eastus2 under -Yes).
+if ($Task -eq 'preflight' -and -not $PSBoundParameters.ContainsKey('Location')) {
+  $tfLoc = Get-TfVar 'location'
+  if ($tfLoc) {
+    $Location = $tfLoc
+    Write-Info "Region from terraform.tfvars: $tfLoc  (pass -Location <r1,r2,...> to precheck other regions instead)"
+  }
+  elseif (-not $Yes) {
+    $Location = Ask 'Region(s) to precheck (comma-separated to scan several)' $Location
+  }
 }
 
 # Decide whether to hold the OPTIONAL SRE agent out of core-phase terraform applies. We hold it out

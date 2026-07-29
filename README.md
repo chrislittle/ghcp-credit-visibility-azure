@@ -208,6 +208,12 @@ script:
 local Docker needed) → the one-time SQL grant → optionally seeding the GitHub PAT → a health
 check. Run a single phase with `-Task <name>` or preview everything with `-DryRun`.
 
+Before you start, check **[required permissions](infra/README.md#required-permissions)**: you need
+subscription **Owner** (or Contributor **plus** User Access Administrator or Role Based Access
+Control Administrator — the apply creates role assignments, which Contributor alone cannot) and
+the right to create an **Entra app registration** (tenant default, or the Application Developer
+role). The preflight checks both and warns before anything is applied.
+
 Key deployment choices, all one Terraform variable each:
 
 | Choice | Variable | Options |

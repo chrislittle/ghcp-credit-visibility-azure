@@ -195,8 +195,26 @@ Test flow with a peer:
 
 ## Prerequisites
 - `az login` into the target subscription's tenant.
-- Terraform ≥ 1.9. Permissions to create the above + an Entra app registration.
+- Terraform ≥ 1.9.
+- The [permissions below](#required-permissions) — `./deploy.ps1 -Task preflight` runs a best-effort check of these and warns *before* the apply.
 - An Entra group/user object ID to be the **SQL Entra admin** (only for `identity_mode = system_assigned`).
+
+### Required permissions
+
+The deploy touches four permission planes. The ones that bite are the first two — both fail **mid-apply** (after most resources already exist) if missing, which is why the preflight checks them up front.
+
+| Plane | Requirement | Why |
+|---|---|---|
+| **Azure RBAC** (subscription) | **Owner** — or **Contributor *plus* User Access Administrator** (or *Role Based Access Control Administrator*) | Contributor alone is **not enough**: the apply creates role assignments (`AcrPull` on the registry, `Key Vault Secrets User` for the app, `Key Vault Secrets Officer` for the deployer and jump box, and the SRE agent's roles — one at **subscription** scope), which need `Microsoft.Authorization/roleAssignments/write`. |
+| **Entra ID** (directory) | Ability to create **app registrations + service principals**: either the tenant default *"Users can register applications" = Yes*, or a directory role — **Application Developer** (minimum), Application Administrator, or Cloud Application Administrator | `enable_easy_auth = true` (default) creates the Entra app registration, its service principal, and a client secret. The deployer is added as **owner** of both, which is also what lets it grant the `Admin` app role (`admin_principal_object_id`) and later destroy them. **`enable_easy_auth = false` is *not* a workaround for a usable app** — the app refuses to serve requests when platform authentication is absent (see the root README's security notes); it exists only for infra-only smoke deploys. |
+| **Entra ID** (licensing) | **Entra ID P1+** — only if you assign the `Admin` app role to a **group** | User-based app-role assignment works on any tier; *group*-based assignment is a P1 feature. |
+| **Azure SQL** (data plane) | Be (or be a member of) the configured **SQL Entra admin** when running the one-time grant (`-Task grant-sql` / `-Task grant-sre-sql`) | The grant creates the app's managed identity as a database user — only the Entra SQL admin can. A different person (e.g. a DBA) can run just that task later; nothing else requires it. Not needed for `identity_mode = user_assigned_selfadmin`. |
+| **Key Vault** (data plane) | Nothing extra — the apply grants the deployer **Key Vault Secrets Officer** on the new vault | Needed for `-Task set-pat` and `github_pat_secret_value`. Allow a couple of minutes for RBAC propagation on a freshly created vault. |
+| **SRE Agent** (data plane, optional) | **SRE Agent Administrator** on the agent — auto-granted to the deployer (or to `sre_agent_admin_object_id`) | `-Task sre-sync` writes skills/agents/hooks over the agent's data-plane API (`https://azuresre.dev` audience). Subscription **Owner is not sufficient** — the data plane has its own RBAC. See [docs/SRE_AGENT.md](../docs/SRE_AGENT.md). |
+
+> **Deploying as a CI service principal?** The SQL grant (`CREATE USER ... FROM EXTERNAL PROVIDER`) executed *by a service principal* additionally requires the SQL **server's** identity to hold the Entra **Directory Readers** role — this stack doesn't provision that. The intended flow is a *human* Entra SQL admin running `-Task grant-sql`.
+
+> **Tenant blocks app registrations entirely?** There is currently no bring-your-own-app-registration path (the Easy Auth wiring always references the app registration this stack creates), so the deployment cannot produce a usable, signed-in app in that tenant. Either get the **Application Developer** role granted, or have a platform team with app-registration rights run the deploy.
 
 ## Deploy
 ```bash
