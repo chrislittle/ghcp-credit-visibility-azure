@@ -241,8 +241,17 @@ namespace GhcpCreditVisibility.Data
         /// consciously added here, so storing a scope can never accidentally surface it. Both
         /// entries below are scopes whose actual spend we can genuinely compute today.
         /// </summary>
-        public static readonly IReadOnlySet<string> Displayable =
-            new HashSet<string>(StringComparer.Ordinal) { Org, CostCenter, Organization };
+        /// <remarks>
+        /// ARRAY, not a HashSet/IReadOnlySet — deliberately, and do not "improve" it back.
+        /// This is used inside an EF <c>Where</c>, and EF Core translates
+        /// <c>array.Contains(column)</c> to SQL <c>IN (…)</c> but has NO mapping for
+        /// <c>IReadOnlySet&lt;T&gt;.Contains</c>. A set version threw
+        /// "The LINQ expression … could not be translated" on SQL Server while passing every local
+        /// test, because the in-memory provider evaluates client-side and never exercises
+        /// translation. Membership is checked on a handful of items; the set semantics bought
+        /// nothing and cost a production 500.
+        /// </remarks>
+        public static readonly string[] Displayable = { Org, CostCenter, Organization };
 
         /// <summary>
         /// Scopes that cannot be narrowed by the viewer's access scope and are therefore ADMIN-ONLY.
@@ -250,8 +259,8 @@ namespace GhcpCreditVisibility.Data
         /// which carries no cost centre — there is nothing to filter on, so a cost-centre-scoped
         /// manager would otherwise see spend for organizations they have no grant for.
         /// </summary>
-        public static readonly IReadOnlySet<string> AdminOnly =
-            new HashSet<string>(StringComparer.Ordinal) { Organization };
+        /// <remarks>Array for the same EF-translation reason as <see cref="Displayable"/>.</remarks>
+        public static readonly string[] AdminOnly = { Organization };
     }
 
     /// <summary>Principal kinds an admin can map / designate.</summary>
