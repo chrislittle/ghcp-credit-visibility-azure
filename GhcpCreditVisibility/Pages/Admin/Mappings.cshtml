@@ -28,7 +28,9 @@
 
 <!-- Organization settings -->
 <div class="gh-card">
-    <div class="ch"><h2>Organization</h2><span class="hint">shown in the header &amp; page title</span></div>
+    @* "Organization" here is this APP's display name, not a GitHub organization — the two now appear
+       on adjacent screens (Reports has an Organization breakdown), so the hint says which is which. *@
+    <div class="ch"><h2>Organization</h2><span class="hint">your company name for the header &amp; page title — not a GitHub organization</span></div>
     <div class="gh-cardbody">
         <form method="post" asp-page-handler="SaveSettings" class="row g-2 align-items-end">
             <div class="col-md-6">
@@ -173,6 +175,21 @@
     <div class="ch">
         <h2>Access mappings</h2>
         <span class="hint">principal → one or more cost centers</span>
+    </div>
+    <div class="gh-cardbody" style="border-bottom:1px solid var(--gh-line);">
+        <p class="gh-note mb-0">
+            There are exactly <strong>two levels of access</strong>: an <strong>administrator</strong> (see everything, plus this
+            console) and a <strong>cost-center mapping</strong> below. Cost centers are the <em>only</em> unit that can be
+            delegated — a principal sees usage, budgets and reports for the cost centers mapped to it, and nothing else.
+        </p>
+        <p class="gh-note mb-0" style="margin-top:8px;">
+            ⚠️ <strong>GitHub organization views cannot be delegated.</strong> The Reports
+            <em>Organization</em> breakdown and any <em>organization-scoped budgets</em> are visible to
+            <strong>administrators only</strong>. GitHub's organization usage report carries no cost center, so there is nothing
+            to narrow it by — granting it to a cost-center principal would expose every other team's spend in that
+            enterprise. If a manager reports they cannot see an organization breakdown, that is working as intended;
+            the only way to grant it is to make them an administrator, which grants everything.
+        </p>
     </div>
     <table>
         <thead><tr><th>Type</th><th>Principal</th><th>Object ID</th><th>Cost centers</th><th>Last updated</th><th></th></tr></thead>

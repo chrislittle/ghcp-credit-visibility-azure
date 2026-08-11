@@ -26,6 +26,20 @@ namespace GhcpCreditVisibility.Services
         public int Budgets { get; init; }
         public int MonthsWithData { get; init; }
 
+        // ── Organization attribution + backfill ──
+        /// <summary>Rows in OrgUsageSnapshots (organization / repository attribution).</summary>
+        public int OrgUsageRows { get; init; }
+        /// <summary>Distinct months of organization history held.</summary>
+        public int OrgMonthsWithData { get; init; }
+        /// <summary>Oldest month already backfilled ("YYYY-MM"); null = backfill has not started.</summary>
+        public string? OrgBackfillOldest { get; init; }
+        /// <summary>Oldest month worth holding ("YYYY-MM") — the retention cutoff. Backfill stops
+        /// here because the purge deletes anything older on the same run.</summary>
+        public string? OrgBackfillFloor { get; init; }
+        /// <summary>True once the watermark reaches the floor: backfill is FINISHED and issues no
+        /// further calls. Silence is the healthy steady state here, not a stalled job.</summary>
+        public bool OrgBackfillComplete { get; init; }
+
         /// <summary>Null for mock enterprises (no PAT needed).</summary>
         public bool? TokenResolved { get; init; }
         public int? RateLimitRemaining { get; init; }
@@ -171,6 +185,21 @@ namespace GhcpCreditVisibility.Services
                     .Select(x => new { x.EnterpriseId, x.Year, x.Month }).Distinct().ToListAsync(ct);
                 var monthCounts = monthRows.GroupBy(x => x.EnterpriseId).ToDictionary(g => g.Key, g => g.Count());
 
+                var orgCounts = (await db.OrgUsageSnapshots.GroupBy(x => x.EnterpriseId)
+                    .Select(g => new { g.Key, N = g.Count() }).ToListAsync(ct)).ToDictionary(x => x.Key, x => x.N);
+                var orgMonthRows = await db.OrgUsageSnapshots
+                    .Select(x => new { x.EnterpriseId, x.Year, x.Month }).Distinct().ToListAsync(ct);
+                var orgMonthCounts = orgMonthRows.GroupBy(x => x.EnterpriseId).ToDictionary(g => g.Key, g => g.Count());
+
+                // The floor backfill stops at — the retention cutoff, which the purge KEEPS.
+                // Surfacing it turns "we only have N months of org history" from a suspected bug
+                // into a visible retention setting.
+                var retentionMonths = _config.GetValue("Retention:Months", 6);
+                var dailyMonths = SnapshotService.ResolveDailyRetentionMonths(
+                    retentionMonths, _config.GetValue<int?>("Retention:DailyMonths"));
+                var (floorYear, floorMonth) = SnapshotService.ComputeRetentionCutoff(now, dailyMonths);
+                var floorLabel = $"{floorYear:D4}-{floorMonth:D2}";
+
                 var rateStates = _rateLimits.All;
                 foreach (var e in enterprises)
                 {
@@ -195,6 +224,15 @@ namespace GhcpCreditVisibility.Services
                         CostCenters = ccCounts.GetValueOrDefault(e.Id),
                         Budgets = budgetCounts.GetValueOrDefault(e.Id),
                         MonthsWithData = monthCounts.GetValueOrDefault(e.Id),
+                        OrgUsageRows = orgCounts.GetValueOrDefault(e.Id),
+                        OrgMonthsWithData = orgMonthCounts.GetValueOrDefault(e.Id),
+                        OrgBackfillOldest = e.OrgBackfillOldestYear is int oy && e.OrgBackfillOldestMonth is int om
+                            ? $"{oy:D4}-{om:D2}" : null,
+                        OrgBackfillFloor = floorLabel,
+                        // Complete once the watermark is at or older than the floor. Compared as
+                        // (year, month) tuples so a December-to-January wrap can't invert it.
+                        OrgBackfillComplete = e.OrgBackfillOldestYear is int cy && e.OrgBackfillOldestMonth is int cm
+                            && (cy < floorYear || (cy == floorYear && cm <= floorMonth)),
                         TokenResolved = entTokenResolved,
                         RateLimitRemaining = rateStates.TryGetValue(e.Slug, out var rl) ? rl.Remaining : null,
                     });

@@ -71,6 +71,8 @@ namespace GhcpCreditVisibility.Data
                 e.Property(x => x.Sku).HasMaxLength(64);
                 e.Property(x => x.Model).HasMaxLength(128);
                 e.Property(x => x.UnitType).HasMaxLength(64);
+                // Read-path carrier only (see the property doc) — never a column.
+                e.Ignore(x => x.OrganizationName);
                 e.Property(x => x.NetAmount).HasPrecision(18, 4);
                 e.Property(x => x.GrossAmount).HasPrecision(18, 4);
                 e.Property(x => x.NetQuantity).HasPrecision(18, 4);
@@ -240,7 +242,16 @@ namespace GhcpCreditVisibility.Data
         /// entries below are scopes whose actual spend we can genuinely compute today.
         /// </summary>
         public static readonly IReadOnlySet<string> Displayable =
-            new HashSet<string>(StringComparer.Ordinal) { Org, CostCenter };
+            new HashSet<string>(StringComparer.Ordinal) { Org, CostCenter, Organization };
+
+        /// <summary>
+        /// Scopes that cannot be narrowed by the viewer's access scope and are therefore ADMIN-ONLY.
+        /// <see cref="Organization"/> qualifies because its actuals come from OrgUsageSnapshots,
+        /// which carries no cost centre — there is nothing to filter on, so a cost-centre-scoped
+        /// manager would otherwise see spend for organizations they have no grant for.
+        /// </summary>
+        public static readonly IReadOnlySet<string> AdminOnly =
+            new HashSet<string>(StringComparer.Ordinal) { Organization };
     }
 
     /// <summary>Principal kinds an admin can map / designate.</summary>
@@ -282,6 +293,14 @@ namespace GhcpCreditVisibility.Data
         public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
         public DateTime? LastSnapshotUtc { get; set; }
         public string? ModifiedBy { get; set; }
+
+        // ── Organization-usage backfill watermark ──
+        // The OLDEST month already fetched into OrgUsageSnapshots for this enterprise. The snapshot
+        // job walks backwards a few months per cycle until this reaches the retention floor, then
+        // stops. A WATERMARK rather than "months with no rows" because a month can legitimately
+        // contain zero usage — using row-absence as the signal would re-query those months forever.
+        public int? OrgBackfillOldestYear { get; set; }
+        public int? OrgBackfillOldestMonth { get; set; }
     }
 
     /// <summary>
@@ -401,11 +420,13 @@ namespace GhcpCreditVisibility.Data
         public string Model { get; set; } = "";
 
         /// <summary>
-        /// GitHub's unit of measure for this line item — confirmed live as "ai-credits" for AI
-        /// credit usage, and documented as "requests" for premium-request usage. It is the only
-        /// field that distinguishes the two METERS once both are collected, and quantities from
-        /// different meters must never be added together. Captured ahead of premium-request support
-        /// precisely so that support does not need a second migration.
+        /// GitHub's unit of measure for this line item — confirmed live as "ai-credits".
+        ///
+        /// Quantities are only comparable within a unit type, so this is what stops a future SKU
+        /// measured in something else being silently added to a credit total. GitHub has changed the
+        /// billing unit once already (premium requests gave way to AI credits on 1 June 2026), so
+        /// recording the unit rather than assuming it is cheap insurance: any historical row keeps
+        /// saying what it was actually measured in.
         /// </summary>
         public string? UnitType { get; set; }
 
@@ -439,6 +460,15 @@ namespace GhcpCreditVisibility.Data
         /// <summary>Quantity before discount. Pairs with NetQuantity to show consumption against
         /// any included allowance.</summary>
         public decimal? GrossQuantity { get; set; }
+
+        /// <summary>
+        /// NOT PERSISTED (ignored in the model configuration). A carrier used only by the read path:
+        /// organization-attributed rows live in <see cref="OrgUsageSnapshot"/>, and the reporting
+        /// pipeline projects them onto this type so the existing bucketing, windowing, zero-filling
+        /// and top-N logic applies unchanged rather than being duplicated for a second row shape.
+        /// Always null on rows loaded from the database.
+        /// </summary>
+        public string? OrganizationName { get; set; }
     }
 
     /// <summary>

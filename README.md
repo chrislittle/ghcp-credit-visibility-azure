@@ -34,11 +34,23 @@ Entra-group-based access, deployed privately in **your own** Azure subscription.
 
 ## What this app does
 
-GitHub Copilot's billing model includes a monthly allowance of **premium requests**; usage beyond
-that allowance (or against premium models) is **metered and billed as AI credits**. GitHub exposes
-that spend via billing APIs and CSV exports, but there's no built-in, always-on, **role-scoped**
-dashboard — finance wants a monthly total, a manager wants their team's number, and an executive
-wants a cross-org rollup, and today that means someone manually pulling and slicing a report.
+GitHub Copilot bills usage in **AI credits** — a usage-based unit where **1 credit = $0.01 USD**,
+consumed at each model's token rate. Every plan includes a monthly credit allowance; only
+consumption beyond it is billable. (Code completions and next-edit suggestions aren't billed at all.)
+
+> **Note on "premium requests".** That was the *previous* billing model, superseded by AI credits on
+> **1 June 2026**. It now applies only to individual Copilot Pro / Pro+ subscribers who stayed on an
+> existing annual plan — not to enterprises. This app reads the current AI-credit meter.
+
+GitHub exposes that spend via billing APIs and CSV exports, but there's no built-in, always-on,
+**role-scoped** dashboard — finance wants a monthly total, a manager wants their team's number, and
+an executive wants a cross-org rollup, and today that means someone manually pulling and slicing a
+report.
+
+One consequence worth knowing up front: a team **inside its allowance has a billable total of $0**
+while genuinely consuming credits. This app therefore reports consumption (gross) alongside billable
+spend (net), so "nobody used Copilot" and "everyone did, and the allowance covered it" never look
+the same.
 
 This app closes that gap:
 - A background job snapshots GitHub's billing/usage/budget APIs into your own database on a
@@ -61,26 +73,50 @@ This app closes that gap:
 
 ## Screenshots
 
-| Usage dashboard — two enterprises, enterprise filter | Reports — cost centers across enterprises |
+| Usage dashboard — consumption vs. billable spend | Reports — cost centers across enterprises |
 |---|---|
-| ![Usage dashboard with the enterprise filter and enterprise-qualified cost centers](docs/images/dashboard.png) | ![Reports page breaking spend down by cost center across enterprises, with the enterprise filter](docs/images/reports.png) |
+| ![Usage dashboard: total spend annotated with how much the included allowance covered, a gross-usage KPI, and per-user net and gross columns](docs/images/dashboard.png) | ![Reports page breaking spend down by cost center across enterprises, with the enterprise filter](docs/images/reports.png) |
 
-| Budgets — every budget, grouped by enterprise | Admin console — enterprise registry + access mappings |
+| Budgets — enterprise, cost-center and organization scopes | Reports — spend by GitHub organization |
 |---|---|
-| ![Budgets page with all budgets grouped by enterprise, filterable by status](docs/images/budgets.png) | ![Admin console with the GitHub enterprises registry and mappings](docs/images/admin-mappings.png) |
+| ![Budgets page grouped by enterprise, showing enterprise-wide, cost-center and organization budgets, with hard-stop budgets flagged](docs/images/budgets.png) | ![Reports broken down by GitHub organization, including an Unattributed row for enterprise-level charges that belong to no organization](docs/images/reports-organization.png) |
+
+| Admin console — enterprise registry + access mappings | |
+|---|---|
+| ![Admin console with the GitHub enterprises registry, the two-level access model, and principal-to-cost-center mappings](docs/images/admin-mappings.png) | |
 
 *(Screenshots above were captured from a local run against the built-in synthetic demo data — two
 mock enterprises, **Contoso** and **Fabrikam**, seeded automatically; note the enterprise dropdown,
 the `Engineering · Contoso` vs `Engineering · Fabrikam` disambiguation, the same users appearing
-once per enterprise, and the admin console's enterprise registry. See
-[Demo / mock data](#demo--mock-data). Your real deployment will show your organization's actual
-enterprises, users, cost centers, and spend.)*
+once per enterprise, and the admin console's enterprise registry. Worth spotting: the dashboard's
+`covered by allowance` annotation under Total spend, the `⛔ HARD STOP` badges on budgets that
+**block** usage rather than alerting, and the `Unattributed` row in the organization report —
+enterprise-level charges that belong to no organization, surfaced rather than dropped so the
+breakdown still reconciles. Every screenshot is the **default configuration** — nothing here needs a
+setting changed to appear. See [Demo / mock data](#demo--mock-data). Your real deployment will show
+your organization's actual enterprises, users, cost centers, and spend.)*
 
 ## Features
 
 - **Per-user, per-cost-center, and per-model spend breakdown**, with multi-month trend history
-  and a flexible report builder (break down by user/model/cost center/enterprise; bucket by
-  day/week/month; filter and compare).
+  and a flexible report builder (break down by user/model/cost center/enterprise/**organization**;
+  bucket by day/week/month; filter and compare).
+- **Consumption vs. billable spend** — a team still inside its included allowance is billed **$0
+  while genuinely using Copilot**, and a dashboard that only sums billable spend renders that
+  identically to nobody using it at all. This app reports what was *consumed* alongside what is
+  *billable*, so a zero total says which one it is (*"fully covered by allowance"*) instead of
+  quietly implying a failed rollout. Billable spend stays the headline everywhere — it's the number
+  finance reconciles — and `Dashboard:ShowGrossUsage` optionally adds a gross-consumption KPI and a
+  per-user gross column for teams that want both side by side.
+- **Organization and repository attribution** — GitHub's per-user usage report carries no
+  organization, so this pulls the general usage report as well (one call per enterprise per month)
+  to break spend down by organization and repository, with real per-day dates. Past months
+  backfill themselves automatically, a few per snapshot cycle, as far back as your retention
+  window allows. Admin-only: that report has no cost center, so it cannot be scoped to a team.
+- **Intra-month history** — GitHub's usage API reports a running month-to-date total, so a monthly
+  snapshot knows the total but not how the month got there. A separate daily table records each
+  day's reading, making *"which day did spend jump?"* answerable without disturbing the monthly
+  figures finance reconciles against.
 - **Multiple GitHub enterprises in one deployment** — an in-app enterprise registry (admin
   console) is the single source of truth. Each enterprise has its own PAT (Key Vault secret),
   its own rate-limit budget and circuit breaker, and fully isolated snapshots: one enterprise's
@@ -92,11 +128,13 @@ enterprises, users, cost centers, and spend.)*
   alongside mock demo/fire-drill ones) are first-class.
 - **Budget tracking, exceptions-first at scale** — reads the budgets and thresholds you've
   configured *in GitHub* (this app never creates or edits budgets) and shows current-month
-  utilization. The dashboard surfaces only budgets **needing attention** (over / near limit, worst
-  first) once more than a handful are visible — an exec spanning several enterprises sees the two
-  red ones, not a wall of dozens of green meters — while a dedicated **Budgets** page lists every
-  budget, grouped by enterprise and filterable by status. GitHub still sends the actual alert
-  emails.
+  utilization for **enterprise-wide, cost-center and organization** budgets. Budgets set to
+  **hard-stop** are flagged: those *block* a developer mid-task rather than merely alerting, which
+  reaches a helpdesk as "Copilot is broken" rather than as a billing question. The dashboard
+  surfaces only budgets **needing attention** (over / near limit, worst first) once more than a
+  handful are visible — an exec spanning several enterprises sees the two red ones, not a wall of
+  dozens of green meters — while a dedicated **Budgets** page lists every budget, grouped by
+  enterprise and filterable by status. GitHub still sends the actual alert emails.
 - **Microsoft Entra ID authentication** (Azure App Service Easy Auth) — no anonymous access, ever.
 - **Group- and user-based access scoping, many-to-many** — an in-app Admin console maps Entra
   security groups *and/or* individual users to **one or more** GitHub cost centers each. An

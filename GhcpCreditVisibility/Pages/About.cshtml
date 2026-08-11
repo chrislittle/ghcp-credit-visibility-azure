@@ -18,7 +18,7 @@
         <p>
             <strong>GitHub Copilot Credit Visibility</strong> reports your organization's spend on
             <strong>GitHub Copilot</strong> — the AI pair-programmer in the IDE, on github.com and in the CLI.
-            It shows <strong>AI-credit / premium-request usage</strong> per user, per model and per cost center — across
+            It shows <strong>AI-credit usage</strong> per user, per model and per cost center — across
             <strong>one or more GitHub enterprises</strong> — with month-over-month trends and budget alerts. With several
             enterprises registered, cost centers are always enterprise-qualified (two enterprises can both have an
             "Engineering"), an enterprise filter appears in the header, and the same person licensed in two enterprises
@@ -27,7 +27,7 @@
         <p class="mb-0" style="padding:10px 14px;background:#eef4ff;border:1px solid #dbe6ff;border-radius:10px;">
             ⚠️ <strong>This is GitHub Copilot — not Microsoft 365 Copilot.</strong> The two are separate products with separate billing.
             All figures here come from GitHub's billing platform (the 🐙 octocat mark in the header denotes GitHub), and reflect
-            Copilot <em>premium request</em> / metered usage — not Microsoft 365 Copilot seats or Azure spend.
+            Copilot <em>AI-credit</em> usage — not Microsoft 365 Copilot seats or Azure spend.
         </p>
     </div>
 </div>
@@ -88,11 +88,30 @@
     <div class="ch"><h2>Understanding the data — in GitHub's terms</h2><span class="hint">links open official GitHub Docs</span></div>
     <div class="gh-cardbody">
         <dl style="margin:0;display:grid;grid-template-columns:auto 1fr;gap:10px 18px;">
-            <dt><strong>Premium requests / AI credits</strong></dt>
+            <dt><strong>AI credits</strong></dt>
             <dd style="margin:0">
-                Copilot includes a monthly allowance of <em>premium requests</em>; usage beyond the allowance (or with premium models)
-                is metered and billed. That metered spend is what this app reports.
-                <a href="https://docs.github.com/en/copilot/concepts/billing/copilot-requests" target="_blank" rel="noopener">Requests in GitHub Copilot ↗</a>
+                Copilot usage is measured in <em>AI credits</em> — <strong>1 credit = $0.01 USD</strong>, consumed at each
+                model's token rate (input, output and cached tokens). Every plan includes a monthly credit allowance;
+                only consumption beyond it is billable. Code completions and next-edit suggestions aren't billed.
+                <a href="https://docs.github.com/en/billing/concepts/product-billing/github-copilot-billing" target="_blank" rel="noopener">GitHub Copilot billing ↗</a>
+            </dd>
+
+            <dt><strong>Gross vs. net</strong></dt>
+            <dd style="margin:0">
+                <em>Gross</em> is what was consumed; <em>net</em> is what's billable once the included allowance is applied.
+                A team still inside its allowance shows a net of <strong>$0 while genuinely using Copilot</strong> — which is why
+                this app shows consumption alongside billable spend. A $0 total labelled
+                <em>"fully covered by allowance"</em> means healthy usage that happens to cost nothing; it does
+                <strong>not</strong> mean nobody used Copilot.
+            </dd>
+
+            <dt><strong>Premium requests <span class="hint">(legacy)</span></strong></dt>
+            <dd style="margin:0">
+                The <em>previous</em> billing model, replaced by AI credits on <strong>1 June 2026</strong>. It now applies only to
+                individual Copilot Pro / Pro+ subscribers who remained on an existing annual plan — not to enterprises.
+                If you're comparing against figures from before that date, they're in a different unit and aren't
+                directly comparable.
+                <a href="https://docs.github.com/en/copilot/reference/copilot-billing/request-based-billing-legacy/copilot-requests" target="_blank" rel="noopener">Premium requests (legacy) ↗</a>
             </dd>
 
             <dt><strong>Per-user usage</strong></dt>

@@ -286,8 +286,15 @@ namespace GhcpCreditVisibility.Services
                 Id = $"{enterprise}-budget-org",
                 BudgetProductSku = "ai_credits",
                 BudgetScope = "organization",
-                BudgetEntityName = $"{enterprise}-org",
+                // MUST match an organizationName emitted by GetOrgUsageAsync — the live API joins
+                // these exactly (verified), so demo data that named a different organization would
+                // render a budget stuck at 0% and hide any real breakage in the join.
+                BudgetEntityName = $"{enterprise}-platform",
                 BudgetAmount = 300m,
+                // Mirrors the live enterprise, whose organization budget is a HARD STOP. Without it
+                // no DISPLAYED budget carries the flag (the user budget that does is not rendered),
+                // so the hard-stop badge would never appear in demo and could rot unnoticed.
+                PreventFurtherUsage = true,
             });
             budgets.Add(new Budget
             {

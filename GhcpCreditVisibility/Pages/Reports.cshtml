@@ -80,7 +80,7 @@
 <div class="gh-pagehead">
     <div>
         <h1>Reports</h1>
-        <div class="sub">GitHub Copilot AI-credit reporting — break spend down by cost center, user or model, by day, week or month</div>
+        <div class="sub">GitHub Copilot AI-credit reporting — break spend down by cost center, user, model@(Model.ShowOrganizationDim ? ", organization" : "") or enterprise, by day, week or month</div>
     </div>
     <div class="gh-headtools">
         <span class="gh-scope" title="@Model.ScopeDetail"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
@@ -98,6 +98,10 @@
                     <option value="costcenter" selected="@(Model.Dim == "costcenter")">Cost center</option>
                     <option value="user" selected="@(Model.Dim == "user")">User</option>
                     <option value="model" selected="@(Model.Dim == "model")">Model</option>
+                    @if (Model.ShowOrganizationDim)
+                    {
+                        <option value="organization" selected="@(Model.Dim == "organization")">Organization</option>
+                    }
                     @if (Model.MultiEnterprise)
                     {
                         <option value="enterprise" selected="@(Model.Dim == "enterprise")">Enterprise</option>

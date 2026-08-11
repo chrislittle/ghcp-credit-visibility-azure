@@ -54,16 +54,28 @@ namespace GhcpCreditVisibility.Pages
             _ => MonthRanges
         };
 
-        public string DimLabel => Dim switch { "user" => "user", "model" => "model", "costcenter" => "cost center", "enterprise" => "enterprise", _ => "total" };
+        public string DimLabel => Dim switch { "user" => "user", "model" => "model", "costcenter" => "cost center", "enterprise" => "enterprise", "organization" => "organization", _ => "total" };
+
+        /// <summary>
+        /// Whether the ORGANIZATION breakdown may be offered. Admin-only: the underlying table
+        /// carries no cost centre, so the access scope cannot narrow it below the enterprise —
+        /// offering it to a cost-centre-scoped manager would expose every other team's spend.
+        /// Enforced in <c>OnGetAsync</c> too, so a hand-edited URL cannot bypass the hidden option.
+        /// </summary>
+        public bool ShowOrganizationDim { get; private set; }
+
+        /// <summary>Org rows come from a different source with no user/model/cost-centre columns, so
+        /// none of the usual filters can compose with this dimension.</summary>
+        public bool IsOrganization => Dim == "organization";
         public string GranLabel => Gran switch { "day" => "day", "week" => "week", _ => "month" };
         public bool IsTotal => Dim == "total";
 
         // Contextual filters: only offer filters that can't collapse the breakdown to a trivial 100%.
         // (A user maps to exactly one cost center, so a user filter collapses a cost-center breakdown;
         // an enterprise filter collapses an enterprise breakdown the same way.)
-        public bool ShowUserFilter => Dim is "model" or "total" or "enterprise";
-        public bool ShowModelFilter => Dim is "costcenter" or "user" or "total" or "enterprise";
-        public bool ShowCostCenterFilter => Dim is "user" or "model" or "total";
+        public bool ShowUserFilter => !IsOrganization && Dim is "model" or "total" or "enterprise";
+        public bool ShowModelFilter => !IsOrganization && Dim is "costcenter" or "user" or "total" or "enterprise";
+        public bool ShowCostCenterFilter => !IsOrganization && Dim is "user" or "model" or "total";
         public bool ShowEnterpriseFilter => Dim is not "enterprise" && MultiEnterprise;
 
         public string PeriodLabel
@@ -97,7 +109,15 @@ namespace GhcpCreditVisibility.Pages
             Options = await _query.GetFilterOptionsAsync(scope, ct);
 
             if (View != "table") View = "chart";
-            if (Dim is not ("total" or "user" or "model" or "costcenter" or "enterprise")) Dim = "costcenter";
+
+            // Organization is admin-only (see ShowOrganizationDim). Validating here — not just
+            // hiding the dropdown option — is what actually enforces it: a hidden <option> stops
+            // nobody from requesting ?Dim=organization by hand.
+            ShowOrganizationDim = scope.SeesAll;
+            if (string.Equals(Dim, "organization", StringComparison.OrdinalIgnoreCase) && !ShowOrganizationDim)
+                Dim = "costcenter";
+
+            if (Dim is not ("total" or "user" or "model" or "costcenter" or "enterprise" or "organization")) Dim = "costcenter";
             if (Gran is not ("day" or "week" or "month")) Gran = "month";
             // Snap the range to a valid option for the chosen granularity (avoids e.g. "12 days" after switching from months).
             if (!RangeOptions.Any(o => o.Value == Range))
@@ -114,6 +134,7 @@ namespace GhcpCreditVisibility.Pages
                 "model" => SeriesDimension.Model,
                 "costcenter" => SeriesDimension.CostCenter,
                 "enterprise" => SeriesDimension.Enterprise,
+                "organization" => SeriesDimension.Organization,
                 _ => SeriesDimension.Total
             };
             var granularity = Gran switch { "day" => TimeGranularity.Day, "week" => TimeGranularity.Week, _ => TimeGranularity.Month };

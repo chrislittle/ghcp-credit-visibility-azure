@@ -85,6 +85,51 @@ namespace GhcpCreditVisibility.Services
         public static int ResolveDailyRetentionMonths(int monthlyRetention, int? dailyRetentionOverride) =>
             Math.Max(MinRetentionMonths, dailyRetentionOverride ?? monthlyRetention);
 
+        /// <summary>Months of organization history fetched per snapshot cycle. Kept small so a new
+        /// enterprise catches up over a few runs instead of firing a burst of calls on its first.</summary>
+        public const int OrgBackfillMonthsPerRun = 3;
+
+        /// <summary>
+        /// GitHub's hard limit: "Time period cannot be more than 2 years in the past." Requesting
+        /// beyond it returns HTTP 400, so the plan never does.
+        /// </summary>
+        public const int GitHubHistoryMonths = 24;
+
+        /// <summary>
+        /// Which past months to fetch organization usage for on this cycle.
+        ///
+        /// Walks BACKWARDS from the month before <paramref name="nowUtc"/>, resuming from
+        /// <paramref name="oldestDone"/> (the watermark) and stopping at the retention floor —
+        /// because anything older is deleted by the purge on this very same run, so fetching it
+        /// would be pure waste repeated every cycle. That coupling is the reason retention and
+        /// backfill depth cannot be reasoned about separately: to hold two years of organization
+        /// history you must first RAISE retention; widening the backfill alone achieves nothing.
+        ///
+        /// Returns an empty list once the watermark reaches the floor, and never returns the
+        /// current month (the normal snapshot path owns that one).
+        /// </summary>
+        public static IReadOnlyList<(int Year, int Month)> PlanOrgBackfill(
+            DateTime nowUtc, int retentionMonths, (int Year, int Month)? oldestDone, int maxMonths = OrgBackfillMonthsPerRun)
+        {
+            var current = new DateTime(nowUtc.Year, nowUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+
+            // Oldest month worth holding: the retention floor, never beyond GitHub's 24-month window.
+            var floor = current.AddMonths(-Math.Min(Math.Max(MinRetentionMonths, retentionMonths), GitHubHistoryMonths));
+
+            // Resume one month older than the watermark; with none, start at last month.
+            var next = oldestDone is { } w
+                ? new DateTime(w.Year, w.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-1)
+                : current.AddMonths(-1);
+
+            var plan = new List<(int, int)>();
+            while (plan.Count < maxMonths && next >= floor)
+            {
+                plan.Add((next.Year, next.Month));
+                next = next.AddMonths(-1);
+            }
+            return plan;
+        }
+
         /// <summary>
         /// One full cycle: bootstrap the registry (idempotent), then snapshot each enabled
         /// enterprise in turn. Per-enterprise failures are recorded and swallowed (isolation);
@@ -260,12 +305,60 @@ namespace GhcpCreditVisibility.Services
                         });
                     }
                     await db.SaveChangesAsync(ct);
+
+                    // ── Backfill past months, a few per cycle ──
+                    // Same endpoint, just older periods — one call covers a whole month, so two
+                    // years costs ~24 calls rather than the per-user fan-out that makes user-level
+                    // backfill impractical. Bounded by the retention floor (see PlanOrgBackfill).
+                    var backfillRetention = ResolveDailyRetentionMonths(
+                        retentionMonths, _config.GetValue<int?>("Retention:DailyMonths"));
+                    var watermark = enterprise.OrgBackfillOldestYear is int wy && enterprise.OrgBackfillOldestMonth is int wm
+                        ? (wy, wm)
+                        : ((int, int)?)null;
+
+                    foreach (var (by, bm) in PlanOrgBackfill(now, backfillRetention, watermark))
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        var past = await client.GetOrgUsageAsync(enterprise.Slug, by, bm, ct);
+
+                        // Replace that month wholesale, exactly as the current-month path does, so a
+                        // re-run overwrites rather than duplicating.
+                        var existingMonth = db.OrgUsageSnapshots
+                            .Where(x => x.EnterpriseId == enterprise.Id && x.Year == by && x.Month == bm);
+                        if (db.Database.IsRelational()) await existingMonth.ExecuteDeleteAsync(ct);
+                        else { db.OrgUsageSnapshots.RemoveRange(await existingMonth.ToListAsync(ct)); await db.SaveChangesAsync(ct); }
+
+                        foreach (var oi in past)
+                        {
+                            var pd = oi.Date ?? new DateTime(by, bm, 1, 0, 0, 0, DateTimeKind.Utc);
+                            db.OrgUsageSnapshots.Add(new OrgUsageSnapshot
+                            {
+                                EnterpriseId = enterprise.Id,
+                                SnapshotUtc = now,
+                                Year = pd.Year, Month = pd.Month, Day = pd.Day,
+                                OrganizationName = oi.OrganizationName, RepositoryName = oi.RepositoryName,
+                                Product = oi.Product ?? "", Sku = oi.Sku ?? "", UnitType = oi.UnitType,
+                                Quantity = oi.Quantity, PricePerUnit = oi.PricePerUnit,
+                                GrossAmount = oi.GrossAmount, DiscountAmount = oi.DiscountAmount, NetAmount = oi.NetAmount,
+                            });
+                        }
+                        await db.SaveChangesAsync(ct);
+
+                        // Advance the watermark whether or not the month held data — a genuinely
+                        // empty month must not be re-fetched on every future cycle.
+                        await _registry.SetOrgBackfillWatermarkAsync(enterprise.Id, by, bm, ct);
+                        enterprise.OrgBackfillOldestYear = by;
+                        enterprise.OrgBackfillOldestMonth = bm;
+                        _logger.LogInformation("Backfilled organization usage for '{Slug}' {Year}-{Month:00}: {Count} items.",
+                            enterprise.Slug, by, bm, past.Count);
+                    }
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     // Non-fatal by design: org attribution is supplementary. An enterprise not yet on
                     // the endpoint (404) or a PAT lacking scope must not fail a run whose per-user
-                    // numbers — the app's primary output — are already written.
+                    // numbers — the app's primary output — are already written. A backfill month that
+                    // fails simply leaves the watermark where it was and is retried next cycle.
                     _logger.LogWarning(ex, "Organization usage unavailable for '{Slug}'; per-user data is unaffected.", enterprise.Slug);
                 }
 

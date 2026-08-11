@@ -86,9 +86,9 @@ public class SreDiagnosticsCollectorTests
         await using (var db = await factory.CreateDbContextAsync())
         {
             // Three usage rows spanning two distinct months.
-            db.UsageSnapshots.Add(new UsageSnapshot { Year = 2026, Month = 6, Day = 1, UserLogin = "a", Product = "copilot", Sku = "premium_request", Model = "gpt-5" });
-            db.UsageSnapshots.Add(new UsageSnapshot { Year = 2026, Month = 7, Day = 1, UserLogin = "a", Product = "copilot", Sku = "premium_request", Model = "gpt-5" });
-            db.UsageSnapshots.Add(new UsageSnapshot { Year = 2026, Month = 7, Day = 1, UserLogin = "b", Product = "copilot", Sku = "premium_request", Model = "gpt-5" });
+            db.UsageSnapshots.Add(new UsageSnapshot { Year = 2026, Month = 6, Day = 1, UserLogin = "a", Product = "copilot", Sku = "Copilot AI Credits", Model = "gpt-5" });
+            db.UsageSnapshots.Add(new UsageSnapshot { Year = 2026, Month = 7, Day = 1, UserLogin = "a", Product = "copilot", Sku = "Copilot AI Credits", Model = "gpt-5" });
+            db.UsageSnapshots.Add(new UsageSnapshot { Year = 2026, Month = 7, Day = 1, UserLogin = "b", Product = "copilot", Sku = "Copilot AI Credits", Model = "gpt-5" });
             db.CostCenterDirectory.Add(new CostCenterDirectoryEntry { CostCenterId = "cc-1", CurrentName = "Alpha" });
             db.CostCenterDirectory.Add(new CostCenterDirectoryEntry { CostCenterId = "cc-2", CurrentName = "Beta" });
             db.BudgetSnapshots.Add(new BudgetSnapshot { Scope = BudgetScopes.Org, CostCenterId = "", Amount = 100 });

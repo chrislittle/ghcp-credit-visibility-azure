@@ -39,15 +39,31 @@ for the OPERATOR to run:
 
 A healthy month tracks close to the previous FOR THE SAME ENTERPRISE. A swing beyond ±40% in one
 enterprise means a partial run or a source change there, not real usage moving that much — and it
-will NOT show in the global total if the other enterprises are stable:
+will NOT show in the global total if the other enterprises are stable.
+
+> ### ⚠️ JUDGE THE SWING ON **GROSS**, NOT NET
+> `NetAmount` is what is BILLABLE after the included allowance is applied. A month in which everyone
+> stays inside their allowance has **net = $0 with real consumption** — confirmed against the live
+> API. Measured on net that is a −100% swing, and this check would raise a data-integrity incident
+> for an enterprise working perfectly.
+>
+> `GrossAmount` tracks actual consumption regardless of who paid, so compare that. A drop in GROSS
+> is a genuine signal (missed users, partial run, source change). A drop in NET with gross steady is
+> **the allowance absorbing more of the usage — healthy, and not a finding.**
 
 ```sql
 SELECT e.Slug, u.Year, u.Month, COUNT(*) AS rows,
-       COUNT(DISTINCT u.UserLogin) AS users, SUM(u.NetAmount) AS net
+       COUNT(DISTINCT u.UserLogin) AS users,
+       SUM(u.GrossAmount) AS gross,     -- consumption: judge swings on THIS
+       SUM(u.NetAmount)   AS net,       -- billable after allowance
+       SUM(u.GrossAmount) - SUM(u.NetAmount) AS covered_by_allowance
 FROM UsageSnapshots u JOIN Enterprises e ON e.Id = u.EnterpriseId
 GROUP BY e.Slug, u.Year, u.Month
 ORDER BY e.Slug, u.Year DESC, u.Month DESC;
 ```
+
+A row with `gross > 0` and `net = 0` means **fully covered by the included allowance**. Report it as
+healthy usage that happens to cost nothing — never as "no usage" and never as missing data.
 
 ## Check 2 — Gap in the trend series (RECOVERABLE within 24 months; judge per enterprise)
 
@@ -154,10 +170,29 @@ How to read it:
 |---|---|---|
 | `Org` | Enterprise-wide budget. **At most ONE per enterprise** — more than one is a real defect | yes |
 | `CostCenter` | One per cost center that has a budget in GitHub | yes |
-| `User` | Personal spending limits. Any number, including hundreds | **no** — stored only |
-| `Organization` | One per org with a budget | **no** — actuals aren't computable until usage carries an Organization dimension |
-| `MultiUserCustomer` | Rare | **no** |
+| `User` | Personal spending limits. Any number, including hundreds | **no** — stored only; computable, but the access policy for personal limits is undecided |
+| `Organization` | One per org with a budget | **yes — ADMINS ONLY** (see below) |
+| `MultiUserCustomer` | Rare | **no** — semantics unestablished |
 | `Unknown` | **A real signal — investigate** | **no** |
+
+**Organization budgets are shown to administrators only.** Their actuals come from
+`OrgUsageSnapshots` (Check 6), which carries no cost center — so the viewer's access scope cannot
+narrow them, and showing one to a cost-center-scoped manager would expose another team's spend.
+Utilization is a join on organization NAME: the budget's `budget_entity_name` against usage's
+`organizationName`, verified against the live API as an EXACT match (unlike cost-center budgets,
+which need name-to-id resolution). **A budget stuck at 0% with usage clearly present means that join
+broke** — check the two values agree:
+
+```sql
+SELECT b.EntityName AS budget_names_this_org,
+       (SELECT COUNT(*) FROM OrgUsageSnapshots o
+         WHERE o.EnterpriseId = b.EnterpriseId AND o.OrganizationName = b.EntityName) AS matching_usage_rows
+FROM BudgetSnapshots b
+WHERE b.Scope = 'Organization';
+```
+
+Zero `matching_usage_rows` while that organization does appear in `OrgUsageSnapshots` under a
+slightly different name is the failure mode to look for — report it, do not "fix" the data.
 
 **`Unknown` means GitHub introduced a budget scope this app does not map.** It is stored rather than
 guessed so it can never masquerade as the enterprise budget, but it should be reported: the mapping
@@ -243,6 +278,61 @@ a CLOSED month is a real finding.
 - Roughly 30x the row count of `UsageSnapshots` — that is the table working as designed. See
   `ghcp-sql-deep-dive` for the storage implications.
 
+## Check 6 — Organization attribution (`OrgUsageSnapshots`)
+
+A third usage table, filled from GitHub's GENERAL usage report — one call covers a whole month and
+returns `organizationName`, `repositoryName` and a per-item date. It exists because the per-user
+AI-credit report carries NO organization: its top-level `organization` field merely echoes a filter
+you passed, so org attribution can never come from the per-user loop.
+
+Differences from the other two usage tables, all of which change how you query it:
+
+| | grain | summable? |
+|---|---|---|
+| `UsageSnapshots` | one row per user/model/sku per MONTH | yes |
+| `DailyUsageSnapshots` | cumulative month-to-date per DAY | **NO — cumulative** |
+| `OrgUsageSnapshots` | one row per org/repo/sku per DAY | **yes — true per-day** |
+
+```sql
+-- Coverage and attribution rate per enterprise per month.
+SELECT e.Slug, o.Year, o.Month,
+       COUNT(*) AS rows,
+       SUM(CASE WHEN o.OrganizationName IS NULL THEN 1 ELSE 0 END) AS unattributed_rows,
+       COUNT(DISTINCT o.OrganizationName) AS orgs,
+       SUM(o.NetAmount) AS net
+FROM OrgUsageSnapshots o JOIN Enterprises e ON e.Id = o.EnterpriseId
+GROUP BY e.Slug, o.Year, o.Month
+ORDER BY e.Slug, o.Year DESC, o.Month DESC;
+```
+
+**`OrganizationName IS NULL` is NORMAL, not an orphan.** Those are enterprise-level charges
+belonging to no organization — a live sample had 15 of 37 line items. They are deliberately kept
+(the UI shows them as "Unattributed") so totals still reconcile. Do not flag them, and do not
+suggest deleting or "fixing" them.
+
+**Backfill.** Past months fill in automatically, a few per cycle, walking backwards from last month
+to the retention floor. Progress is a WATERMARK on the enterprise registry row
+(`OrgBackfillOldestYear` / `OrgBackfillOldestMonth`) — not row-absence, because a legitimately empty
+month would otherwise be re-fetched forever.
+
+```sql
+SELECT Slug, OrgBackfillOldestYear, OrgBackfillOldestMonth FROM Enterprises;
+```
+
+A watermark that has reached the retention floor means backfill is DONE — no further calls, and
+that is the healthy steady state, not a stalled job. **Backfill never goes deeper than retention**,
+because the purge would delete those rows on the same run. So "we only have six months of org
+history" is a retention setting, not a bug: raise `Retention__DailyMonths` (up to GitHub's 24-month
+limit) if more is wanted, and the backfill then extends on subsequent cycles.
+
+**Visibility is ADMIN-ONLY.** This table carries no cost centre and no user, so the access scope
+cannot narrow it below the enterprise; showing it to a cost-centre-scoped manager would expose every
+other team's spend. TWO surfaces depend on it and are both admin-gated: the Reports "Organization"
+dimension, and **organization-scoped budgets** (Check 4), whose utilization is computed from this
+table. Both are hidden in the UI *and* blocked server-side, so a hand-edited URL does not bypass
+them. A manager reporting they cannot see either is CORRECT BEHAVIOUR, not a bug — and the only way
+to grant it is to make them an administrator, which grants everything.
+
 ## Month-rollover risk window
 On the 1st of the month, the new month's snapshot starts fresh (`Day = 1`) — for EVERY enterprise.
 Verify a run happened after 00:00 UTC on the 1st and wrote the new month for EACH enabled
@@ -257,8 +347,18 @@ enterprise and looks like an outage but is a timing issue.
   enterprise-qualified by (EnterpriseId, CostCenterId), never merged by name.
 - Many `User`-scope budget rows for one enterprise — personal spending limits, stored but not
   displayed. Not duplication.
-- `Organization` / `MultiUserCustomer` budgets showing no utilization in the app — those scopes are
-  stored but intentionally not rendered, because their actual spend is not computable yet.
+- `MultiUserCustomer` budgets not appearing in the app — stored, intentionally not rendered
+  (semantics unestablished). Same for `User` budgets, whose access policy is undecided.
+- `Organization` budgets invisible to a non-admin — deliberate; they are admin-only. A **0%**
+  organization budget while that org shows usage is NOT benign, though: see Check 4, the name join.
 - `DailyUsageSnapshots` holding ~30x the rows of `UsageSnapshots`, and a cumulative value that drops
   day over day (a GitHub restatement).
 - NULL `DiscountAmount` / `PricePerUnit` on older `UsageSnapshots` rows — "not captured", not a fault.
+- **`net = 0` with `gross > 0`** — the included allowance covered all usage. Healthy consumption that
+  happens to cost nothing. Judge month-over-month swings on GROSS (see Check 1).
+- `OrganizationName IS NULL` in `OrgUsageSnapshots` — enterprise-level charges with no owning org,
+  kept on purpose so totals reconcile.
+- An org backfill watermark sitting at the retention floor and making no further calls — finished,
+  not stalled.
+- A non-admin unable to see the Reports "Organization" dimension — deliberate; that table cannot be
+  scoped below the enterprise.

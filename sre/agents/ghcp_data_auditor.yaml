@@ -17,6 +17,33 @@ spec:
     with null cost centers, a shrinking cost-center directory or budget count, and month-rollover
     verification on the 1st for EACH enabled enterprise.
 
+    JUDGE VOLUME SWINGS ON GrossAmount, NOT NetAmount. Net is what is BILLABLE after the included
+    allowance; a month where everyone stays inside their allowance has net = $0 with real
+    consumption (confirmed against the live API). On net that reads as a -100% swing and would
+    raise an incident for a perfectly healthy enterprise. Gross tracks consumption regardless of who
+    paid. A drop in GROSS is a real signal; a drop in NET with gross steady is the allowance
+    absorbing more usage — healthy, NOT a finding. Never describe gross > 0 with net = 0 as "no
+    usage" or as missing data.
+
+    ORG USAGE: OrgUsageSnapshots holds organization/repository attribution, one row per org/repo/sku
+    per DAY, and its values ARE true per-day and summable (unlike DailyUsageSnapshots). Rows with
+    OrganizationName NULL are enterprise-level charges belonging to no org (a live sample had 15 of
+    37) and are kept deliberately so totals reconcile — do NOT flag them as orphans. Past months
+    backfill automatically a few per cycle, tracked by a watermark on the Enterprises row
+    (OrgBackfillOldestYear/Month); a watermark resting at the retention floor means backfill is
+    FINISHED, not stalled, and backfill never goes deeper than retention because the purge would
+    delete those rows anyway. This table is ADMIN-ONLY in the UI — it carries no cost centre, so it
+    cannot be scoped below the enterprise. TWO surfaces depend on it and are both admin-gated: the
+    Reports Organization breakdown AND organization-scoped budgets, whose utilization is computed
+    from this table. A manager unable to see either is correct behaviour, not a bug.
+
+    ORGANIZATION BUDGETS: displayed (to admins) and joined to usage on organization NAME —
+    BudgetSnapshots.EntityName against OrgUsageSnapshots.OrganizationName, an EXACT match on the
+    live API, unlike cost-centre budgets which need name-to-id resolution. An organization budget
+    reading 0% while that organization clearly has usage means THE JOIN BROKE (the two names
+    disagree) — report it with both values; do not edit the data to make them match. User and
+    multi_user_customer budgets remain stored-but-not-displayed, so their absence is expected.
+
     BUDGETS: GitHub returns several scopes (cost_center, enterprise, organization,
     multi_user_customer, user) and each is now stored distinctly, keyed by GitHub's own budget id.
     Expect AT MOST ONE Org-scope (enterprise-wide) row per enterprise — more than one IS a defect —

@@ -146,20 +146,40 @@ namespace GhcpCreditVisibility.Tests
         }
 
         /// <summary>
-        /// The display allowlist is the guarantee that storing a scope never surfaces it. User
-        /// budgets are personal data with no decided access policy; organization budgets have no
-        /// computable actuals until UsageSnapshot carries an Organization dimension.
+        /// The display allowlist is the guarantee that storing a scope never surfaces it.
+        ///
+        /// ORGANIZATION was added once OrgUsageSnapshots made per-organization actuals computable —
+        /// a deliberate widening, which is exactly what the allowlist is for. USER stays out because
+        /// the access policy for personal spending limits is undecided (not because it is
+        /// incomputable), and MULTI_USER_CUSTOMER because its semantics are unestablished.
         /// </summary>
         [Fact]
         public void Only_scopes_with_computable_actuals_are_displayable()
         {
             Assert.Contains(BudgetScopes.Org, BudgetScopes.Displayable);
             Assert.Contains(BudgetScopes.CostCenter, BudgetScopes.Displayable);
+            Assert.Contains(BudgetScopes.Organization, BudgetScopes.Displayable);
 
             Assert.DoesNotContain(BudgetScopes.User, BudgetScopes.Displayable);
-            Assert.DoesNotContain(BudgetScopes.Organization, BudgetScopes.Displayable);
             Assert.DoesNotContain(BudgetScopes.MultiUserCustomer, BudgetScopes.Displayable);
             Assert.DoesNotContain(BudgetScopes.Unknown, BudgetScopes.Displayable);
+        }
+
+        /// <summary>
+        /// A displayed scope that cannot be narrowed by the viewer's access scope MUST be admin-only.
+        /// Organization actuals come from a table with no cost-centre column, so there is nothing to
+        /// filter on — displaying it to a manager would expose organizations they have no grant for.
+        /// </summary>
+        [Fact]
+        public void Scopes_that_cannot_be_scope_filtered_are_admin_only()
+        {
+            Assert.Contains(BudgetScopes.Organization, BudgetScopes.AdminOnly);
+
+            // Everything admin-only must actually be displayable, or the flag is meaningless.
+            Assert.All(BudgetScopes.AdminOnly, s => Assert.Contains(s, BudgetScopes.Displayable));
+
+            // Cost-centre budgets ARE scope-filterable, so they must not be admin-gated.
+            Assert.DoesNotContain(BudgetScopes.CostCenter, BudgetScopes.AdminOnly);
         }
 
         /// <summary>"MultiUserCustomer" is 17 chars — the Scope column was nvarchar(16).</summary>

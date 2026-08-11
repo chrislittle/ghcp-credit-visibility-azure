@@ -87,6 +87,16 @@ namespace GhcpCreditVisibility.Pages
         /// user is still fully within their included allowance (TotalSpend == 0).</summary>
         public decimal TotalGrossSpend { get; private set; }
         public bool ShowGrossUsage { get; private set; }
+
+        /// <summary>
+        /// Consumed-vs-billable for the selected month. Deliberately NOT gated on
+        /// <see cref="ShowGrossUsage"/>: that flag governs whether an EXTRA gross KPI is rendered,
+        /// a presentation preference. This is a correctness concern — a "$0.00" total with no
+        /// explanation reads as "nobody used Copilot" when the truth may be "everyone did, and the
+        /// allowance covered it". The headline stays net either way.
+        /// </summary>
+        public UsageQueryService.AllowanceCoverage Coverage =>
+            new(TotalSpend, TotalGrossSpend);
         public int UserCount { get; private set; }
         public int CostCenterCount { get; private set; }
         public decimal AvgPerUser { get; private set; }

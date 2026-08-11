@@ -54,7 +54,12 @@ and `Measurements` (not `customDimensions`/`customMeasurements`); time → `Time
   rows, so the database grows about twice as fast as this number suggests. Its value as a signal is
   unchanged: **0 on a success still means silent failure** (bad slug, PAT scope), and comparing it
   against the same enterprise's own history is still the right read.
-- `rowsPurged` is the **combined** total of monthly and daily rows purged. Daily rows are ~30x more
+- A run also fetches **organization usage** (one call per enterprise per month) and backfills a few
+  PAST months per cycle. Neither is counted in `rowsWritten`. Both are wrapped in a catch: an
+  enterprise not yet on that endpoint, or a PAT lacking scope, logs a warning and the run still
+  reports **succeeded** — per-user data, the app's primary output, is already written by then. Look
+  for `Organization usage unavailable for '<slug>'` and `Backfilled organization usage for ...`.
+- `rowsPurged` is the **combined** total of monthly, daily and organization rows purged. Daily rows are ~30x more
   numerous, so once daily history starts ageing past its retention window this number jumps sharply
   and stays high. **That is expected, not a runaway purge.** The two windows are separate:
   `Retention__Months` and `Retention__DailyMonths` (which defaults to the monthly value, floor 3).

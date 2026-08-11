@@ -99,14 +99,33 @@
         <div class="ic">💳</div>
         <div class="label">Total spend</div>
         <div class="val">$@Model.TotalSpend.ToString("N2")</div>
-        @if (Model.DeltaPct is double d)
+        @* A $0 total means one of two very different things. Saying which is not optional:
+           "nobody used Copilot" and "everyone did, and the allowance covered it" would otherwise
+           look identical, and the first invites someone to conclude the rollout failed. *@
+        @if (Model.Coverage.IsFullyCovered)
+        {
+            <div class="delta" title="Real consumption occurred this month, but the included allowance absorbed all of it, so nothing is billable. This is NOT an absence of usage.">
+                ✓ $@Model.Coverage.Covered.ToString("N2") of usage — fully covered by allowance
+            </div>
+        }
+        else if (Model.DeltaPct is double d)
         {
             var up = d >= 0;
             <div class="delta @(up ? "up" : "down")">@(up ? "▲" : "▼") @Math.Abs(d).ToString("N1")% vs @Model.PrevMonthLabel</div>
         }
+        else if (Model.Coverage.IsGenuinelyIdle)
+        {
+            <div class="delta">No usage recorded</div>
+        }
         else
         {
             <div class="delta">No prior month</div>
+        }
+        @if (Model.Coverage.IsPartiallyCovered)
+        {
+            <div class="delta" title="Portion of this month's consumption absorbed by the included allowance before billing.">
+                $@Model.Coverage.Covered.ToString("N2") (@Model.Coverage.CoveredPct.ToString("N0")%) covered by allowance
+            </div>
         }
     </div>
     <div class="gh-kpi b2">
@@ -212,7 +231,18 @@
                                     }
                                 }
                             </td>
-                            <td class="num">@u.NetAmount.ToString("N2")</td>
+                            @{ var uc = new UsageQueryService.AllowanceCoverage(u.NetAmount, u.GrossAmount); }
+                            <td class="num">
+                                @u.NetAmount.ToString("N2")
+                                @* Same reasoning as the headline KPI: a user at 0.00 who actually
+                                   consumed is NOT an idle user, and the two must not look alike.
+                                   Not gated on ShowGrossUsage — that flag governs the extra gross
+                                   COLUMN, a display preference; this is the row telling the truth. *@
+                                @if (uc.IsFullyCovered)
+                                {
+                                    <span class="gh-new" title="Consumed $@uc.Covered.ToString("N2") this month — fully absorbed by the included allowance, so nothing is billable. This user is active, not idle.">covered</span>
+                                }
+                            </td>
                             @if (Model.ShowGrossUsage)
                             {
                                 <td class="num">@u.GrossAmount.ToString("N2")</td>
@@ -343,10 +373,19 @@
             <div class="gh-budget">
                 <div class="top">
                     <span class="name">
+                        @* "Organization" used to label the ENTERPRISE-WIDE budget here. Now that
+                           GitHub organization-scoped budgets are shown too, that wording would name
+                           two different things — so the enterprise ceiling says "enterprise-wide". *@
                         @(b.IsOrg
-                            ? (Model.MultiEnterprise && b.EnterpriseName is not null ? $"🏦 {b.EnterpriseName} — enterprise-wide" : "🏦 Organization (all cost centers)")
-                            : $"🏢 {CcLabel(b.CostCenterName, b.CostCenterId, b.EnterpriseName)}")
+                            ? (Model.MultiEnterprise && b.EnterpriseName is not null ? $"🏦 {b.EnterpriseName} — enterprise-wide" : "🏦 Enterprise-wide (all cost centers)")
+                            : b.IsOrganization
+                                ? $"🐙 {b.Label}"
+                                : $"🏢 {CcLabel(b.CostCenterName, b.CostCenterId, b.EnterpriseName)}")
                         <span class="gh-badge @b.Level">@levelLabel</span>
+                        @if (b.PreventFurtherUsage)
+                        {
+                            <span class="gh-badge over" title="Hard stop: exceeding this budget BLOCKS further usage rather than only alerting.">⛔ hard stop</span>
+                        }
                     </span>
                     <span style="font-variant-numeric:tabular-nums;font-weight:700;">$@b.Actual.ToString("N2") <span style="color:#98a2b3;font-weight:500">/ $@b.Amount.ToString("N2")</span></span>
                 </div>

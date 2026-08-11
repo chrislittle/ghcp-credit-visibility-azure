@@ -107,23 +107,63 @@ namespace GhcpCreditVisibility.Tests
         }
 
         /// <summary>
-        /// One response IS the whole month, so the job replaces the month rather than upserting.
-        /// Running twice must not double the rows — this is what makes re-runs safe.
+        /// One response IS the whole month, so the job replaces that month rather than upserting.
+        /// Re-running must not duplicate it.
+        ///
+        /// Asserted per-month, not on the overall row count: the backfill legitimately ADDS older
+        /// months on later runs, so a stable total would be the wrong expectation (and would fail
+        /// for a correct implementation).
         /// </summary>
         [Fact]
-        public async Task Rerunning_replaces_the_month_rather_than_duplicating_it()
+        public async Task Rerunning_replaces_a_month_rather_than_duplicating_it()
+        {
+            var f = NewFactory();
+            var svc = Service(f, Registry(f));
+            var now = DateTime.UtcNow;
+
+            async Task<int> CurrentMonthRowsAsync()
+            {
+                await using var db = await f.CreateDbContextAsync();
+                return await db.OrgUsageSnapshots.CountAsync(r => r.Year == now.Year && r.Month == now.Month);
+            }
+
+            await svc.RunAsync();
+            var afterFirst = await CurrentMonthRowsAsync();
+            Assert.True(afterFirst > 0, "expected the current month to be populated");
+
+            await svc.RunAsync();
+            Assert.Equal(afterFirst, await CurrentMonthRowsAsync());
+        }
+
+        /// <summary>Backfill advances on successive runs, then settles instead of churning.</summary>
+        [Fact]
+        public async Task Backfill_adds_older_months_then_settles()
         {
             var f = NewFactory();
             var svc = Service(f, Registry(f));
 
-            await svc.RunAsync();
-            int afterFirst;
-            await using (var db = await f.CreateDbContextAsync())
-                afterFirst = await db.OrgUsageSnapshots.CountAsync();
+            async Task<int> MonthsAsync()
+            {
+                await using var db = await f.CreateDbContextAsync();
+                return await db.OrgUsageSnapshots.Select(r => new { r.Year, r.Month }).Distinct().CountAsync();
+            }
 
             await svc.RunAsync();
-            await using var db2 = await f.CreateDbContextAsync();
-            Assert.Equal(afterFirst, await db2.OrgUsageSnapshots.CountAsync());
+            var afterFirst = await MonthsAsync();
+            await svc.RunAsync();
+            var afterSecond = await MonthsAsync();
+            Assert.True(afterSecond > afterFirst, "second run should have backfilled older months");
+
+            // Keep running until it stops growing; it must converge, not churn forever.
+            var prev = afterSecond;
+            for (var i = 0; i < 10; i++)
+            {
+                await svc.RunAsync();
+                var n = await MonthsAsync();
+                if (n == prev) return;
+                prev = n;
+            }
+            Assert.Fail("backfill never settled");
         }
 
         /// <summary>

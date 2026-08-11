@@ -88,10 +88,21 @@ WHERE i.index_id < 2
 GROUP BY t.name ORDER BY mb DESC;
 ```
 
+`OrgUsageSnapshots` (organization/repository attribution) also lives under the DAILY window. It is
+much smaller than `DailyUsageSnapshots` — one row per org/repo/sku per day rather than per USER —
+but it grows on two axes worth knowing about: repository count, and **backfill**, which walks
+backwards a few months per cycle until it reaches the retention floor. A newly deployed enterprise
+therefore shows this table growing for several runs and then stopping. That is the backfill
+completing, not a leak.
+
 Two retention knobs now, not one: `Retention__Months` (monthly) and `Retention__DailyMonths`, which
 defaults to the monthly value and clamps to the same floor of 3. Shortening the daily window is the
 correct lever for a size problem — it reclaims ~30x more per month than shortening the monthly one,
-and costs only intra-month detail rather than the trend history finance depends on. Note it is not
+and costs only intra-month detail rather than the trend history finance depends on.
+
+**Retention also caps backfill depth.** Org backfill never fetches past the retention floor, because
+the purge would delete those rows on the same run. Raising `Retention__DailyMonths` (up to GitHub's
+24-month limit) is what deepens org history; the two settings cannot be reasoned about separately. Note it is not
 in `infra/appservice.tf`, so it has to be set as an app setting directly.
 
 Raising `max_size_gb` is usually the better answer regardless: storage is roughly $0.115/GB/month, so

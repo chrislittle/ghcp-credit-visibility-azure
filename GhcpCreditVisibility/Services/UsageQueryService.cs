@@ -25,6 +25,39 @@ namespace GhcpCreditVisibility.Services
         public sealed record CostCenterTotal(string? CostCenterId, string? CostCenterName, decimal NetAmount, decimal GrossAmount = 0m, long EnterpriseId = 0, string? EnterpriseName = null);
         public sealed record ModelTotal(string Model, decimal NetAmount, decimal GrossAmount = 0m);
         public sealed record TrendPoint(int Year, int Month, decimal NetAmount);
+        /// <summary>
+        /// Relationship between what was CONSUMED (gross) and what is BILLABLE (net) once the
+        /// included allowance is applied.
+        ///
+        /// This exists because of a genuinely misleading display: a month in which every user stays
+        /// inside their allowance has <c>netAmount</c> summing to ZERO while real consumption
+        /// happened — confirmed against the live API. Any view that shows only net renders that as
+        /// "$0.00", which is indistinguishable from nobody using Copilot at all, and invites the
+        /// conclusion that a rollout failed when usage is in fact healthy and simply covered.
+        ///
+        /// Net stays the headline everywhere — it is the number finance reconciles against. This
+        /// type supplies the context that stops a zero being read as inactivity.
+        /// </summary>
+        public sealed record AllowanceCoverage(decimal Net, decimal Gross)
+        {
+            /// <summary>Value absorbed by the included allowance. Never negative: a gross below net
+            /// would mean a surcharge rather than a discount, which is not a case to invent.</summary>
+            public decimal Covered => Gross > Net ? Gross - Net : 0m;
+
+            /// <summary>The misleading case: real consumption, nothing billable.</summary>
+            public bool IsFullyCovered => Net <= 0m && Gross > 0m;
+
+            /// <summary>Partly absorbed — billable, but understating consumption.</summary>
+            public bool IsPartiallyCovered => Net > 0m && Covered > 0m;
+
+            /// <summary>Share of consumption the allowance absorbed (0 when nothing was consumed).</summary>
+            public double CoveredPct => Gross > 0m ? (double)(Covered / Gross) * 100.0 : 0.0;
+
+            /// <summary>True when there was genuinely no activity — as opposed to activity that cost
+            /// nothing. The distinction this whole type exists to preserve.</summary>
+            public bool IsGenuinelyIdle => Gross <= 0m && Net <= 0m;
+        }
+
         public sealed record MonthOption(int Year, int Month);
         public sealed record EnterpriseOption(long Id, string Name);
 
@@ -363,7 +396,12 @@ namespace GhcpCreditVisibility.Services
         }
 
         // ── Multi-dimensional reporting ────────────────────────────────────────────
-        public enum SeriesDimension { Total, User, Model, CostCenter, Enterprise }
+        /// <summary>
+        /// <see cref="Organization"/> is sourced from a DIFFERENT table (<see cref="OrgUsageSnapshot"/>)
+        /// than every other dimension, because GitHub's per-user usage report carries no organization
+        /// at all — its top-level org field merely echoes a filter you passed.
+        /// </summary>
+        public enum SeriesDimension { Total, User, Model, CostCenter, Enterprise, Organization }
         public enum TimeGranularity { Day, Week, Month }
 
         public sealed record SeriesPoint(DateOnly BucketStart, string Label, decimal NetAmount);
@@ -483,6 +521,20 @@ namespace GhcpCreditVisibility.Services
             UserScope scope, int topN = 8, CancellationToken ct = default)
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+            // ── Organization: different table, and ADMIN-ONLY ──
+            // OrgUsageSnapshot carries EnterpriseId but NO cost centre and NO user, so the scope
+            // filter cannot narrow it below the enterprise. Showing it to a cost-centre-scoped
+            // manager would therefore expose every OTHER team's spend in that enterprise — the exact
+            // leak the access model exists to prevent. There is no partial version of this: without
+            // a cost-centre column there is nothing to filter on, so it is restricted to viewers who
+            // can already see everything. Revisit if org→cost-centre mapping ever becomes available.
+            if (dim == SeriesDimension.Organization)
+            {
+                if (!scope.SeesAll) return Array.Empty<Series>();
+                return await BuildOrgSeriesAsync(db, gran, count, scope, topN, ct);
+            }
+
             var q = ApplyScope(db.UsageSnapshots, scope);
             if (!string.IsNullOrWhiteSpace(filterUser)) q = q.Where(x => x.UserLogin == filterUser);
             if (!string.IsNullOrWhiteSpace(filterModel)) q = q.Where(x => x.Model == filterModel);
@@ -589,6 +641,67 @@ namespace GhcpCreditVisibility.Services
 
             var series = win.GroupBy(b => keySel(b.Row)).Select(g => BuildSeries(g.Key, g))
                 .OrderByDescending(s => s.Total).ToList();
+
+            if (series.Count > topN)
+            {
+                var top = series.Take(topN).ToList();
+                var rest = series.Skip(topN).ToList();
+                var otherPts = allBuckets.Select((b, i) => new SeriesPoint(b, LabelOf(b, gran), rest.Sum(s => s.Points[i].NetAmount))).ToList();
+                top.Add(new Series("Other", otherPts, otherPts.Sum(p => p.NetAmount)));
+                return top;
+            }
+            return series;
+        }
+
+        /// <summary>
+        /// Series grouped by GitHub ORGANIZATION, built from <see cref="OrgUsageSnapshot"/>.
+        ///
+        /// Callers must have already established that the viewer can see everything — see the gate
+        /// in <see cref="GetSeriesAsync"/>; this method does not re-check.
+        ///
+        /// Two differences from the per-user path are worth knowing:
+        ///  * Org rows are TRUE PER-DAY values, so they are summed directly. No differencing, unlike
+        ///    <see cref="DailyUsageSnapshot"/> whose rows are cumulative.
+        ///  * Rows with no organization are REAL SPEND (enterprise-level charges — a live sample had
+        ///    15 of 37) and are surfaced as "Unattributed" rather than dropped, so the series still
+        ///    reconciles to the enterprise total.
+        /// </summary>
+        private async Task<IReadOnlyList<Series>> BuildOrgSeriesAsync(
+            BillingDbContext db, TimeGranularity gran, int count, UserScope scope, int topN, CancellationToken ct)
+        {
+            const string Unattributed = "Unattributed";
+
+            var oq = db.OrgUsageSnapshots.AsQueryable();
+            if (scope.EnterpriseFilter is long entFilter) oq = oq.Where(x => x.EnterpriseId == entFilter);
+            var orgRows = await oq.ToListAsync(ct);
+            if (orgRows.Count == 0) return Array.Empty<Series>();
+
+            // Project onto UsageSnapshot so the shared bucketing/labelling applies unchanged.
+            var rows = orgRows.Select(r => new UsageSnapshot
+            {
+                EnterpriseId = r.EnterpriseId,
+                Year = r.Year, Month = r.Month, Day = r.Day,
+                NetAmount = r.NetAmount, GrossAmount = r.GrossAmount,
+                OrganizationName = string.IsNullOrWhiteSpace(r.OrganizationName) ? Unattributed : r.OrganizationName,
+            }).ToList();
+
+            var bucketed = rows.Select(r => (Bucket: BucketOf(r, gran), Row: r)).ToList();
+            var allBuckets = bucketed.Select(b => b.Bucket).Distinct().OrderBy(b => b).ToList();
+            if (count > 0 && allBuckets.Count > count) allBuckets = allBuckets.Skip(allBuckets.Count - count).ToList();
+            var bucketSet = allBuckets.ToHashSet();
+            var win = bucketed.Where(b => bucketSet.Contains(b.Bucket)).ToList();
+
+            Series Build(string key, IEnumerable<(DateOnly Bucket, UsageSnapshot Row)> items)
+            {
+                var byBucket = items.GroupBy(i => i.Bucket).ToDictionary(g => g.Key, g => g.Sum(v => v.Row.NetAmount));
+                var pts = allBuckets.Select(b => new SeriesPoint(b, LabelOf(b, gran), byBucket.TryGetValue(b, out var v) ? v : 0m)).ToList();
+                return new Series(key, pts, pts.Sum(p => p.NetAmount));
+            }
+
+            var series = win.GroupBy(b => b.Row.OrganizationName ?? Unattributed)
+                .Select(g => Build(g.Key, g))
+                .OrderByDescending(s => s.Total)
+                .ToList();
 
             if (series.Count > topN)
             {

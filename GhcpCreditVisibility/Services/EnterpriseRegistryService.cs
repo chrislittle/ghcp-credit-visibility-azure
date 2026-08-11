@@ -208,5 +208,20 @@ namespace GhcpCreditVisibility.Services
             var row = await db.Enterprises.FindAsync(new object[] { id }, ct);
             if (row is not null) { row.LastSnapshotUtc = utc; await db.SaveChangesAsync(ct); }
         }
+
+        /// <summary>
+        /// Records the OLDEST month whose organization usage has been fetched. Advanced even when a
+        /// month returned nothing: a legitimately empty month must not be re-fetched every cycle,
+        /// which is exactly what happens if row-absence is used as the "not done yet" signal.
+        /// </summary>
+        public async Task SetOrgBackfillWatermarkAsync(long id, int year, int month, CancellationToken ct = default)
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var row = await db.Enterprises.FindAsync(new object[] { id }, ct);
+            if (row is null) return;
+            row.OrgBackfillOldestYear = year;
+            row.OrgBackfillOldestMonth = month;
+            await db.SaveChangesAsync(ct);
+        }
     }
 }

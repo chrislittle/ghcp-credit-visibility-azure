@@ -108,7 +108,7 @@ public class RetentionPurgeTests
                 Day = 1,
                 UserLogin = $"seed-user-{i}",
                 Product = "copilot",
-                Sku = "premium_request",
+                Sku = "Copilot AI Credits",
                 Model = "gpt-5",
                 NetQuantity = 1m,
                 NetAmount = 1m,

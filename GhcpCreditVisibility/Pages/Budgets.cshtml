@@ -105,9 +105,23 @@ else
                                 {
                                     <strong>🏦 Enterprise-wide</strong> <span class="gh-note">(roll-up ceiling for all of @(group.EnterpriseName ?? "this enterprise"))</span>
                                 }
+                                else if (b.IsOrganization)
+                                {
+                                    @* GitHub ORGANIZATION scope — a different axis from cost centres,
+                                       so it is labelled distinctly rather than blending into the list. *@
+                                    <span title="A GitHub organization budget. Spend is attributed from the organization usage report, which carries no cost centre — so this is visible to admins only.">🐙 @b.Label</span>
+                                    <span class="gh-note">(organization)</span>
+                                }
                                 else
                                 {
                                     @(b.CostCenterName ?? b.CostCenterId)
+                                }
+                                @if (b.PreventFurtherUsage)
+                                {
+                                    @* Operationally the most consequential budget field: hitting this
+                                       BLOCKS usage rather than alerting, so it reaches a helpdesk as
+                                       "Copilot is broken" rather than as a billing question. *@
+                                    <span class="gh-badge over" title="Hard stop: exceeding this budget BLOCKS further usage rather than only alerting. A developer hitting it is stopped mid-task.">⛔ hard stop</span>
                                 }
                             </td>
                             <td><span class="gh-badge @b.Level">@LevelLabel(b.Level)</span></td>

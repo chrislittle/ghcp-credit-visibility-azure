@@ -273,8 +273,21 @@ app.MapHealthChecks("/health/ready", new Microsoft.AspNetCore.Diagnostics.Health
 // on demand. Requires an authenticated user (inherits the fallback auth policy) — unlike the
 // deliberately-anonymous liveness/readiness probes, this exposes internal state (data counts,
 // token-resolution status), so it must not be public.
-app.MapGet("/health/diag", async (SreDiagnosticsCollector collector, CancellationToken ct) =>
-    Results.Json(await collector.CollectAsync(ct)))
+// ADMIN ONLY. RequireAuthorization() alone resolves to the fallback policy — merely
+// "authenticated" — which let ANY signed-in user read this. That crosses the scope boundary the
+// whole access model exists to enforce: the payload names every enterprise (slug and display name)
+// and reports its cost-center count, budget count and months of data, including enterprises the
+// caller has no grant for. No dollar amounts, but a cost-center-scoped manager could enumerate the
+// estate. Easy Auth gates it in Azure (infra excludes only /health/live and /health/ready), so this
+// was never anonymous — but authenticated is not the same as entitled.
+app.MapGet("/health/diag", async (
+        SreDiagnosticsCollector collector,
+        GhcpCreditVisibility.Authorization.IAppAdminChecker admin,
+        HttpContext ctx,
+        CancellationToken ct) =>
+    await admin.IsAdminAsync(ctx.User, ct)
+        ? Results.Json(await collector.CollectAsync(ct))
+        : Results.Forbid())
     .RequireAuthorization();
 
 app.MapStaticAssets();
