@@ -97,6 +97,20 @@ namespace GhcpCreditVisibility.Services
                 telemetry.GetMetric("ghcp.data.budgets", "enterprise").TrackValue(e.Budgets, e.Slug);
                 telemetry.GetMetric("ghcp.data.months_with_data", "enterprise").TrackValue(e.MonthsWithData, e.Slug);
 
+                // Organization attribution + its backfill. These were reported at /health/diag but
+                // NOT published, so the only way to check backfill progress was reading raw container
+                // stdout — and it could not be alerted on at all. Every other field in the
+                // diagnostics payload has a matching metric; these now do too.
+                telemetry.GetMetric("ghcp.data.org_usage_rows", "enterprise").TrackValue(e.OrgUsageRows, e.Slug);
+                telemetry.GetMetric("ghcp.data.org_months_with_data", "enterprise").TrackValue(e.OrgMonthsWithData, e.Slug);
+
+                // 1 = the backfill watermark has reached the retention floor and no further calls are
+                // made. Alert on this sitting at 0 for far LONGER than the catch-up should take
+                // (3 months per cycle, so a 12-month window needs ~4 cycles) — that means it stalled.
+                // Do NOT alert on 0 itself: a freshly deployed enterprise is legitimately 0 for the
+                // first few cycles.
+                telemetry.GetMetric("ghcp.backfill.complete", "enterprise").TrackValue(e.OrgBackfillComplete ? 1 : 0, e.Slug);
+
                 if (e.TokenResolved is bool entResolved)
                     telemetry.GetMetric("ghcp.github.token_resolved", "enterprise").TrackValue(entResolved ? 1 : 0, e.Slug);
 

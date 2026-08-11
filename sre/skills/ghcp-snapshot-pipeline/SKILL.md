@@ -43,6 +43,9 @@ and `Measurements` (not `customDimensions`/`customMeasurements`); time → `Time
 | `ghcp.snapshot.rows_written` (dim: enterprise) | Rows that enterprise's last run wrote. **0 on a success = silent failure (bad slug / PAT scope).** |
 | `ghcp.github.token_resolved` (dim: enterprise) | 0 = that enterprise's PAT (Key Vault secret from its registry row) did not resolve (check this BEFORE blaming GitHub). Mock enterprises never emit it. |
 | `ghcp.github.rate_limit_remaining` (dim: enterprise) | That enterprise's PAT budget left. Limits are PER PAT — one enterprise being throttled says nothing about the others. |
+| `ghcp.data.org_usage_rows` (dim: enterprise) | Rows of organization/repository attribution held for that enterprise. |
+| `ghcp.data.org_months_with_data` (dim: enterprise) | Distinct months of organization history — grows as the backfill walks back, then stops. |
+| `ghcp.backfill.complete` (dim: enterprise) | 1 = the org backfill watermark reached the retention floor and issues no further calls. **Do NOT alert on 0 by itself** — a newly onboarded enterprise is legitimately 0 for its first few cycles (3 months are fetched per cycle, so a 12-month window needs ~4). Alert only when it stays 0 for far longer than that catch-up should take, which means it stalled. |
 | `ghcp.db.pending_migrations` (no dimension) | Infra-level: schema not fully applied. |
 | `SnapshotRunCompleted` (event) | `Measurements`: rowsWritten, rowsPurged, durationMs; `Properties`: instanceId, status, **enterprise**. See the counting note below — neither measurement is a plain row count. |
 | `SnapshotFailed` (event) | `Properties.error` has the exception message, `Properties.enterprise` names the enterprise — **branch on error (below).** |
