@@ -41,9 +41,15 @@ public class MultiEnterpriseSchemaTests
     {
         using var db = NewFactory().CreateDbContext();
 
+        // Budgets are keyed by GitHub's own budget id. The key MUST stay enterprise-qualified:
+        // budget ids are unique within an enterprise, and two enterprises' budgets must never
+        // contend for a row. (The previous key was (EnterpriseId, Scope, CostCenterId), which was
+        // enterprise-qualified but collapsed every non-cost-center scope onto a single row — see
+        // BudgetScopeMappingTests.)
         var budget = db.Model.FindEntityType(typeof(BudgetSnapshot))!;
-        Assert.Equal(new[] { "EnterpriseId", "Scope", "CostCenterId" },
-            budget.GetIndexes().Single(i => i.IsUnique).Properties.Select(p => p.Name).ToArray());
+        var budgetKey = budget.GetIndexes().Single(i => i.IsUnique).Properties.Select(p => p.Name).ToArray();
+        Assert.Equal(new[] { "EnterpriseId", "GitHubBudgetId" }, budgetKey);
+        Assert.Equal("EnterpriseId", budgetKey[0]);
 
         var mapping = db.Model.FindEntityType(typeof(PrincipalCostCenterMapping))!;
         Assert.Equal(new[] { "PrincipalType", "PrincipalObjectId", "EnterpriseId", "CostCenterId" },

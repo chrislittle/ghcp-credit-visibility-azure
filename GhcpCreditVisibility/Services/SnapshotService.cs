@@ -143,7 +143,9 @@ namespace GhcpCreditVisibility.Services
                                 UserLogin = u.GitHubComLogin, UserName = u.GitHubComName,
                                 CostCenterId = ccId, CostCenterName = ccName,
                                 Product = item.Product, Sku = item.Sku, Model = item.Model,
-                                NetQuantity = item.NetQuantity, NetAmount = item.NetAmount, GrossAmount = item.GrossAmount
+                                NetQuantity = item.NetQuantity, NetAmount = item.NetAmount, GrossAmount = item.GrossAmount,
+                                DiscountQuantity = item.DiscountQuantity, DiscountAmount = item.DiscountAmount,
+                                PricePerUnit = item.PricePerUnit, GrossQuantity = item.GrossQuantity
                             });
                         }
                         else
@@ -151,6 +153,11 @@ namespace GhcpCreditVisibility.Services
                             existing.SnapshotUtc = now;
                             existing.CostCenterId = ccId; existing.CostCenterName = ccName;
                             existing.NetQuantity = item.NetQuantity; existing.NetAmount = item.NetAmount; existing.GrossAmount = item.GrossAmount;
+                            // Must be updated alongside the amounts above: within a month this row is
+                            // rewritten in place on every run, so a field refreshed on INSERT but not
+                            // on UPDATE would silently freeze at its first-of-month value.
+                            existing.DiscountQuantity = item.DiscountQuantity; existing.DiscountAmount = item.DiscountAmount;
+                            existing.PricePerUnit = item.PricePerUnit; existing.GrossQuantity = item.GrossQuantity;
                         }
                         written++;
                     }
@@ -184,44 +191,36 @@ namespace GhcpCreditVisibility.Services
                 // querying the DB per iteration misses not-yet-saved Adds, so duplicate scopes/cost-
                 // centers in the same batch would otherwise insert twice and violate the unique
                 // index on (EnterpriseId, Scope, CostCenterId).
+                // Keyed by GitHub's own budget id (see BudgetScopeMapper). The previous key was
+                // (Scope, CostCenterId), which collapsed every non-cost-center scope onto one row.
                 var existingBudgets = await db.BudgetSnapshots
                     .Where(x => x.EnterpriseId == enterprise.Id)
-                    .ToDictionaryAsync(x => (x.Scope, x.CostCenterId), ct);
-                var seenBudgetKeys = new HashSet<(string, string)>();
+                    .ToDictionaryAsync(x => x.GitHubBudgetId, StringComparer.Ordinal, ct);
+                var seenBudgetKeys = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var gb in await client.GetBudgetsAsync(enterprise.Slug, ct))
                 {
-                    var isCc = string.Equals(gb.BudgetScope, "cost_center", StringComparison.OrdinalIgnoreCase);
-                    var scopeVal = isCc ? BudgetScopes.CostCenter : BudgetScopes.Org;
-                    // budget_entity_name is the entity's display NAME in the real GitHub API, not the
-                    // stable cost-center GUID id. Everything downstream (access-scope pair matching,
-                    // per-budget actuals) keys off the ID, so resolve NAME → ID here: exact id match
-                    // first (defensive), then case-insensitive name match; only an entity naming a
-                    // cost center this enterprise doesn't have falls back to the raw value.
-                    string ccId = ""; string? ccName = null;
-                    if (isCc)
+                    var key = BudgetScopeMapper.KeyFor(gb);
+                    // GitHub returning two budgets with the same id in one response would violate the
+                    // unique index and fail the whole run; skip the duplicate and carry on instead.
+                    if (!seenBudgetKeys.Add(key))
                     {
-                        var entity = gb.BudgetEntityName ?? "";
-                        var match = costCenters.FirstOrDefault(c => string.Equals(c.Id, entity, StringComparison.OrdinalIgnoreCase))
-                                 ?? costCenters.FirstOrDefault(c => string.Equals(c.Name, entity, StringComparison.OrdinalIgnoreCase));
-                        ccId = match?.Id ?? entity;
-                        ccName = match?.Name;
+                        _logger.LogWarning("Duplicate budget id '{Key}' from GitHub for '{Slug}'; ignoring the repeat.", key, enterprise.Slug);
+                        continue;
                     }
-                    var key = (scopeVal, ccId);
-                    seenBudgetKeys.Add(key);
-                    if (existingBudgets.TryGetValue(key, out var existingB))
+                    if (!existingBudgets.TryGetValue(key, out var row))
                     {
-                        existingB.Amount = gb.BudgetAmount; existingB.ConsumedAmount = gb.ConsumedAmount ?? 0m; existingB.CostCenterName = ccName ?? existingB.CostCenterName; existingB.SnapshotUtc = now;
+                        row = new BudgetSnapshot { EnterpriseId = enterprise.Id };
+                        db.BudgetSnapshots.Add(row);
+                        existingBudgets[key] = row;
                     }
-                    else
-                    {
-                        var newB = new BudgetSnapshot { EnterpriseId = enterprise.Id, Scope = scopeVal, CostCenterId = ccId, CostCenterName = ccName, Amount = gb.BudgetAmount, ConsumedAmount = gb.ConsumedAmount ?? 0m, SnapshotUtc = now };
-                        db.BudgetSnapshots.Add(newB);
-                        existingBudgets[key] = newB;
-                    }
+                    BudgetScopeMapper.Apply(row, gb, costCenters, now);
                 }
                 // Budgets that GitHub no longer reports for this enterprise are removed — this covers
-                // budgets deleted in GitHub AND self-heals rows persisted under a stale key (e.g. the
-                // pre-fix rows keyed by entity NAME instead of cost-center id).
+                // budgets deleted in GitHub AND self-heals rows persisted under a stale key. That
+                // self-healing is what migrates the pre-fix rows: on the first run after deploy every
+                // row keyed the old way is absent from seenBudgetKeys, so it is deleted and reinserted
+                // under its GitHub budget id. No backfill script is required, and the table converges
+                // within a single cycle.
                 var staleBudgets = existingBudgets
                     .Where(kv => !seenBudgetKeys.Contains(kv.Key))
                     .Select(kv => kv.Value)

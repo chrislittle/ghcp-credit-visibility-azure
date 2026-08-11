@@ -262,3 +262,9 @@ crash.*.log
 *.tfvars.bak
 # Saved plan files embed the variable values they were planned with, secrets included.
 tfplan
+
+# ── Local-only diagnostics (never committed) ──
+# Ad-hoc probe/diagnostic scripts run against LIVE tenants. These contain no secrets
+# themselves (PATs come from Key Vault or an env var at runtime), but they are throwaway
+# operator tooling, not shipped product — keep them out of the public repo.
+tools/local/

@@ -183,18 +183,57 @@ namespace GhcpCreditVisibility.Services
             var seed = SeedFor(enterprise);
             // GitHub-governed budgets (this app only reads them). Amounts are illustrative monthly
             // totals: an org/enterprise-wide budget plus a per-cost-center budget.
+            // Every budget carries a stable Id: rows are keyed by GitHub's budget id, and
+            // id-less budgets would all collapse onto one synthetic key — recreating in demo mode
+            // the exact collision this keying was introduced to fix.
             var budgets = new List<Budget>
             {
-                new() { BudgetProductSku = "ai_credits", BudgetScope = "enterprise", BudgetAmount = seed.OrgBudget },
+                new() { Id = $"{enterprise}-budget-enterprise", BudgetProductSku = "ai_credits", BudgetScope = "enterprise", BudgetAmount = seed.OrgBudget },
             };
             budgets.AddRange(seed.CostCenters.Select(c => new Budget
             {
+                Id = $"{enterprise}-budget-cc-{c.Id}",
                 BudgetProductSku = "ai_credits",
                 BudgetScope = "cost_center",
                 BudgetEntityName = seed.BudgetsUseEntityNames ? c.Name : c.Id,
                 BudgetAmount = seed.CostCenterBudgets.GetValueOrDefault(c.Id, 250m),
                 ConsumedAmount = ConsumedForCostCenter(seed, enterprise, c.Id)
             }));
+
+            // Scopes a live enterprise returns alongside the two above (confirmed by a read-only
+            // probe of the real API). Before budgets were keyed by id, these three collapsed onto
+            // the enterprise budget's row. They are stored but not displayed — their presence here
+            // keeps demo mode honest about what GitHub actually returns.
+            if (seed.Users.Length > 0)
+            {
+                var firstUser = seed.Users[0];
+                budgets.Add(new Budget
+                {
+                    Id = $"{enterprise}-budget-user",
+                    BudgetProductSku = "ai_credits",
+                    BudgetScope = "user",
+                    BudgetEntityName = firstUser.Login,
+                    User = firstUser.Login,
+                    BudgetAmount = 40m,
+                    PreventFurtherUsage = true,   // a hard stop: blocks this developer mid-task
+                });
+            }
+            budgets.Add(new Budget
+            {
+                Id = $"{enterprise}-budget-org",
+                BudgetProductSku = "ai_credits",
+                BudgetScope = "organization",
+                BudgetEntityName = $"{enterprise}-org",
+                BudgetAmount = 300m,
+            });
+            budgets.Add(new Budget
+            {
+                Id = $"{enterprise}-budget-muc",
+                BudgetProductSku = "ai_credits",
+                BudgetScope = "multi_user_customer",
+                BudgetEntityName = $"{enterprise}-muc",
+                BudgetAmount = 150m,
+            });
             IReadOnlyList<Budget> result = budgets;
             return Task.FromResult(result);
         }
@@ -214,7 +253,18 @@ namespace GhcpCreditVisibility.Services
             foreach (var (model, price) in Models)
             {
                 var qty = rng.Next(50, 900);
-                var net = Math.Round(qty * price, 2);
+                var gross = Math.Round(qty * price, 2);
+
+                // Illustrative discount so demo data exercises the gross/discount/net columns.
+                // Previously every mock line item had DiscountAmount = 0, which made gross and net
+                // identical everywhere and left the distinction invisible in demo mode. A tenth of
+                // the quantity is discounted on every other model — an arbitrary but non-degenerate
+                // split, NOT a claim about how GitHub actually applies discounts.
+                // StableSeed, not GetHashCode: .NET randomizes string hashes per process, which would
+                // make demo figures change on every restart in a client documented as deterministic.
+                var discountQty = StableSeed(model) % 2 == 0 ? Math.Round(qty * 0.10m, 2) : 0m;
+                var discount = Math.Round(discountQty * price, 2);
+
                 items.Add(new UsageItem
                 {
                     Product = "copilot",
@@ -223,11 +273,11 @@ namespace GhcpCreditVisibility.Services
                     UnitType = "credit",
                     PricePerUnit = price,
                     GrossQuantity = qty,
-                    GrossAmount = net,
-                    DiscountQuantity = 0,
-                    DiscountAmount = 0,
-                    NetQuantity = qty,
-                    NetAmount = net
+                    GrossAmount = gross,
+                    DiscountQuantity = discountQty,
+                    DiscountAmount = discount,
+                    NetQuantity = qty - discountQty,
+                    NetAmount = gross - discount
                 });
             }
 
@@ -251,7 +301,16 @@ namespace GhcpCreditVisibility.Services
             foreach (var s in seed.Users.Where(s => s.CostCenterId == ccId))
             {
                 var rng = new Random(StableSeed(enterprise + "|" + s.Login) + now.Year * 100 + now.Month);
-                foreach (var (_, price) in Models) total += Math.Round(rng.Next(50, 900) * price, 2);
+                // Mirrors the gross/discount/net arithmetic in GetCurrentMonthUsageForUserAsync,
+                // including the same discount rule and the same draw order, so the consumed figure
+                // stays equal to the NET total those line items produce rather than the gross.
+                foreach (var (model, price) in Models)
+                {
+                    var qty = rng.Next(50, 900);
+                    var gross = Math.Round(qty * price, 2);
+                    var discountQty = StableSeed(model) % 2 == 0 ? Math.Round(qty * 0.10m, 2) : 0m;
+                    total += gross - Math.Round(discountQty * price, 2);
+                }
             }
             return total;
         }

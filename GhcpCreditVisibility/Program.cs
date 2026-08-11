@@ -190,18 +190,14 @@ if (app.Environment.IsDevelopment() && useLocalDevDb)
                 if (!db.CostCenterDirectory.Any(d => d.EnterpriseId == e.Id && d.CostCenterId == cc.Key))
                     db.CostCenterDirectory.Add(new GhcpCreditVisibility.Data.CostCenterDirectoryEntry { EnterpriseId = e.Id, CostCenterId = cc.Key, CurrentName = cc.Value, LastSeenUtc = dirNow });
             }
+            // Same mapper the snapshot job uses — this seed previously carried a SECOND copy of the
+            // binary cost_center/everything-else logic, free to drift from the real one.
+            var seedCostCenters = mock.GetCostCentersAsync(e.Slug).Result;
             foreach (var gb in mock.GetBudgetsAsync(e.Slug).Result)
             {
-                var isCc = gb.BudgetScope == "cost_center";
-                db.BudgetSnapshots.Add(new GhcpCreditVisibility.Data.BudgetSnapshot
-                {
-                    EnterpriseId = e.Id,
-                    Scope = isCc ? "CostCenter" : "Org",
-                    CostCenterId = isCc ? (gb.BudgetEntityName ?? "") : "",
-                    CostCenterName = isCc ? ccName.GetValueOrDefault(gb.BudgetEntityName ?? "") : null,
-                    Amount = gb.BudgetAmount,
-                    ConsumedAmount = gb.ConsumedAmount ?? 0m
-                });
+                var row = new GhcpCreditVisibility.Data.BudgetSnapshot { EnterpriseId = e.Id };
+                GhcpCreditVisibility.Services.BudgetScopeMapper.Apply(row, gb, seedCostCenters, dirNow);
+                db.BudgetSnapshots.Add(row);
             }
         }
     }

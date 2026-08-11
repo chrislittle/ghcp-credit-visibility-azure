@@ -50,6 +50,17 @@ namespace GhcpCreditVisibility.Services
             var budgetsQuery = db.BudgetSnapshots.AsQueryable();
             if (scope.EnterpriseFilter is long entFilter)
                 budgetsQuery = budgetsQuery.Where(b => b.EnterpriseId == entFilter);
+
+            // ALLOWLIST, applied in SQL. The snapshot job stores every scope GitHub returns —
+            // including user-scoped (personal spending limits), organization and
+            // multi_user_customer. Only scopes whose actual spend we can genuinely compute are
+            // displayed: cost-center and enterprise-wide. In particular, user budgets are personal
+            // data whose access policy is undecided, and organization budgets cannot be reconciled
+            // against actuals until UsageSnapshot carries an Organization dimension — rendering
+            // either would mean showing a meter we cannot compute, or data we have not decided who
+            // may see. Widening this set is a deliberate act, not a side effect of storing a scope.
+            budgetsQuery = budgetsQuery.Where(b => b.Scope == BudgetScopes.Org || b.Scope == BudgetScopes.CostCenter);
+
             var budgets = await budgetsQuery.ToListAsync(ct);
             if (budgets.Count == 0) return Array.Empty<BudgetStatus>();
 

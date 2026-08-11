@@ -46,6 +46,14 @@ namespace GhcpCreditVisibility.Models
         /// <summary>The amount consumed against the budget, when reported by GitHub.</summary>
         [JsonPropertyName("consumed_amount")]
         public decimal? ConsumedAmount { get; set; }
+
+        /// <summary>
+        /// When true, exceeding this budget BLOCKS further usage rather than merely alerting —
+        /// it can stop a developer mid-task. Confirmed present on the live API. Null when GitHub
+        /// omits it, which we persist as false (alert-only) rather than guessing a hard stop.
+        /// </summary>
+        [JsonPropertyName("prevent_further_usage")]
+        public bool? PreventFurtherUsage { get; set; }
     }
 
     /// <summary>
