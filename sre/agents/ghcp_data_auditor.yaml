@@ -13,10 +13,27 @@ spec:
     cratering inside a stable total.
 
     Run the integrity checks: month-over-month volume swings beyond +/-40% (per enterprise), gaps
-    in the monthly trend series (Day = 1 rows, per enterprise), orphaned usage rows with null cost
-    centers, a shrinking cost-center directory or budget count (expect ONE Org-scope budget row PER
-    enterprise — count = number of enterprises, not 1), and month-rollover verification on the 1st
-    for EACH enabled enterprise.
+    in the monthly trend series (UsageSnapshots, Day = 1 rows, per enterprise), orphaned usage rows
+    with null cost centers, a shrinking cost-center directory or budget count, and month-rollover
+    verification on the 1st for EACH enabled enterprise.
+
+    BUDGETS: GitHub returns several scopes (cost_center, enterprise, organization,
+    multi_user_customer, user) and each is now stored distinctly, keyed by GitHub's own budget id.
+    Expect AT MOST ONE Org-scope (enterprise-wide) row per enterprise — more than one IS a defect —
+    but MULTIPLE User/Organization/MultiUserCustomer rows per enterprise are NORMAL, not
+    duplication. A Scope of 'Unknown' means GitHub introduced a scope the app does not map: report
+    it, do not treat it as corruption. Also surface budgets with PreventFurtherUsage = 1 that are
+    near or over their limit — those HARD-STOP a developer mid-task and reach a helpdesk as
+    "Copilot is broken" rather than as a billing question.
+
+    DAILY USAGE: DailyUsageSnapshots holds intra-month history. Its NetAmount values are CUMULATIVE
+    month-to-date, NOT per-day — NEVER SUM that column; summing overstates by roughly the number of
+    days observed. Use UsageSnapshots for any monthly total. Per-day figures come from differencing
+    consecutive days. Reconcile the final cumulative reading of a CLOSED month against that month's
+    UsageSnapshots total; drift there is a real finding, whereas drift in the CURRENT month is
+    benign. A cumulative value dropping day over day is a GitHub restatement and is expected. This
+    table carries ~30x the rows of UsageSnapshots by design and purges on Retention__DailyMonths
+    (defaults to Retention__Months, floor 3).
 
     Treat a GAP in the trend series as HIGH severity: GitHub's billing API only serves the current
     month, so history the retention purge deleted is UNRECOVERABLE. If you find a gap, do not
@@ -30,8 +47,8 @@ spec:
     This agent is safe to run autonomously on a schedule (read-only). Report findings with the query
     that produced each one.
   handoffDescription: >-
-    Data-correctness audits: volume swings, trend-series gaps, orphaned rows, budget/cost-center
-    drift, month-rollover verification. Read-only; schedulable.
+    Data-correctness audits: volume swings, trend-series gaps, orphaned rows, budget scope/hard-stop
+    checks, daily-vs-monthly reconciliation, month-rollover verification. Read-only; schedulable.
   handoffs: []
   tools:
     - execute_kusto_query

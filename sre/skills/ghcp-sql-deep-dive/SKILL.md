@@ -69,7 +69,34 @@ Also useful live: `sys.dm_exec_requests`, `sys.dm_db_wait_stats`.
 ## Storage growth vs the cap
 
 `max_size_gb` is small (2 GB by default). The retention purge (`ExecuteDeleteAsync`, one transaction)
-keeps it bounded, but a misconfigured `Retention__Months` or a purge that's been failing lets it grow:
+keeps it bounded, but a misconfigured retention setting or a purge that's been failing lets it grow.
+
+**`DailyUsageSnapshots` is the dominant table — size the database around it, not `UsageSnapshots`.**
+It holds one row per user/model/sku per DAY (intra-month history), versus one per MONTH in
+`UsageSnapshots` — roughly **30x the rows**. A 5,000-user enterprise runs ~25k monthly rows against
+~750k daily rows per month; at six months' retention that is single-digit GB, which **can exceed a
+2 GB `max_size_gb`**. If a deployment is near the cap, check this table's size FIRST:
+
+```sql
+SELECT t.name AS table_name, SUM(p.rows) AS row_count,
+       CAST(SUM(a.total_pages) * 8.0 / 1024 AS DECIMAL(10,2)) AS mb
+FROM sys.tables t
+JOIN sys.indexes i ON t.object_id = i.object_id
+JOIN sys.partitions p ON i.object_id = p.object_id AND i.index_id = p.index_id
+JOIN sys.allocation_units a ON p.partition_id = a.container_id
+WHERE i.index_id < 2
+GROUP BY t.name ORDER BY mb DESC;
+```
+
+Two retention knobs now, not one: `Retention__Months` (monthly) and `Retention__DailyMonths`, which
+defaults to the monthly value and clamps to the same floor of 3. Shortening the daily window is the
+correct lever for a size problem — it reclaims ~30x more per month than shortening the monthly one,
+and costs only intra-month detail rather than the trend history finance depends on. Note it is not
+in `infra/appservice.tf`, so it has to be set as an app setting directly.
+
+Raising `max_size_gb` is usually the better answer regardless: storage is roughly $0.115/GB/month,
+so a few GB is cents, while purged history **cannot be rebuilt** — GitHub's API serves the current
+month only.
 
 ```
 az sql db show -g <app-rg> -s <sql-server> -n ghcpvisibility --query "maxSizeBytes"

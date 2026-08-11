@@ -64,6 +64,18 @@ namespace GhcpCreditVisibility.Services
         }
 
         /// <summary>
+        /// Months of DAILY history to keep. Defaults to the monthly window: a deployment where the
+        /// monthly trend reaches further back than the daily detail, for reasons nobody remembers, is
+        /// a worse default than simply keeping both the same. Daily rows are ~30x more numerous but
+        /// still small in absolute terms (single-digit GB at enterprise scale, cents per month on
+        /// Azure SQL), so the separate knob exists for very large deployments rather than as the
+        /// expected thing to tune. The same <see cref="MinRetentionMonths"/> floor applies, for the
+        /// same reason: purged rows cannot be refetched from GitHub.
+        /// </summary>
+        public static int ResolveDailyRetentionMonths(int monthlyRetention, int? dailyRetentionOverride) =>
+            Math.Max(MinRetentionMonths, dailyRetentionOverride ?? monthlyRetention);
+
+        /// <summary>
         /// One full cycle: bootstrap the registry (idempotent), then snapshot each enabled
         /// enterprise in turn. Per-enterprise failures are recorded and swallowed (isolation);
         /// only infrastructure failures (registry/DB unreachable) propagate to the caller's
@@ -159,6 +171,36 @@ namespace GhcpCreditVisibility.Services
                             existing.DiscountQuantity = item.DiscountQuantity; existing.DiscountAmount = item.DiscountAmount;
                             existing.PricePerUnit = item.PricePerUnit; existing.GrossQuantity = item.GrossQuantity;
                         }
+
+                        // ── Intra-month history ──
+                        // The row above is rewritten in place all month, so by month end it knows the
+                        // TOTAL but not how the month got there. This records today's cumulative
+                        // reading as its own row so "which day did it jump?" stays answerable.
+                        // Cumulative, not a delta, and keyed on the day — so re-running today
+                        // overwrites rather than double-counts. See DailyUsageSnapshot.
+                        var daily = await db.DailyUsageSnapshots.FirstOrDefaultAsync(x =>
+                            x.EnterpriseId == enterprise.Id &&
+                            x.Year == now.Year && x.Month == now.Month && x.Day == now.Day &&
+                            x.UserLogin == u.GitHubComLogin && x.Model == item.Model && x.Sku == item.Sku, ct);
+
+                        if (daily is null)
+                        {
+                            db.DailyUsageSnapshots.Add(new DailyUsageSnapshot
+                            {
+                                EnterpriseId = enterprise.Id,
+                                SnapshotUtc = now, Year = now.Year, Month = now.Month, Day = now.Day,
+                                UserLogin = u.GitHubComLogin, UserName = u.GitHubComName,
+                                CostCenterId = ccId, CostCenterName = ccName,
+                                Product = item.Product, Sku = item.Sku, Model = item.Model,
+                                NetQuantity = item.NetQuantity, NetAmount = item.NetAmount, GrossAmount = item.GrossAmount
+                            });
+                        }
+                        else
+                        {
+                            daily.SnapshotUtc = now;
+                            daily.CostCenterId = ccId; daily.CostCenterName = ccName;
+                            daily.NetQuantity = item.NetQuantity; daily.NetAmount = item.NetAmount; daily.GrossAmount = item.GrossAmount;
+                        }
                         written++;
                     }
                     await db.SaveChangesAsync(ct);
@@ -253,6 +295,25 @@ namespace GhcpCreditVisibility.Services
                     db.UsageSnapshots.RemoveRange(staleRows);
                     await db.SaveChangesAsync(ct);
                     purged = staleRows.Count;
+                }
+
+                // Daily rows purge on their own window (defaults to the monthly one).
+                var dailyMonths = ResolveDailyRetentionMonths(retentionMonths, _config.GetValue<int?>("Retention:DailyMonths"));
+                var (dCutYear, dCutMonth) = ComputeRetentionCutoff(now, dailyMonths);
+                var staleDaily = db.DailyUsageSnapshots
+                    .Where(x => x.EnterpriseId == enterprise.Id)
+                    .Where(x => x.Year < dCutYear || (x.Year == dCutYear && x.Month < dCutMonth));
+
+                if (db.Database.IsRelational())
+                {
+                    purged += await staleDaily.ExecuteDeleteAsync(ct);
+                }
+                else
+                {
+                    var staleDailyRows = await staleDaily.ToListAsync(ct);
+                    db.DailyUsageSnapshots.RemoveRange(staleDailyRows);
+                    await db.SaveChangesAsync(ct);
+                    purged += staleDailyRows.Count;
                 }
 
                 run.RowsWritten = written;

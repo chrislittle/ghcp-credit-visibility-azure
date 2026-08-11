@@ -44,8 +44,20 @@ and `Measurements` (not `customDimensions`/`customMeasurements`); time → `Time
 | `ghcp.github.token_resolved` (dim: enterprise) | 0 = that enterprise's PAT (Key Vault secret from its registry row) did not resolve (check this BEFORE blaming GitHub). Mock enterprises never emit it. |
 | `ghcp.github.rate_limit_remaining` (dim: enterprise) | That enterprise's PAT budget left. Limits are PER PAT — one enterprise being throttled says nothing about the others. |
 | `ghcp.db.pending_migrations` (no dimension) | Infra-level: schema not fully applied. |
-| `SnapshotRunCompleted` (event) | `Measurements`: rowsWritten, rowsPurged, durationMs; `Properties`: instanceId, status, **enterprise**. |
+| `SnapshotRunCompleted` (event) | `Measurements`: rowsWritten, rowsPurged, durationMs; `Properties`: instanceId, status, **enterprise**. See the counting note below — neither measurement is a plain row count. |
 | `SnapshotFailed` (event) | `Properties.error` has the exception message, `Properties.enterprise` names the enterprise — **branch on error (below).** |
+
+**How rowsWritten and rowsPurged actually count.** Each run writes to TWO usage tables — the monthly
+`UsageSnapshots` row and the cumulative `DailyUsageSnapshots` row for today:
+
+- `rowsWritten` counts **usage line items processed**, not database rows. Each item now produces two
+  rows, so the database grows about twice as fast as this number suggests. Its value as a signal is
+  unchanged: **0 on a success still means silent failure** (bad slug, PAT scope), and comparing it
+  against the same enterprise's own history is still the right read.
+- `rowsPurged` is the **combined** total of monthly and daily rows purged. Daily rows are ~30x more
+  numerous, so once daily history starts ageing past its retention window this number jumps sharply
+  and stays high. **That is expected, not a runaway purge.** The two windows are separate:
+  `Retention__Months` and `Retention__DailyMonths` (which defaults to the monthly value, floor 3).
 
 The same data is available per enterprise (with slugs, PAT status, enabled flags) at
 `GET /health/diag` → `enterprises[]`, and in the admin console's enterprise registry table.

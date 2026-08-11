@@ -97,17 +97,44 @@ namespace GhcpCreditVisibility.Services
                 .ToList();
         }
 
-        private static IQueryable<UsageSnapshot> ApplyScope(IQueryable<UsageSnapshot> q, UserScope scope)
+        /// <summary>
+        /// Applies the viewer's scope to any usage-shaped table. Generic over the entity type so
+        /// UsageSnapshot (monthly) and DailyUsageSnapshot (intra-month) share ONE implementation
+        /// rather than two that can drift — this is an access-control filter, and two copies of an
+        /// access-control filter is how one of them quietly stops matching the other.
+        ///
+        /// Every predicate is built against typeof(T)'s own properties by name, never through an
+        /// interface member, so the expression trees stay translatable by the SQL Server provider.
+        /// </summary>
+        private static IQueryable<T> ApplyScope<T>(IQueryable<T> q, UserScope scope) where T : class
         {
             // The enterprise filter narrows ANY scope (including admins' SeesAll) to one enterprise.
-            if (scope.EnterpriseFilter is long entFilter) q = q.Where(x => x.EnterpriseId == entFilter);
+            if (scope.EnterpriseFilter is long entFilter) q = q.Where(EqualsLong<T>("EnterpriseId", entFilter));
             if (scope.SeesAll) return q;
             var hasPairs = scope.CostCenters.Count > 0;
             var hasUsers = scope.UserLogins.Count > 0;
             if (!hasPairs && !hasUsers) return q.Where(_ => false); // no access
-            if (hasPairs) q = q.Where(BuildPairPredicate(scope.CostCenters));
-            if (hasUsers) q = q.Where(x => scope.UserLogins.Contains(x.UserLogin));
+            if (hasPairs) q = q.Where(BuildPairPredicate<T>(scope.CostCenters));
+            if (hasUsers) q = q.Where(ContainsString<T>("UserLogin", scope.UserLogins));
             return q;
+        }
+
+        /// <summary>x =&gt; x.&lt;property&gt; == value, built against T's concrete property.</summary>
+        private static Expression<Func<T, bool>> EqualsLong<T>(string property, long value)
+        {
+            var p = Expression.Parameter(typeof(T), "x");
+            return Expression.Lambda<Func<T, bool>>(
+                Expression.Equal(Expression.Property(p, property), Expression.Constant(value)), p);
+        }
+
+        /// <summary>x =&gt; values.Contains(x.&lt;property&gt;), built against T's concrete property.</summary>
+        private static Expression<Func<T, bool>> ContainsString<T>(string property, IReadOnlyCollection<string> values)
+        {
+            var p = Expression.Parameter(typeof(T), "x");
+            var list = values.ToList();
+            var contains = typeof(List<string>).GetMethod(nameof(List<string>.Contains), new[] { typeof(string) })!;
+            return Expression.Lambda<Func<T, bool>>(
+                Expression.Call(Expression.Constant(list), contains, Expression.Property(p, property)), p);
         }
 
         /// <summary>
@@ -115,9 +142,9 @@ namespace GhcpCreditVisibility.Services
         /// id-list Contains clauses, so it translates to SQL. A flat Contains over bare cost-center
         /// ids would be wider than the grant whenever an id existed in two enterprises.
         /// </summary>
-        private static Expression<Func<UsageSnapshot, bool>> BuildPairPredicate(IReadOnlyCollection<EnterpriseCostCenter> pairs)
+        private static Expression<Func<T, bool>> BuildPairPredicate<T>(IReadOnlyCollection<EnterpriseCostCenter> pairs)
         {
-            var p = Expression.Parameter(typeof(UsageSnapshot), "x");
+            var p = Expression.Parameter(typeof(T), "x");
             Expression? body = null;
             foreach (var g in pairs.GroupBy(x => x.EnterpriseId))
             {
@@ -133,7 +160,7 @@ namespace GhcpCreditVisibility.Services
                 var clause = Expression.AndAlso(entEq, Expression.AndAlso(notNull, contains));
                 body = body is null ? clause : Expression.OrElse(body, clause);
             }
-            return Expression.Lambda<Func<UsageSnapshot, bool>>(body ?? Expression.Constant(false), p);
+            return Expression.Lambda<Func<T, bool>>(body ?? Expression.Constant(false), p);
         }
 
         /// <summary>Loads the cost-center directory ((enterprise, id) -> CURRENT name, refreshed every
@@ -376,6 +403,55 @@ namespace GhcpCreditVisibility.Services
             return new FilterOptions(users, models, ccs, enterprises);
         }
 
+        /// <summary>
+        /// Turns CUMULATIVE month-to-date readings into per-day spend by differencing consecutive
+        /// observations within each (enterprise, user, model, sku, month) series, and projects the
+        /// result onto <see cref="UsageSnapshot"/> so the existing bucketing, keying and labelling
+        /// all apply unchanged.
+        ///
+        /// Behaviours worth knowing, because each one is a real situation rather than a hypothetical:
+        ///  * FIRST observation of a month carries everything accrued up to that day. If the first
+        ///    run of the month is on the 3rd, that row holds days 1-3 and is attributed to the 3rd —
+        ///    there is no information available to split it further.
+        ///  * MISSED RUNS produce a difference spanning the gap, attributed to the day the reading
+        ///    resumed. Honest, and preferable to inventing a distribution across days we never saw.
+        ///  * NEGATIVE differences are preserved, not clamped. GitHub restating a figure downward is
+        ///    real, and hiding the correction would leave the daily series disagreeing with the
+        ///    monthly total for no visible reason.
+        /// </summary>
+        public static List<UsageSnapshot> ToPerDayRows(IEnumerable<DailyUsageSnapshot> cumulative)
+        {
+            var result = new List<UsageSnapshot>();
+            foreach (var series in cumulative.GroupBy(r =>
+                         (r.EnterpriseId, r.Year, r.Month, r.UserLogin, r.Model, r.Sku)))
+            {
+                decimal prevNet = 0m, prevGross = 0m, prevQty = 0m;
+                var first = true;
+                foreach (var r in series.OrderBy(x => x.Day))
+                {
+                    // First reading of the month is itself the delta — there is no earlier baseline.
+                    var netDelta = first ? r.NetAmount : r.NetAmount - prevNet;
+                    var grossDelta = first ? r.GrossAmount : r.GrossAmount - prevGross;
+                    var qtyDelta = first ? r.NetQuantity : r.NetQuantity - prevQty;
+
+                    result.Add(new UsageSnapshot
+                    {
+                        EnterpriseId = r.EnterpriseId,
+                        SnapshotUtc = r.SnapshotUtc,
+                        Year = r.Year, Month = r.Month, Day = r.Day,
+                        UserLogin = r.UserLogin, UserName = r.UserName,
+                        CostCenterId = r.CostCenterId, CostCenterName = r.CostCenterName,
+                        Product = r.Product, Sku = r.Sku, Model = r.Model,
+                        NetQuantity = qtyDelta, NetAmount = netDelta, GrossAmount = grossDelta,
+                    });
+
+                    prevNet = r.NetAmount; prevGross = r.GrossAmount; prevQty = r.NetQuantity;
+                    first = false;
+                }
+            }
+            return result;
+        }
+
         private static DateOnly BucketOf(UsageSnapshot r, TimeGranularity gran)
         {
             var d = new DateOnly(r.Year, r.Month, Math.Clamp(r.Day <= 0 ? 1 : r.Day, 1, DateTime.DaysInMonth(r.Year, r.Month)));
@@ -420,6 +496,37 @@ namespace GhcpCreditVisibility.Services
                     : q.Where(x => x.CostCenterId == fCc);
             }
             var rows = await q.ToListAsync(ct);
+
+            // ── Intra-month detail ──
+            // UsageSnapshot holds ONE row per month (Day = 1) for real data, so day/week buckets
+            // would collapse to a single point per month. DailyUsageSnapshot holds the cumulative
+            // readings that make real per-day figures possible; difference them and substitute.
+            //
+            // Substitution is PER MONTH, not wholesale: months predating this feature have no daily
+            // rows and must keep rendering from their monthly total rather than vanishing from the
+            // chart. It also keeps the mock's fabricated per-day history working in demo mode.
+            if (gran is TimeGranularity.Day or TimeGranularity.Week)
+            {
+                var dq = ApplyScope(db.DailyUsageSnapshots, scope);
+                if (!string.IsNullOrWhiteSpace(filterUser)) dq = dq.Where(x => x.UserLogin == filterUser);
+                if (!string.IsNullOrWhiteSpace(filterModel)) dq = dq.Where(x => x.Model == filterModel);
+                if (!string.IsNullOrWhiteSpace(filterCostCenter))
+                {
+                    var (dEnt, dCc) = ParseCostCenterKey(filterCostCenter);
+                    dq = dEnt is long de
+                        ? dq.Where(x => x.EnterpriseId == de && x.CostCenterId == dCc)
+                        : dq.Where(x => x.CostCenterId == dCc);
+                }
+                var perDay = ToPerDayRows(await dq.ToListAsync(ct));
+                if (perDay.Count > 0)
+                {
+                    var covered = perDay.Select(r => (r.EnterpriseId, r.Year, r.Month)).ToHashSet();
+                    rows = rows.Where(r => !covered.Contains((r.EnterpriseId, r.Year, r.Month)))
+                               .Concat(perDay)
+                               .ToList();
+                }
+            }
+
             var needsNames = dim is SeriesDimension.CostCenter or SeriesDimension.Enterprise;
             var currentNames = dim == SeriesDimension.CostCenter ? await LoadCurrentNamesAsync(db, ct) : new Dictionary<(long, string), string?>();
             var entNames = needsNames || rows.Select(x => x.EnterpriseId).Distinct().Count() > 1

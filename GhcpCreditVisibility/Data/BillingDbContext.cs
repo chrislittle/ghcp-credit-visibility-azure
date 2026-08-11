@@ -14,6 +14,7 @@ namespace GhcpCreditVisibility.Data
         public BillingDbContext(DbContextOptions<BillingDbContext> options) : base(options) { }
 
         public DbSet<UsageSnapshot> UsageSnapshots => Set<UsageSnapshot>();
+        public DbSet<DailyUsageSnapshot> DailyUsageSnapshots => Set<DailyUsageSnapshot>();
         public DbSet<SnapshotRun> SnapshotRuns => Set<SnapshotRun>();
 
         // ── Enterprise registry: the single source of truth for which GitHub enterprises this
@@ -77,6 +78,26 @@ namespace GhcpCreditVisibility.Data
                 // Unit prices are small and can carry more significant digits than an amount
                 // (fractions of a cent per credit), so this one gets extra scale rather than (18,4).
                 e.Property(x => x.PricePerUnit).HasPrecision(18, 6);
+            });
+
+            b.Entity<DailyUsageSnapshot>(e =>
+            {
+                e.HasKey(x => x.Id);
+                // One observation per enterprise/user/model/sku per DAY. Re-running a day overwrites
+                // that row rather than appending, which is what makes the job idempotent.
+                e.HasIndex(x => new { x.EnterpriseId, x.Year, x.Month, x.Day, x.UserLogin, x.Model, x.Sku }).IsUnique();
+                // The read path filters an enterprise to a month and orders by day; this covers it.
+                e.HasIndex(x => new { x.EnterpriseId, x.Year, x.Month, x.Day });
+                e.Property(x => x.UserLogin).HasMaxLength(255);
+                e.Property(x => x.UserName).HasMaxLength(255);
+                e.Property(x => x.CostCenterId).HasMaxLength(128);
+                e.Property(x => x.CostCenterName).HasMaxLength(255);
+                e.Property(x => x.Product).HasMaxLength(64);
+                e.Property(x => x.Sku).HasMaxLength(64);
+                e.Property(x => x.Model).HasMaxLength(128);
+                e.Property(x => x.NetAmount).HasPrecision(18, 4);
+                e.Property(x => x.GrossAmount).HasPrecision(18, 4);
+                e.Property(x => x.NetQuantity).HasPrecision(18, 4);
             });
 
             b.Entity<SnapshotRun>(e =>
@@ -381,6 +402,50 @@ namespace GhcpCreditVisibility.Data
         /// <summary>Quantity before discount. Pairs with NetQuantity to show consumption against
         /// any included allowance.</summary>
         public decimal? GrossQuantity { get; set; }
+    }
+
+    /// <summary>
+    /// One observation of a user's CUMULATIVE month-to-date usage, as reported by GitHub on a given
+    /// day. This is the intra-month history <see cref="UsageSnapshot"/> cannot hold: that table keeps
+    /// exactly one row per user/model/sku per MONTH and rewrites it in place on every run, so by
+    /// month end it knows the total but not how the month got there.
+    ///
+    /// VALUES ARE CUMULATIVE, NOT PER-DAY. A row for the 6th holds everything spent from the 1st
+    /// through the 6th. Per-day spend is derived by differencing consecutive days at READ time
+    /// (see UsageQueryService), deliberately rather than storing pre-computed deltas:
+    ///   * Restatements self-heal. If GitHub revises a figure, the next run overwrites that day's
+    ///     cumulative value and every derived difference is instantly correct again. A stored delta
+    ///     would already be baked in and silently wrong.
+    ///   * Re-running a day is idempotent — it overwrites one row rather than double-counting.
+    ///   * A missed run shows as a GAP rather than a phantom spike, because the difference then
+    ///     legitimately spans several days instead of being attributed to one.
+    ///
+    /// Never sum these rows. Summing cumulative values inflates totals by roughly the number of days
+    /// observed; monthly figures come from <see cref="UsageSnapshot"/>, which stays authoritative.
+    /// </summary>
+    public sealed class DailyUsageSnapshot
+    {
+        public long Id { get; set; }
+        public long EnterpriseId { get; set; } = Enterprise.DefaultId;
+        /// <summary>When this observation was taken.</summary>
+        public DateTime SnapshotUtc { get; set; }
+        public int Year { get; set; }
+        public int Month { get; set; }
+        /// <summary>The day this cumulative reading is AS OF. Always a real day, never a 1 sentinel.</summary>
+        public int Day { get; set; }
+        public string UserLogin { get; set; } = "";
+        public string? UserName { get; set; }
+        public string? CostCenterId { get; set; }
+        public string? CostCenterName { get; set; }
+        public string Product { get; set; } = "";
+        public string Sku { get; set; } = "";
+        public string Model { get; set; } = "";
+        /// <summary>CUMULATIVE month-to-date quantity as of <see cref="Day"/>.</summary>
+        public decimal NetQuantity { get; set; }
+        /// <summary>CUMULATIVE month-to-date net amount as of <see cref="Day"/>.</summary>
+        public decimal NetAmount { get; set; }
+        /// <summary>CUMULATIVE month-to-date gross amount as of <see cref="Day"/>.</summary>
+        public decimal GrossAmount { get; set; }
     }
 
     /// <summary>Audit row for each per-enterprise snapshot execution. One row per enterprise per
