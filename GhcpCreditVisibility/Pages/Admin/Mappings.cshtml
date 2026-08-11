@@ -80,6 +80,19 @@
                         else { <span class="badge text-bg-secondary">disabled</span> }
                     </td>
                     <td style="text-align:right;white-space:nowrap">
+                        @* Without this the only way to force a snapshot was restarting the container —
+                           the scheduled job is an in-process 12-hour timer with no manual trigger. It
+                           takes the same distributed lease, so it cannot collide with a scheduled run. *@
+                        @if (e.Enabled)
+                        {
+                            <form method="post" asp-page-handler="RunSnapshot" style="display:inline">
+                                <input type="hidden" name="id" value="@e.Id" />
+                                <button class="btn btn-sm btn-outline-primary" type="submit"
+                                        title="Snapshot this enterprise now instead of waiting for the 12-hour cycle. Runs in the background; refresh in a few seconds. Skipped (not queued) if another run is already in progress.">
+                                    ▶ Run now
+                                </button>
+                            </form>
+                        }
                         <a class="btn btn-sm btn-outline-secondary" href="?EditEnterprise=@e.Id">Edit</a>
                         <form method="post" asp-page-handler="SetEnterpriseEnabled" style="display:inline">
                             <input type="hidden" name="id" value="@e.Id" />

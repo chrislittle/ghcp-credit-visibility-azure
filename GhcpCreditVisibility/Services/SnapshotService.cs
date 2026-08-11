@@ -164,6 +164,28 @@ namespace GhcpCreditVisibility.Services
             }
         }
 
+        /// <summary>
+        /// Snapshots ONE enterprise by id. Used by the admin console's "Run now" — the scheduled
+        /// loop calls <see cref="RunForEnterpriseAsync"/> directly for each enabled enterprise.
+        ///
+        /// Callers are responsible for holding the snapshot lease (see
+        /// <see cref="ManualSnapshotTrigger"/>); this method does not take it, so that the
+        /// scheduled loop is not forced to re-acquire per enterprise mid-cycle.
+        /// </summary>
+        public async Task RunOneAsync(long enterpriseId, CancellationToken ct = default)
+        {
+            await _registry.EnsureBootstrapAsync(ct);
+            var enterprise = (await _registry.GetAllAsync(ct)).FirstOrDefault(e => e.Id == enterpriseId)
+                ?? throw new InvalidOperationException($"Enterprise {enterpriseId} is not in the registry.");
+
+            // Disabled enterprises are excluded from the scheduled loop; running one by hand would
+            // quietly reintroduce data the operator deliberately stopped collecting.
+            if (!enterprise.Enabled)
+                throw new InvalidOperationException($"Enterprise '{enterprise.Slug}' is disabled — enable it first.");
+
+            await RunForEnterpriseAsync(enterprise, ct);
+        }
+
         private async Task RunForEnterpriseAsync(Enterprise enterprise, CancellationToken ct)
         {
             var retentionMonths = _config.GetValue("Retention:Months", 6);

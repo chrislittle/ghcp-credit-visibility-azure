@@ -55,6 +55,9 @@ builder.Services.ConfigureHttpClientDefaults(http => http.AddStandardResilienceH
 builder.Services.AddScoped<EnterpriseRegistryService>();
 builder.Services.AddScoped<SnapshotService>();
 builder.Services.AddHostedService<SnapshotHostedService>();
+// Singleton: it tracks which enterprises are mid-run on this instance, and it outlives the request
+// that starts a snapshot (the work continues after the response is sent).
+builder.Services.AddSingleton<ManualSnapshotTrigger>();
 
 // Apply EF Core migrations in the background (retry/backoff) on the SQL path so the app never
 // crash-loops if the DB isn't ready or the identity hasn't been granted DDL yet. The in-memory

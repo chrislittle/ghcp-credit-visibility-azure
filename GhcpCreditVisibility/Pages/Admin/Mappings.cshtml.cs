@@ -26,6 +26,7 @@ namespace GhcpCreditVisibility.Pages.Admin
         private readonly IDbContextFactory<BillingDbContext> _dbFactory;
         private readonly IAppAdminChecker _admin;
         private readonly IConfiguration _config;
+        private readonly ManualSnapshotTrigger _snapshotTrigger;
 
         public MappingsModel(
             AdminMappingService svc,
@@ -33,7 +34,8 @@ namespace GhcpCreditVisibility.Pages.Admin
             IGitHubPatResolver patResolver,
             IDbContextFactory<BillingDbContext> dbFactory,
             IAppAdminChecker admin,
-            IConfiguration config)
+            IConfiguration config,
+            ManualSnapshotTrigger snapshotTrigger)
         {
             _svc = svc;
             _registry = registry;
@@ -41,6 +43,7 @@ namespace GhcpCreditVisibility.Pages.Admin
             _dbFactory = dbFactory;
             _admin = admin;
             _config = config;
+            _snapshotTrigger = snapshotTrigger;
         }
 
         public bool IsAdmin { get; private set; }
@@ -181,6 +184,32 @@ namespace GhcpCreditVisibility.Pages.Admin
                 Message = enabled
                     ? "Enterprise enabled — it will be included in the next snapshot cycle (no restart needed)."
                     : "Enterprise disabled — snapshots stop; existing data remains until removed.";
+            }
+            catch (Exception ex) { Error = ex.Message; }
+            return RedirectToPage();
+        }
+
+        /// <summary>
+        /// Runs a snapshot for one enterprise immediately, instead of waiting up to 12 hours for the
+        /// timer or restarting the container to force one. Returns as soon as the work is scheduled;
+        /// the row's "last snapshot" column reflects the outcome on the next page load.
+        /// </summary>
+        public async Task<IActionResult> OnPostRunSnapshotAsync(long id, CancellationToken ct)
+        {
+            if (!await _admin.IsAdminAsync(User, ct)) return Forbid();
+            try
+            {
+                var ent = (await _registry.GetAllAsync(ct)).FirstOrDefault(e => e.Id == id);
+                if (ent is null) { Error = "That enterprise is no longer in the registry."; return RedirectToPage(); }
+                if (!ent.Enabled) { Error = $"'{ent.Slug}' is disabled — enable it before running a snapshot."; return RedirectToPage(); }
+
+                Message = _snapshotTrigger.TryStart(id, Actor) switch
+                {
+                    ManualSnapshotTrigger.StartResult.Started =>
+                        $"Snapshot started for '{ent.Slug}'. It runs in the background — refresh in a few seconds to see the result. " +
+                        "If another run holds the snapshot lease, this one is skipped rather than queued.",
+                    _ => $"A snapshot for '{ent.Slug}' is already running on this instance.",
+                };
             }
             catch (Exception ex) { Error = ex.Message; }
             return RedirectToPage();
