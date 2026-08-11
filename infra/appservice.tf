@@ -92,6 +92,19 @@ resource "azurerm_linux_web_app" "app" {
       # github-pat-<slug> secrets via the Key Vault SDK using its existing VAULT-SCOPE secret-read
       # role, so a new enterprise's secret is readable the moment it exists — no infra change.
       "KeyVault__Uri" = azurerm_key_vault.kv.vault_uri
+
+      # REQUIRED with a user-assigned identity. The PAT resolver builds a DefaultAzureCredential,
+      # and with a UAMI its ManagedIdentityCredential has no way to know WHICH identity to present —
+      # it requests the system-assigned one, which does not exist in this mode, and token acquisition
+      # fails. The SDK reads AZURE_CLIENT_ID to disambiguate.
+      #
+      # This is easy to miss because the app-setting Key Vault REFERENCE path (GitHub__Token below)
+      # keeps working without it — that one is resolved by the App Service platform, not by the SDK
+      # inside the container. So single-enterprise deployments look fine while every per-enterprise
+      # github-pat-<slug> lookup fails with "PAT missing" and only a swallowed warning in the log.
+      # Note the SQL connection string below already names the identity for the same reason.
+      "AZURE_CLIENT_ID" = local.use_uami ? azurerm_user_assigned_identity.app[0].client_id : null
+
       "Retention__Months"                     = tostring(var.retention_months)
       # Tells the container whether the platform Easy Auth module is actually in front of it.
       # The app derives identity from the X-MS-CLIENT-PRINCIPAL request header, which is only
