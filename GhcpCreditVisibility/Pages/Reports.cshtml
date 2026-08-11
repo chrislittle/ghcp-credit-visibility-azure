@@ -188,6 +188,20 @@
             }
             Filters that would collapse the breakdown (e.g. a single user when breaking down by cost center) are hidden by design.
         </div>
+        @* A 12-month range over three weeks of history otherwise reads as a collapse in spend
+           rather than a short history. Per-user data is not backfilled; organization data is,
+           which is why that dimension is exempt from this warning. *@
+        @if (Model.RangeExceedsHistory && Model.CollectingSince is DateOnly since)
+        {
+            <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
+                <p class="gh-note mb-0">
+                    📅 <strong>Collecting since @since.ToString("d MMM yyyy").</strong>
+                    This range reaches back further than that, so earlier buckets are empty because nothing was
+                    collected then — not because spend was low. Per-user history isn't backfilled from GitHub
+                    (the Organization breakdown is, so it goes back further).
+                </p>
+            </div>
+        }
     </div>
 </div>
 

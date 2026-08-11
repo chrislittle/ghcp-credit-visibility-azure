@@ -59,6 +59,50 @@ namespace GhcpCreditVisibility.Services
         }
 
         public sealed record MonthOption(int Year, int Month);
+
+        /// <summary>
+        /// When this deployment started collecting per-user usage for the viewer's scope — the
+        /// earliest month that actually has data, or, when there is none yet, the earliest
+        /// registration date among the enterprises in scope.
+        ///
+        /// Exists because per-user history is NOT backfilled. GitHub is asked only for the CURRENT
+        /// month, every run, so a newly onboarded enterprise has an empty dashboard until usage
+        /// accrues — and "empty" is indistinguishable from "broken" without being told why.
+        ///
+        /// Deliberately not solved by partial backfill: filling some users/months and not others
+        /// would make an incomplete month look like a month of genuinely low spend, which is worse
+        /// than a visible gap in an app whose numbers people reconcile against invoices.
+        /// </summary>
+        public async Task<DateOnly?> GetCollectingSinceAsync(UserScope scope, CancellationToken ct = default)
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+            var months = await ApplyScope(db.UsageSnapshots, scope)
+                .Select(x => new { x.Year, x.Month })
+                .Distinct()
+                .ToListAsync(ct);
+
+            if (months.Count > 0)
+            {
+                var earliest = months.OrderBy(m => m.Year).ThenBy(m => m.Month).First();
+                return new DateOnly(earliest.Year, earliest.Month, 1);
+            }
+
+            // No usage rows at all — fall back to when the enterprise(s) were registered, which is
+            // the honest answer to "why is this empty": nothing has been collected yet.
+            var entQuery = db.Enterprises.Where(e => e.Slug != Enterprise.BootstrapPlaceholderSlug);
+            if (scope.EnterpriseFilter is long entFilter)
+                entQuery = entQuery.Where(e => e.Id == entFilter);
+            else if (!scope.SeesAll)
+            {
+                var visible = scope.EnterpriseIds.ToList();
+                if (visible.Count == 0) return null;
+                entQuery = entQuery.Where(e => visible.Contains(e.Id));
+            }
+
+            var created = await entQuery.Select(e => (DateTime?)e.CreatedUtc).MinAsync(ct);
+            return created is DateTime c ? DateOnly.FromDateTime(c) : null;
+        }
         public sealed record EnterpriseOption(long Id, string Name);
 
         /// <summary>Distinct (year, month) periods present in the caller's scope, newest first — drives the month selector.</summary>

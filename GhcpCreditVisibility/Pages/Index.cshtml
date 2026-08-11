@@ -251,7 +251,27 @@
                     }
                     @if (Model.UserCount == 0)
                     {
-                        <tr><td colspan="5" style="text-align:center;color:#66707d;padding:22px 0;">No usage records for this month.</td></tr>
+                        @* An empty month has two very different causes and they must not look alike:
+                           we weren't collecting yet, or we were and nobody used Copilot. Per-user
+                           history is NOT backfilled — GitHub is only ever asked for the current
+                           month — so a newly onboarded enterprise is legitimately blank until usage
+                           accrues, and saying so is the difference between "working" and "broken". *@
+                        <tr><td colspan="5" style="text-align:center;color:#66707d;padding:22px 0;">
+                            @if (Model.SelectedMonthPrecedesCollection && Model.CollectingSince is DateOnly before)
+                            {
+                                <text>No data for @Model.MonthLabel — this deployment started collecting on <strong>@before.ToString("d MMM yyyy")</strong>.</text>
+                                <div style="margin-top:6px;font-size:.9em;">Per-user history isn't backfilled from GitHub, so months before then stay empty.</div>
+                            }
+                            else if (Model.CollectingSince is DateOnly since)
+                            {
+                                <text>No usage recorded for @Model.MonthLabel.</text>
+                                <div style="margin-top:6px;font-size:.9em;">Collecting since <strong>@since.ToString("d MMM yyyy")</strong> — this month simply has no usage yet.</div>
+                            }
+                            else
+                            {
+                                <text>No usage records for this month.</text>
+                            }
+                        </td></tr>
                     }
                     else if (Model.MatchingUserCount == 0)
                     {

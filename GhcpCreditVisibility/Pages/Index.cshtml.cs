@@ -97,6 +97,19 @@ namespace GhcpCreditVisibility.Pages
         /// </summary>
         public UsageQueryService.AllowanceCoverage Coverage =>
             new(TotalSpend, TotalGrossSpend);
+
+        /// <summary>When per-user collection began for this scope. Per-user history is not
+        /// backfilled, so an empty month before this date is expected rather than broken.</summary>
+        public DateOnly? CollectingSince { get; private set; }
+
+        /// <summary>
+        /// True when the selected month has no data AND that month predates collection — i.e. the
+        /// emptiness is explained by "we weren't watching yet", not by a failure. An empty month
+        /// AFTER collection started is a different thing (genuinely no usage) and says so instead.
+        /// </summary>
+        public bool SelectedMonthPrecedesCollection =>
+            UserCount == 0 && CollectingSince is DateOnly since &&
+            new DateOnly(Year, Month, 1) < new DateOnly(since.Year, since.Month, 1);
         public int UserCount { get; private set; }
         public int CostCenterCount { get; private set; }
         public decimal AvgPerUser { get; private set; }
@@ -139,6 +152,7 @@ namespace GhcpCreditVisibility.Pages
                 Ent = null;
 
             AvailableMonths = await _query.GetAvailableMonthsAsync(scope, ct);
+            CollectingSince = await _query.GetCollectingSinceAsync(scope, ct);
 
             // Resolve the selected period: explicit ?Period=YYYY-MM, else latest available, else now.
             var now = DateTime.UtcNow;

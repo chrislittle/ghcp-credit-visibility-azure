@@ -67,6 +67,27 @@ namespace GhcpCreditVisibility.Pages
         /// <summary>Org rows come from a different source with no user/model/cost-centre columns, so
         /// none of the usual filters can compose with this dimension.</summary>
         public bool IsOrganization => Dim == "organization";
+
+        /// <summary>When per-user collection began for this scope (not backfilled — see
+        /// <see cref="UsageQueryService.GetCollectingSinceAsync"/>).</summary>
+        public DateOnly? CollectingSince { get; private set; }
+
+        /// <summary>
+        /// True when the chosen range reaches back further than this deployment has been collecting.
+        /// Without saying so, a "last 12 months" chart over three weeks of history reads as a
+        /// catastrophic decline rather than a short history.
+        ///
+        /// Organization is exempt: that dimension IS backfilled, so its history genuinely extends
+        /// back and the warning would be wrong.
+        /// </summary>
+        public bool RangeExceedsHistory =>
+            !IsOrganization && CollectingSince is DateOnly since && Range > 0 &&
+            (Gran switch
+            {
+                "day" => DateTime.UtcNow.Date.AddDays(-Range),
+                "week" => DateTime.UtcNow.Date.AddDays(-7 * Range),
+                _ => DateTime.UtcNow.Date.AddMonths(-Range),
+            }) < new DateTime(since.Year, since.Month, since.Day);
         public string GranLabel => Gran switch { "day" => "day", "week" => "week", _ => "month" };
         public bool IsTotal => Dim == "total";
 
@@ -107,6 +128,7 @@ namespace GhcpCreditVisibility.Pages
                 Ent = null;
 
             Options = await _query.GetFilterOptionsAsync(scope, ct);
+            CollectingSince = await _query.GetCollectingSinceAsync(scope, ct);
 
             if (View != "table") View = "chart";
 
