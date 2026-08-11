@@ -177,6 +177,69 @@ namespace GhcpCreditVisibility.Services
             return Task.FromResult(ccs);
         }
 
+        public Task<IReadOnlyList<OrgUsageItem>> GetOrgUsageAsync(string enterprise, int year, int month, CancellationToken ct = default)
+        {
+            ThrowIfBroken(enterprise);
+            var seed = SeedFor(enterprise);
+            var items = new List<OrgUsageItem>();
+            var days = DateTime.DaysInMonth(year, month);
+
+            // Two orgs per enterprise, each with a couple of repos — enough for a rollup to be
+            // meaningful without bloating demo data.
+            var orgs = new[] { $"{enterprise}-platform", $"{enterprise}-apps" };
+            foreach (var (model, price) in Models)
+            {
+                foreach (var org in orgs)
+                {
+                    for (var day = 1; day <= days; day += 5)   // every 5th day keeps demo volume sane
+                    {
+                        var rng = new Random(StableSeed($"{enterprise}|{org}|{model}|{day}") + year * 100 + month);
+                        var qty = rng.Next(5, 60);
+                        var gross = Math.Round(qty * price, 2);
+                        var discount = Math.Round(gross * 0.10m, 2);
+                        items.Add(new OrgUsageItem
+                        {
+                            Date = new DateTime(year, month, day, 0, 0, 0, DateTimeKind.Utc),
+                            Product = "Copilot",
+                            Sku = "Copilot AI Credits",
+                            UnitType = "ai-credits",
+                            Quantity = qty,
+                            PricePerUnit = price,
+                            GrossAmount = gross,
+                            DiscountAmount = discount,
+                            NetAmount = gross - discount,
+                            OrganizationName = org,
+                            RepositoryName = $"{org}/repo-{(day % 3) + 1}",
+                        });
+                    }
+                }
+            }
+
+            // UNATTRIBUTED line items: a live sample had 15 of 37 with no organizationName at all
+            // (enterprise-level charges). Demo data includes them so any rollup is forced to handle
+            // the null case rather than quietly dropping a chunk of spend.
+            for (var day = 1; day <= days; day += 10)
+            {
+                items.Add(new OrgUsageItem
+                {
+                    Date = new DateTime(year, month, day, 0, 0, 0, DateTimeKind.Utc),
+                    Product = "Copilot",
+                    Sku = "Copilot AI Credits",
+                    UnitType = "ai-credits",
+                    Quantity = 12,
+                    PricePerUnit = 0.04m,
+                    GrossAmount = 0.48m,
+                    DiscountAmount = 0m,
+                    NetAmount = 0.48m,
+                    OrganizationName = null,
+                    RepositoryName = null,
+                });
+            }
+
+            IReadOnlyList<OrgUsageItem> result = items;
+            return Task.FromResult(result);
+        }
+
         public Task<IReadOnlyList<Budget>> GetBudgetsAsync(string enterprise, CancellationToken ct = default)
         {
             ThrowIfBroken(enterprise);

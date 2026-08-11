@@ -12,9 +12,10 @@ namespace GhcpCreditVisibility.Tests
     /// discount column that presents as an unexplained increase no breakdown can account for.
     ///
     /// These columns are NULLABLE by design: NULL means "not captured" (rows written before the
-    /// columns existed, and months already frozen by then), 0 means "GitHub reported zero". The
-    /// distinction matters because usage history cannot be backfilled — GitHub's usage API serves
-    /// the current month only.
+    /// columns existed, and months already frozen by then), 0 means "GitHub reported zero".
+    /// The distinction is what stops the app reporting a $0 discount for a month it simply never
+    /// recorded — and it is precisely the marker a backfill would search for, since GitHub serves a
+    /// rolling 24-month window that this app does not yet re-request.
     /// </summary>
     public class UsageBillingDetailTests
     {

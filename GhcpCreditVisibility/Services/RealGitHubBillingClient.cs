@@ -68,6 +68,17 @@ namespace GhcpCreditVisibility.Services
             return result?.CostCenters ?? new List<CostCenter>();
         }
 
+        public async Task<IReadOnlyList<OrgUsageItem>> GetOrgUsageAsync(string enterprise, int year, int month, CancellationToken ct = default)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(enterprise);
+            // Whole month in ONE request — this endpoint takes no user filter, so there is no
+            // per-user fan-out here and it costs a single call against the rate-limit budget.
+            var uri = $"/enterprises/{Uri.EscapeDataString(enterprise)}/settings/billing/usage" +
+                      $"?year={year}&month={month}";
+            var result = await SendAsync<EnterpriseOrgUsage>(uri, ct);
+            return result?.UsageItems ?? new List<OrgUsageItem>();
+        }
+
         public async Task<IReadOnlyList<Budget>> GetBudgetsAsync(string enterprise, CancellationToken ct = default)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(enterprise);

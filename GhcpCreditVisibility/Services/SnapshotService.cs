@@ -45,8 +45,17 @@ namespace GhcpCreditVisibility.Services
 
         /// <summary>
         /// Floor on months of history kept, regardless of configuration. Reports and trends need at
-        /// least a quarter to mean anything, and purged rows are UNRECOVERABLE — GitHub's billing
-        /// API only serves the current month, so history exists nowhere else once deleted.
+        /// least a quarter to mean anything.
+        ///
+        /// CORRECTED 2026-08-11 (verified against the live API): purged rows are NOT permanently
+        /// lost. GitHub's billing usage endpoints take optional year/month/day parameters and serve
+        /// a rolling TWO-YEAR window — a request beyond it fails with "Time period cannot be more
+        /// than 2 years in the past." Earlier comments here claimed the API served the current month
+        /// only; that was wrong, and it made every retention decision look more final than it is.
+        ///
+        /// The floor still earns its place. Recovery needs a BACKFILL JOB THAT DOES NOT EXIST YET
+        /// (this app only ever requests the current month), so a purge today still means data gone
+        /// until someone writes one — and anything older than 24 months genuinely is gone for good.
         /// </summary>
         public const int MinRetentionMonths = 3;
 
@@ -70,7 +79,8 @@ namespace GhcpCreditVisibility.Services
         /// still small in absolute terms (single-digit GB at enterprise scale, cents per month on
         /// Azure SQL), so the separate knob exists for very large deployments rather than as the
         /// expected thing to tune. The same <see cref="MinRetentionMonths"/> floor applies, for the
-        /// same reason: purged rows cannot be refetched from GitHub.
+        /// same reason: refetching purged rows needs a backfill job that does not exist yet, and
+        /// GitHub's window closes entirely at 24 months.
         /// </summary>
         public static int ResolveDailyRetentionMonths(int monthlyRetention, int? dailyRetentionOverride) =>
             Math.Max(MinRetentionMonths, dailyRetentionOverride ?? monthlyRetention);
@@ -154,7 +164,7 @@ namespace GhcpCreditVisibility.Services
                                 SnapshotUtc = now, Year = now.Year, Month = now.Month, Day = 1,
                                 UserLogin = u.GitHubComLogin, UserName = u.GitHubComName,
                                 CostCenterId = ccId, CostCenterName = ccName,
-                                Product = item.Product, Sku = item.Sku, Model = item.Model,
+                                Product = item.Product, Sku = item.Sku, Model = item.Model, UnitType = item.UnitType,
                                 NetQuantity = item.NetQuantity, NetAmount = item.NetAmount, GrossAmount = item.GrossAmount,
                                 DiscountQuantity = item.DiscountQuantity, DiscountAmount = item.DiscountAmount,
                                 PricePerUnit = item.PricePerUnit, GrossQuantity = item.GrossQuantity
@@ -191,7 +201,7 @@ namespace GhcpCreditVisibility.Services
                                 SnapshotUtc = now, Year = now.Year, Month = now.Month, Day = now.Day,
                                 UserLogin = u.GitHubComLogin, UserName = u.GitHubComName,
                                 CostCenterId = ccId, CostCenterName = ccName,
-                                Product = item.Product, Sku = item.Sku, Model = item.Model,
+                                Product = item.Product, Sku = item.Sku, Model = item.Model, UnitType = item.UnitType,
                                 NetQuantity = item.NetQuantity, NetAmount = item.NetAmount, GrossAmount = item.GrossAmount
                             });
                         }
@@ -204,6 +214,59 @@ namespace GhcpCreditVisibility.Services
                         written++;
                     }
                     await db.SaveChangesAsync(ct);
+                }
+
+                // ── Organization / repository attribution (ONE call for the whole month) ──
+                // The per-user AI-credit report carries no organization: its top-level `user` and
+                // `organization` fields merely ECHO the filters you passed, so org attribution can
+                // never come from that loop. This endpoint supplies organizationName,
+                // repositoryName and a per-item date in a single request — no per-user fan-out, one
+                // call against the rate-limit budget. It has no user attribution, so the two
+                // sources are complementary and neither replaces the other.
+                //
+                // Replace-per-month rather than upsert: one response IS the whole month, and the
+                // natural key would need nullable org/repo columns (see the entity config).
+                try
+                {
+                    var orgItems = await client.GetOrgUsageAsync(enterprise.Slug, now.Year, now.Month, ct);
+                    var existingOrgRows = db.OrgUsageSnapshots
+                        .Where(x => x.EnterpriseId == enterprise.Id && x.Year == now.Year && x.Month == now.Month);
+                    if (db.Database.IsRelational())
+                    {
+                        await existingOrgRows.ExecuteDeleteAsync(ct);
+                    }
+                    else
+                    {
+                        db.OrgUsageSnapshots.RemoveRange(await existingOrgRows.ToListAsync(ct));
+                        await db.SaveChangesAsync(ct);
+                    }
+
+                    foreach (var oi in orgItems)
+                    {
+                        // Date comes from the LINE ITEM, not the run clock — that is what makes this
+                        // table genuinely daily. Items without one fall back to the 1st rather than
+                        // being dropped.
+                        var d = oi.Date ?? new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+                        db.OrgUsageSnapshots.Add(new OrgUsageSnapshot
+                        {
+                            EnterpriseId = enterprise.Id,
+                            SnapshotUtc = now,
+                            Year = d.Year, Month = d.Month, Day = d.Day,
+                            OrganizationName = oi.OrganizationName,   // null = enterprise-level charge; kept, never dropped
+                            RepositoryName = oi.RepositoryName,
+                            Product = oi.Product ?? "", Sku = oi.Sku ?? "", UnitType = oi.UnitType,
+                            Quantity = oi.Quantity, PricePerUnit = oi.PricePerUnit,
+                            GrossAmount = oi.GrossAmount, DiscountAmount = oi.DiscountAmount, NetAmount = oi.NetAmount,
+                        });
+                    }
+                    await db.SaveChangesAsync(ct);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Non-fatal by design: org attribution is supplementary. An enterprise not yet on
+                    // the endpoint (404) or a PAT lacking scope must not fail a run whose per-user
+                    // numbers — the app's primary output — are already written.
+                    _logger.LogWarning(ex, "Organization usage unavailable for '{Slug}'; per-user data is unaffected.", enterprise.Slug);
                 }
 
                 // ── Cost-center directory (current names, keyed by (enterprise, GitHub's stable id)) ──
@@ -314,6 +377,23 @@ namespace GhcpCreditVisibility.Services
                     db.DailyUsageSnapshots.RemoveRange(staleDailyRows);
                     await db.SaveChangesAsync(ct);
                     purged += staleDailyRows.Count;
+                }
+
+                // Org usage is day-grained detail like the daily table, so it shares that window.
+                var staleOrg = db.OrgUsageSnapshots
+                    .Where(x => x.EnterpriseId == enterprise.Id)
+                    .Where(x => x.Year < dCutYear || (x.Year == dCutYear && x.Month < dCutMonth));
+
+                if (db.Database.IsRelational())
+                {
+                    purged += await staleOrg.ExecuteDeleteAsync(ct);
+                }
+                else
+                {
+                    var staleOrgRows = await staleOrg.ToListAsync(ct);
+                    db.OrgUsageSnapshots.RemoveRange(staleOrgRows);
+                    await db.SaveChangesAsync(ct);
+                    purged += staleOrgRows.Count;
                 }
 
                 run.RowsWritten = written;

@@ -94,9 +94,11 @@ correct lever for a size problem — it reclaims ~30x more per month than shorte
 and costs only intra-month detail rather than the trend history finance depends on. Note it is not
 in `infra/appservice.tf`, so it has to be set as an app setting directly.
 
-Raising `max_size_gb` is usually the better answer regardless: storage is roughly $0.115/GB/month,
-so a few GB is cents, while purged history **cannot be rebuilt** — GitHub's API serves the current
-month only.
+Raising `max_size_gb` is usually the better answer regardless: storage is roughly $0.115/GB/month, so
+a few GB is cents, while purged history is expensive to get back. GitHub does serve a rolling
+**24-month** window (its usage endpoints take optional `year`/`month`/`day`), so a purge inside that
+window is recoverable in principle — but **only by a backfill job the app does not have**, and not at
+all once the data ages past two years. Buy the storage rather than the recovery project.
 
 ```
 az sql db show -g <app-rg> -s <sql-server> -n ghcpvisibility --query "maxSizeBytes"

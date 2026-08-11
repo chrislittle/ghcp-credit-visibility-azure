@@ -49,7 +49,7 @@ GROUP BY e.Slug, u.Year, u.Month
 ORDER BY e.Slug, u.Year DESC, u.Month DESC;
 ```
 
-## Check 2 — Gap in the trend series (UNRECOVERABLE if real; judge per enterprise)
+## Check 2 — Gap in the trend series (RECOVERABLE within 24 months; judge per enterprise)
 
 **First distinguish a low total from a gap — they are NOT the same:**
 - A **short history for a RECENTLY ONBOARDED ENTERPRISE is EXPECTED, not a concern.** A brand-new
@@ -58,10 +58,21 @@ ORDER BY e.Slug, u.Year DESC, u.Month DESC;
   data month against its registry row's `CreatedUtc` before flagging anything. Do NOT flag this as
   a data-integrity problem — say "expected for a newly onboarded enterprise" and move on.
 - A **GAP** — a missing month *between* two present months FOR THE SAME ENTERPRISE (e.g. contoso
-  has March and May but not April) — is the real, high-severity finding. That means the retention
-  purge deleted too much, OR a month never got snapshotted, OR the enterprise was disabled for a
-  while (check the registry's Enabled flag history with the operator). **GitHub's API only serves
-  the current month**, so a gap is gone forever.
+  has March and May but not April) — is the real finding. That means the retention purge deleted too
+  much, OR a month never got snapshotted, OR the enterprise was disabled for a while (check the
+  registry's Enabled flag history with the operator).
+
+> **Severity corrected 2026-08-11 (verified against the live API).** Earlier versions of this
+> runbook said a gap was "gone forever" because GitHub served only the current month. **That is
+> wrong.** The billing usage endpoints accept optional `year`/`month`/`day` and serve a rolling
+> **two-year** window; beyond it they fail with *"Time period cannot be more than 2 years in the
+> past."* So a gap inside 24 months is **RECOVERABLE IN PRINCIPLE**.
+>
+> Two caveats keep it serious. **The app has no backfill job** — it only ever requests the current
+> month — so recovery is a code change, not an operator action, and there is nothing to run today.
+> And a gap older than 24 months **is** permanently gone. Report a gap as: which enterprise, which
+> (Year, Month), whether it falls inside the 24-month window, and whether retention config or a
+> disabled period explains it. Do not describe it as unrecoverable without checking its age.
 
 `UsageSnapshots` rows are keyed `Day = 1` — one row per user/model/sku per MONTH, rewritten in place
 on every run. (Intra-month detail lives in `DailyUsageSnapshots`; see Check 5. Do not look for
@@ -81,8 +92,9 @@ to 1, the app clamps to 3 — but verify the setting and the actual span agree.
 `DailyUsageSnapshots` purges on its own window, `Retention__DailyMonths`, which **falls back to
 `Retention__Months` when unset** and clamps to the same floor of 3. Two things to know: it is NOT
 wired into Terraform (`infra/appservice.tf` sets only `Retention__Months`), so if it is present at
-all somebody added it by hand; and daily history is just as unrecoverable as monthly — GitHub serves
-the current month only, so a shortened window silently discards detail that cannot be rebuilt.
+all somebody added it by hand; and daily history sits under the same 24-month GitHub window as
+monthly, so a shortened window discards detail that only a (not-yet-written) backfill could restore,
+and nothing at all once it ages past two years.
 
 ## Check 3 — Orphans and nulls (per enterprise)
 
@@ -103,8 +115,9 @@ GROUP BY e.Slug;
 `DiscountAmount`, `DiscountQuantity`, `PricePerUnit` and `GrossQuantity` as NULLABLE on purpose:
 
 - `NULL` = **not captured**. Rows written before these columns existed, and any month already frozen
-  at that point. Unrecoverable — GitHub serves the current month only, so these can never be
-  backfilled and any attempt to default them to 0 destroys the distinction.
+  at that point. GitHub's 24-month window means these COULD be backfilled by a job the app does not
+  yet have — and NULL is exactly the marker such a job would select on, which is why defaulting them
+  to 0 would be actively destructive.
 - `0` = GitHub genuinely reported zero.
 
 Answering "what was July's discount?" with $0 when the truth is "never recorded" is exactly the kind

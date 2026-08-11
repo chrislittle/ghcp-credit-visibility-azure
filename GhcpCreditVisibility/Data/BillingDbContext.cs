@@ -15,6 +15,7 @@ namespace GhcpCreditVisibility.Data
 
         public DbSet<UsageSnapshot> UsageSnapshots => Set<UsageSnapshot>();
         public DbSet<DailyUsageSnapshot> DailyUsageSnapshots => Set<DailyUsageSnapshot>();
+        public DbSet<OrgUsageSnapshot> OrgUsageSnapshots => Set<OrgUsageSnapshot>();
         public DbSet<SnapshotRun> SnapshotRuns => Set<SnapshotRun>();
 
         // ── Enterprise registry: the single source of truth for which GitHub enterprises this
@@ -69,6 +70,7 @@ namespace GhcpCreditVisibility.Data
                 e.Property(x => x.Product).HasMaxLength(64);
                 e.Property(x => x.Sku).HasMaxLength(64);
                 e.Property(x => x.Model).HasMaxLength(128);
+                e.Property(x => x.UnitType).HasMaxLength(64);
                 e.Property(x => x.NetAmount).HasPrecision(18, 4);
                 e.Property(x => x.GrossAmount).HasPrecision(18, 4);
                 e.Property(x => x.NetQuantity).HasPrecision(18, 4);
@@ -95,9 +97,34 @@ namespace GhcpCreditVisibility.Data
                 e.Property(x => x.Product).HasMaxLength(64);
                 e.Property(x => x.Sku).HasMaxLength(64);
                 e.Property(x => x.Model).HasMaxLength(128);
+                e.Property(x => x.UnitType).HasMaxLength(64);
                 e.Property(x => x.NetAmount).HasPrecision(18, 4);
                 e.Property(x => x.GrossAmount).HasPrecision(18, 4);
                 e.Property(x => x.NetQuantity).HasPrecision(18, 4);
+            });
+
+            b.Entity<OrgUsageSnapshot>(e =>
+            {
+                e.HasKey(x => x.Id);
+                // NO unique index, deliberately. The natural key would have to include
+                // OrganizationName and RepositoryName, both of which are NULLABLE — and SQL Server
+                // treats NULLs as EQUAL in a unique index, so it would permit only ONE unattributed
+                // row per enterprise/month/product/sku and reject the rest. Since the endpoint
+                // returns the WHOLE month in a single response, the snapshot job replaces each
+                // month wholesale instead of upserting. That is idempotent and sidesteps the
+                // nullable-key problem entirely.
+                e.HasIndex(x => new { x.EnterpriseId, x.Year, x.Month, x.Day });
+                e.HasIndex(x => new { x.EnterpriseId, x.OrganizationName });
+                e.Property(x => x.OrganizationName).HasMaxLength(255);
+                e.Property(x => x.RepositoryName).HasMaxLength(255);
+                e.Property(x => x.Product).HasMaxLength(64);
+                e.Property(x => x.Sku).HasMaxLength(64);
+                e.Property(x => x.UnitType).HasMaxLength(64);
+                e.Property(x => x.Quantity).HasPrecision(18, 4);
+                e.Property(x => x.PricePerUnit).HasPrecision(18, 6);
+                e.Property(x => x.GrossAmount).HasPrecision(18, 4);
+                e.Property(x => x.DiscountAmount).HasPrecision(18, 4);
+                e.Property(x => x.NetAmount).HasPrecision(18, 4);
             });
 
             b.Entity<SnapshotRun>(e =>
@@ -372,6 +399,16 @@ namespace GhcpCreditVisibility.Data
         public string Product { get; set; } = "";
         public string Sku { get; set; } = "";
         public string Model { get; set; } = "";
+
+        /// <summary>
+        /// GitHub's unit of measure for this line item — confirmed live as "ai-credits" for AI
+        /// credit usage, and documented as "requests" for premium-request usage. It is the only
+        /// field that distinguishes the two METERS once both are collected, and quantities from
+        /// different meters must never be added together. Captured ahead of premium-request support
+        /// precisely so that support does not need a second migration.
+        /// </summary>
+        public string? UnitType { get; set; }
+
         public decimal NetQuantity { get; set; }
         public decimal NetAmount { get; set; }
         public decimal GrossAmount { get; set; }
@@ -440,12 +477,64 @@ namespace GhcpCreditVisibility.Data
         public string Product { get; set; } = "";
         public string Sku { get; set; } = "";
         public string Model { get; set; } = "";
+        /// <summary>Unit of measure ("ai-credits", "requests"). Mirrors
+        /// <see cref="UsageSnapshot.UnitType"/> — quantities from different meters must never be
+        /// added together, and that applies just as much to daily rows.</summary>
+        public string? UnitType { get; set; }
         /// <summary>CUMULATIVE month-to-date quantity as of <see cref="Day"/>.</summary>
         public decimal NetQuantity { get; set; }
         /// <summary>CUMULATIVE month-to-date net amount as of <see cref="Day"/>.</summary>
         public decimal NetAmount { get; set; }
         /// <summary>CUMULATIVE month-to-date gross amount as of <see cref="Day"/>.</summary>
         public decimal GrossAmount { get; set; }
+    }
+
+    /// <summary>
+    /// Usage attributed to an ORGANIZATION and REPOSITORY, from GitHub's general billing usage
+    /// report (<c>/enterprises/{ent}/settings/billing/usage</c>).
+    ///
+    /// A different grain from <see cref="UsageSnapshot"/>, which is why it is a separate table
+    /// rather than more columns:
+    ///  * It has NO user. That endpoint does not support filtering by user, so this can never
+    ///    answer "who spent this" — it complements the per-user loop rather than replacing it.
+    ///  * It HAS organization, repository, and a real per-item DATE, none of which the per-user
+    ///    ai_credit endpoint returns. Daily granularity comes free here; no differencing needed.
+    ///  * It has no model, and reports a single <c>quantity</c> rather than gross/net quantities.
+    ///
+    /// One cheap call per enterprise per month fills this, versus the N-calls-per-user loop that
+    /// feeds UsageSnapshot. Rows are TRUE PER-DAY values (unlike
+    /// <see cref="DailyUsageSnapshot"/>, which is cumulative) — these may be summed.
+    /// </summary>
+    public sealed class OrgUsageSnapshot
+    {
+        public long Id { get; set; }
+        public long EnterpriseId { get; set; } = Enterprise.DefaultId;
+        public DateTime SnapshotUtc { get; set; }
+
+        // Taken from the line item's own `date`, not from the run clock.
+        public int Year { get; set; }
+        public int Month { get; set; }
+        public int Day { get; set; }
+
+        /// <summary>GitHub's <c>organizationName</c>. NULL for enterprise-level charges that belong
+        /// to no organization — 15 of 37 line items in a live sample had none, so a rollup must
+        /// carry them as "unattributed" rather than silently dropping them.</summary>
+        public string? OrganizationName { get; set; }
+
+        /// <summary>GitHub's <c>repositoryName</c>. NULL where the charge is not repo-scoped.</summary>
+        public string? RepositoryName { get; set; }
+
+        public string Product { get; set; } = "";
+        public string Sku { get; set; } = "";
+        public string? UnitType { get; set; }
+
+        /// <summary>The endpoint's single <c>quantity</c> field — it does not split gross/net.</summary>
+        public decimal Quantity { get; set; }
+
+        public decimal? PricePerUnit { get; set; }
+        public decimal GrossAmount { get; set; }
+        public decimal? DiscountAmount { get; set; }
+        public decimal NetAmount { get; set; }
     }
 
     /// <summary>Audit row for each per-enterprise snapshot execution. One row per enterprise per

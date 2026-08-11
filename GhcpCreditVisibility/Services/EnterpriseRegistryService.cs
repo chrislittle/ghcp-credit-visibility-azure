@@ -159,8 +159,10 @@ namespace GhcpCreditVisibility.Services
         /// <summary>
         /// Removes an enterprise AND all of its data — usage history, budgets, cost-center directory,
         /// principal mappings, and run history. Built for real decommissions/consolidations; also what
-        /// makes a test/demo enterprise fully reversible. Irreversible for real data: GitHub's billing
-        /// API only serves the current month, so purged history exists nowhere else.
+        /// makes a test/demo enterprise fully reversible. Treat as irreversible for real data: GitHub
+        /// does retain a rolling 24-month window (its usage endpoints accept year/month/day), so this
+        /// is recoverable IN PRINCIPLE — but only by a backfill job this app does not have, and only
+        /// for the last two years. Anything older is gone the moment this runs.
         /// </summary>
         public async Task<PurgeResult> DeleteWithDataAsync(long id, CancellationToken ct = default)
         {

@@ -26,9 +26,14 @@ namespace GhcpCreditVisibility.Migrations
             // already deletes rows GitHub no longer reports, so the table repopulates correctly
             // keyed on the first run after deploy.
             //
-            // NOTE the asymmetry with the UsageSnapshots columns added below: usage history CANNOT
-            // be refetched (GitHub serves the current month only), which is why those columns are
-            // added non-destructively and nullable. Budgets can be refetched; usage cannot.
+            // NOTE the asymmetry with the UsageSnapshots columns added below. Budgets are refetched
+            // in full every cycle, so clearing them costs nothing. Usage is refetched only for the
+            // CURRENT month by this app, so clearing it would lose history until someone writes a
+            // backfill — which is why those columns are added non-destructively and nullable.
+            // (Correction to an earlier version of this comment: GitHub does serve a rolling
+            // 24-month window via optional year/month/day parameters, so usage history is not
+            // permanently lost — but nothing in this app refetches it today, and NULL still
+            // correctly marks "never captured", which is exactly what a backfill would look for.)
             //
             // Trade-off accepted: the Budgets page is empty between this migration and the first
             // snapshot run. A brief empty state beats a failed deploy, and beats the pre-fix state

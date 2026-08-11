@@ -189,7 +189,8 @@ namespace GhcpCreditVisibility.Tests
         public void Daily_retention_can_be_shortened_independently()
             => Assert.Equal(3, SnapshotService.ResolveDailyRetentionMonths(12, 3));
 
-        /// <summary>Purged rows cannot be refetched from GitHub, so the floor is absolute.</summary>
+        /// <summary>Nothing in this app refetches purged rows (GitHub's 24-month window would allow
+        /// it, but no backfill job exists), so the floor is absolute.</summary>
         [Theory]
         [InlineData(0)]
         [InlineData(1)]
