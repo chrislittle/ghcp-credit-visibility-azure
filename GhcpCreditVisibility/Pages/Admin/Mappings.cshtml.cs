@@ -257,9 +257,14 @@ namespace GhcpCreditVisibility.Pages.Admin
         }
 
         /// <summary>
-        /// Turns on per-user history backfill. The work itself is done by the snapshot job, not here:
-        /// a web request must not sit on hundreds of sequential GitHub calls, and the job already owns
-        /// the distributed lease that stops two instances collecting the same months at once.
+        /// Starts per-user history backfill: sets the flag AND kicks off a snapshot to act on it.
+        ///
+        /// Enabling alone used to be the whole handler, which meant "Start backfill" started nothing
+        /// until someone also pressed Run now — two clicks for one intent, and a button whose label
+        /// was a lie until the second one. The work still belongs to the snapshot job, not to this
+        /// request: a web request must not sit on hundreds of sequential GitHub calls, and the job
+        /// owns the distributed lease that stops two instances collecting the same months. So this
+        /// SCHEDULES rather than performs — exactly what Run now does.
         /// </summary>
         public async Task<IActionResult> OnPostStartBackfillAsync(long id, CancellationToken ct)
         {
@@ -270,10 +275,20 @@ namespace GhcpCreditVisibility.Pages.Admin
                 if (ent is null) { Error = "That enterprise is no longer in the registry."; return RedirectToPage(); }
                 if (!ent.Enabled) { Error = $"'{ent.Slug}' is disabled — enable it before backfilling."; return RedirectToPage(); }
 
+                // Flag first: a run started before it is set would not see it. If the trigger then
+                // declines because a run is already in flight, the flag still stands and the next
+                // cycle picks it up — the work is deferred, never lost.
                 await _registry.SetUserBackfillEnabledAsync(id, true, ct);
-                Message = $"History backfill enabled for '{ent.Slug}'. It fills one whole month at a time, newest first, " +
-                          "during snapshot runs, and stops on its own when there is nothing left. " +
-                          "Run a snapshot now to start immediately.";
+
+                Message = _snapshotTrigger.TryStart(id, Actor) switch
+                {
+                    ManualSnapshotTrigger.StartResult.Started =>
+                        $"History backfill started for '{ent.Slug}'. It runs in the background, filling whole months " +
+                        "newest first, and stops on its own when there is nothing left — refresh in a few seconds to " +
+                        "see how far it got.",
+                    _ => $"History backfill enabled for '{ent.Slug}'. A snapshot is already running, so it starts on " +
+                         "the next run rather than joining the one in progress.",
+                };
             }
             catch (Exception ex) { Error = ex.Message; }
             return RedirectToPage();

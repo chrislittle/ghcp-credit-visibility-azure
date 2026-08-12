@@ -688,6 +688,7 @@ namespace GhcpCreditVisibility.Services
 
             var rate = _rateLimits.For(enterprise.Slug);
             var written = 0;
+            var paused = false;
 
             foreach (var (year, month) in plan)
             {
@@ -701,6 +702,7 @@ namespace GhcpCreditVisibility.Services
                         "Per-user backfill for '{Slug}' pausing before {Year}-{Month:00}: {Remaining} rate-limit remaining " +
                         "would not cover {Users} users while holding {Reserve} in reserve. Resumes next cycle.",
                         enterprise.Slug, year, month, remaining, users.Count, BackfillRateLimitReserve);
+                    paused = true;
                     break;
                 }
 
@@ -758,6 +760,17 @@ namespace GhcpCreditVisibility.Services
                 enterprise.UserBackfillOldestMonth = month;
                 _logger.LogInformation("Backfilled per-user usage for '{Slug}' {Year}-{Month:00} ({Users} users).",
                     enterprise.Slug, year, month, users.Count);
+            }
+
+            // Finished the whole plan, so clear the flag HERE rather than leaving it for the next
+            // cycle to discover. Waiting would leave the console showing "backfilling…" for up to a
+            // full snapshot interval after the work was actually done — the opposite of what that
+            // indicator is for.
+            if (!paused)
+            {
+                await _registry.SetUserBackfillEnabledAsync(enterprise.Id, false, ct);
+                enterprise.UserBackfillEnabled = false;
+                _logger.LogInformation("Per-user backfill complete for '{Slug}'.", enterprise.Slug);
             }
 
             return written;

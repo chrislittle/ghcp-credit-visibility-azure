@@ -188,7 +188,12 @@
                         <span class="badge text-bg-info me-2">running</span>
                         <button class="btn btn-sm btn-outline-danger" type="submit">Stop backfill</button>
                     </form>
-                    <span class="gh-note ms-2">Runs during snapshots. Use <strong>▶ Run now</strong> above to advance it immediately.</span>
+                    @* Only reachable when a run ended early — it stands itself down the moment the
+                       plan is exhausted, so a still-enabled backfill has months left to fetch. *@
+                    <span class="gh-note ms-2">
+                        Paused with months still to fetch (usually the hourly rate limit). It resumes on the next
+                        snapshot, or press <strong>▶ Run now</strong> above to continue immediately.
+                    </span>
                 }
                 else
                 {

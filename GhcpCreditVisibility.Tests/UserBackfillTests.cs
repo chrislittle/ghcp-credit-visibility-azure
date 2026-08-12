@@ -234,17 +234,20 @@ namespace GhcpCreditVisibility.Tests
         /// <summary>
         /// Finishing must turn the flag off by itself. Left on, every subsequent cycle would re-plan
         /// and re-fetch the same completed months forever.
+        ///
+        /// It must clear on the SAME run that finishes the work, not the next one. Snapshots are 12
+        /// hours apart, so deferring it would leave the console reporting "backfilling…" for half a
+        /// day after the job was done — and that indicator exists precisely to be trusted.
         /// </summary>
         [Fact]
-        public async Task Clears_its_own_flag_when_there_is_nothing_left_to_fetch()
+        public async Task Clears_its_own_flag_on_the_run_that_finishes_the_work()
         {
             var f = NewFactory();
             var (svc, registry) = Build(f);
             var ent = await SeededEnterpriseAsync(f, registry, svc);
 
             await registry.SetUserBackfillEnabledAsync(ent.Id, true);
-            await svc.RunAsync();   // fills everything reachable
-            await svc.RunAsync();   // finds nothing left, disables itself
+            await svc.RunAsync();   // fills everything reachable AND stands itself down
 
             await using var db = await f.CreateDbContextAsync();
             Assert.False((await db.Enterprises.FindAsync(ent.Id))!.UserBackfillEnabled);
