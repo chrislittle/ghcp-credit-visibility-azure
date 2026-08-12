@@ -820,9 +820,14 @@ function Phase-Configure {
   $alertEmail = Ask 'Email address (or distribution list) to notify when SQL CPU/memory/storage exceeds 80% — press Enter to use your signed-in email' $alertEmailDefault
   while (-not $alertEmail) { $alertEmail = Ask 'Alert email is required (no default could be resolved for your account) — enter one' '' }
 
-  $identityMode = @('user_assigned_selfadmin', 'system_assigned')[(AskChoice 'Identity model' @(
-        'user_assigned_selfadmin  — TEST: app identity is its own SQL admin (no grant)',
-        'system_assigned          — CUSTOMER/PROD: external Entra SQL admin + one-time grant') 1) - 1]
+  # Names the WEB APP'S IDENTITY TYPE only. The SQL admin is asked separately below and can be you
+  # in either mode — this label used to say "app identity is its own SQL admin (no grant)", which
+  # stopped being true once the two were unbundled.
+  Write-Info 'Which managed identity type the app runs as. Both are production-supported and otherwise equivalent here.'
+  Write-Info 'Who administers SQL is a separate question, asked later in this wizard.'
+  $identityMode = @('user_assigned', 'system_assigned')[(AskChoice 'Identity model' @(
+        'user_assigned    — standalone identity (id-…), created before the app; the only mode that can make the app its own SQL admin',
+        'system_assigned  — created with the app; one less resource, and no AZURE_CLIENT_ID needed') 1) - 1]
 
   Write-Info 'Note: public mode may be blocked by Azure Policy in governed/enterprise tenants (a Deny-effect policy disallowing public network access is common in landing zones) — if this is a managed corporate subscription, private mode is usually safer.'
   $private = AskYesNo 'Use private networking — VNet + private endpoints, not reachable from the public internet? No = public (simpler, browsable straight from your laptop)' $false
@@ -879,12 +884,34 @@ function Phase-Configure {
     3 { Write-Warn 'No admin assigned — grant the Admin role in Entra after deploy or nobody can open the console.' }
   }
 
-  # sql admin (system_assigned only)
+  # sql admin — asked in BOTH identity modes.
+  #
+  # This used to be system_assigned-only, which quietly made the app's managed identity the SQL
+  # admin in self-admin mode. Azure SQL allows exactly ONE Entra admin, so that left NO human able
+  # to query the database — the SRE agent grant, the SQL runbooks and any ad-hoc query all had to
+  # borrow the admin role from the app and hand it back. The identity the app RUNS AS and WHO
+  # ADMINISTERS THE DATABASE are unrelated choices, so they are asked separately now.
   $sqlName = ''; $sqlId = ''
+  Write-Host ''
   if ($identityMode -eq 'system_assigned') {
-    $sqlChoice = AskChoice 'Azure SQL Entra administrator (can run the DB grant):' @('Myself (this az login)', 'An Entra group') 1
-    if ($sqlChoice -eq 1 -and $script:Me -and $script:Me.id) { $sqlName = $script:Me.upn; $sqlId = $script:Me.id; Write-Ok "SQL admin = you" }
-    else { $sqlName = Ask 'SQL admin display name (UPN or group name)' 'SG-GHCP-SQL-Admins'; $sqlId = Ask 'SQL admin object ID' '' }
+    Write-Info 'SQL admin runs the one-time grant that lets the app apply its EF migrations.'
+    $sqlOpts = @('Myself (this az login)', 'An Entra group')
+    $sqlDefault = 1
+  }
+  else {
+    Write-Info 'SQL admin can query the database and grant others (incl. the SRE agent). Recommended: yourself.'
+    Write-Info 'The last option is for tenants where your identity CANNOT be a SQL admin — it leaves the app self-administering, and no person can query the DB.'
+    $sqlOpts = @('Myself (this az login)', 'An Entra group', "The app's own identity (self-administering — no human access)")
+    $sqlDefault = 1
+  }
+  $sqlChoice = AskChoice 'Azure SQL Entra administrator:' $sqlOpts $sqlDefault
+  switch ($sqlChoice) {
+    1 {
+      if ($script:Me -and $script:Me.id) { $sqlName = $script:Me.upn; $sqlId = $script:Me.id; Write-Ok 'SQL admin = you' }
+      else { $sqlName = Ask 'SQL admin display name (UPN)' ''; $sqlId = Ask 'SQL admin object ID' '' }
+    }
+    2 { $sqlName = Ask 'SQL admin display name (UPN or group name)' 'SG-GHCP-SQL-Admins'; $sqlId = Ask 'SQL admin object ID' '' }
+    3 { Write-Warn "SQL admin = the app's managed identity. No human can query the database; operational grants borrow the role temporarily." }
   }
 
   # Optional Azure SRE Agent (AI reliability agent). Off by default — it's a preview feature that
@@ -925,7 +952,10 @@ function Phase-Configure {
     $lines.Add("enable_jumpbox            = true")
     $lines.Add("jumpbox_vm_size           = `"$jumpboxVmSize`"")
   }
-  if ($identityMode -eq 'system_assigned') { $lines.Add("sql_admin_group_name      = `"$sqlName`""); $lines.Add("sql_admin_object_id       = `"$sqlId`"") }
+  # Written whenever an admin was actually chosen, in either identity mode. Blank means "the app
+  # administers itself" — only reachable via the explicit third option above (or system_assigned,
+  # where terraform's precondition rejects it anyway).
+  if ($sqlName -and $sqlId) { $lines.Add("sql_admin_group_name      = `"$sqlName`""); $lines.Add("sql_admin_object_id       = `"$sqlId`"") }
   $lines.Add("use_mock_data             = $($mock.ToString().ToLower())")
   if (-not $mock) { $lines.Add("github_enterprise_slug    = `"$ghSlug`"") }
   $lines.Add("create_acr                = $($createAcr.ToString().ToLower())")
@@ -1059,14 +1089,46 @@ function Phase-Image {
   Write-Ok 'image built + Web App wired'
 }
 
-# ── PHASE: grant SQL access (system_assigned) ────────────────────
+# Opens the SQL firewall for the deployer's current public IP (AllowDeployerIP), persisted in
+# adminip.auto.tfvars so later applies don't revert it. Public-networking only.
+#
+# Shared by BOTH SQL grants. It used to live inside the app grant, which meant the agent grant
+# depended on the app grant having run — and when the app is its own SQL admin the app grant
+# short-circuits, so nothing ever opened the firewall and the agent grant failed with an error whose
+# hint ("run -Task grant-sql first, it opens AllowDeployerIP") pointed at a step that does nothing in
+# that mode. Idempotent: re-running with the same IP is a no-op apply.
+function Open-SqlFirewallForDeployer {
+  $myIp = Get-MyPublicIp
+  if (-not $myIp) {
+    Write-Warn "Couldn't auto-detect your public IP — if the grant fails with a firewall error, add your IP via Portal or: terraform apply -var admin_client_ip=<your.ip.here>"
+    return
+  }
+  Write-Info "Opening SQL firewall for your current IP ($myIp) — AllowDeployerIP rule"
+  $adminIpTfvars = Join-Path $infra 'adminip.auto.tfvars'
+  if ($DryRun) { Write-Host "  DRYRUN> write $adminIpTfvars : admin_client_ip = `"$myIp`"" -ForegroundColor DarkGray }
+  else { Set-Content -Path $adminIpTfvars -Value "admin_client_ip = `"$myIp`"" -NoNewline; Write-Ok "wrote $adminIpTfvars" }
+  Push-Location $infra
+  try { Invoke-TerraformApply "-var `"location=$Location`"" } finally { Pop-Location }
+  if (-not $DryRun) { Write-Ok "Firewall rule applied for $myIp"; Write-Info 'Waiting ~20s for the firewall rule to take effect...'; Start-Sleep -Seconds 20 }
+}
+
+# ── PHASE: grant SQL access ──────────────────────────────────────
+# Runs whenever the app's identity is not itself the SQL admin — i.e. always in system_assigned, and
+# in user_assigned whenever a human admin was named. Skipped only in the self-administering
+# case, which terraform signals via the 'Not required' prefix on post_deploy_sql_grant.
 function Phase-GrantSql {
   Write-Step 5 'Grant the app permission to create/update its own database tables in SQL'
   $grantHint = Get-TfOutput 'post_deploy_sql_grant'
   if ($grantHint -and $grantHint -match 'Not required') { Write-Ok 'Self-admin mode — no grant required (app applies migrations itself).'; return }
-  $server = Get-TfOutput 'sql_server_fqdn'; $db = Get-TfOutput 'sql_database_name'; $app = Get-TfOutput 'web_app_name'
+  $server = Get-TfOutput 'sql_server_fqdn'; $db = Get-TfOutput 'sql_database_name'
+  # The DB principal is the IDENTITY that presents the token, which is NOT the web app name when a
+  # user-assigned identity is in use — granting the wrong one creates a principal that never
+  # authenticates, and the app keeps failing migrations with a login error against a grant that
+  # looks correct. Falls back to web_app_name so an older state file (no such output) still works.
+  $app = Get-TfOutput 'app_sql_principal_name'
+  if (-not $app) { $app = Get-TfOutput 'web_app_name' }
   if (-not ($server -and $db -and $app)) { Write-Warn 'Could not read SQL outputs (infra not applied?). Skipping grant.'; return }
-  Write-Info "Server $server · DB $db · App MI $app"
+  Write-Info "Server $server · DB $db · App identity $app"
   if (-not $script:Acct) { Ensure-Az }
   Write-Info "You must be the Entra SQL admin (or in the admin group) for this to succeed ($($script:Acct.user.name))."
   if (-not (AskYesNo 'Apply the SQL grant now?' $true)) { Write-Warn "Skipped. Later: ./deploy.ps1 -Task grant-sql"; return }
@@ -1076,17 +1138,7 @@ function Phase-GrantSql {
   # PUBLIC pattern: unchanged — the SQL firewall blocks your workstation by default; open the
   # AllowDeployerIP rule (persisted so later applies don't revert it), then run the grant directly.
   if ((Get-TfVar 'use_private_networking') -ne 'true') {
-    $myIp = Get-MyPublicIp
-    if ($myIp) {
-      Write-Info "Opening SQL firewall for your current IP ($myIp) — AllowDeployerIP rule"
-      $adminIpTfvars = Join-Path $infra 'adminip.auto.tfvars'
-      if ($DryRun) { Write-Host "  DRYRUN> write $adminIpTfvars : admin_client_ip = `"$myIp`"" -ForegroundColor DarkGray }
-      else { Set-Content -Path $adminIpTfvars -Value "admin_client_ip = `"$myIp`"" -NoNewline; Write-Ok "wrote $adminIpTfvars" }
-      Push-Location $infra
-      try { Invoke-TerraformApply "-var `"location=$Location`"" } finally { Pop-Location }
-      if (-not $DryRun) { Write-Ok "Firewall rule applied for $myIp"; Write-Info 'Waiting ~20s for the firewall rule to take effect...'; Start-Sleep -Seconds 20 }
-    }
-    else { Write-Warn "Couldn't auto-detect your public IP — if the grant fails with a firewall error, add your IP via Portal or: terraform apply -var admin_client_ip=<your.ip.here>" }
+    Open-SqlFirewallForDeployer
 
     if (-not (Ensure-SqlServerModule)) { return }
     if ($DryRun) { Invoke-SqlGrantDirect -Server $server -Database $db -AppName $app; return }
@@ -1162,28 +1214,97 @@ EXEC('GRANT VIEW DATABASE STATE TO ' + @q + ';');
   Write-Ok 'Agent SQL grant applied (db_datareader + VIEW DATABASE STATE, read-only).'
 }
 
+# Runs $Action while the SIGNED-IN OPERATOR is temporarily the server's Entra admin, then puts the
+# original admin back.
+#
+# Needed by identity_mode="user_assigned", where the SQL Entra admin is the app's own
+# managed identity (see infra/sql.tf) — nobody can log in as it interactively, so an operator has no
+# SQL login at all and any grant they attempt fails with "Login failed for user
+# '<token-identified principal>'". Azure SQL allows exactly ONE Entra admin, so the only way in is to
+# borrow the role and hand it straight back.
+#
+# The restore is in a finally block and is the critical part: leaving the operator as admin strips
+# the app's identity of the rights it uses to apply its own EF migrations, so the NEXT deploy would
+# fail with a confusing schema error far from this code. If the restore itself fails, this shouts the
+# exact command rather than letting it pass as a warning.
+function Invoke-WithTemporarySqlAdmin([string]$Rg, [string]$ServerName, [scriptblock]$Action) {
+  $originalJson = az sql server ad-admin list -g $Rg -s $ServerName -o json 2>$null
+  $original = if ($originalJson) { ($originalJson | ConvertFrom-Json) | Select-Object -First 1 } else { $null }
+  if (-not $original) { Write-Warn 'Could not read the current Entra SQL admin; running the grant as-is.'; & $Action; return }
+
+  $meId = az ad signed-in-user show --query id -o tsv 2>$null
+  $meName = $script:Acct.user.name
+  if (-not $meId) {
+    Write-Warn "Could not resolve your Entra object id (az ad signed-in-user show). Running the grant as-is."
+    & $Action; return
+  }
+
+  if ($original.sid -eq $meId) { & $Action; return }   # already the admin — nothing to borrow
+
+  Write-Info "Entra SQL admin is '$($original.login)' (the app's managed identity), so you have no SQL login."
+  Write-Info "Temporarily taking the admin role as $meName, applying the grant, then restoring '$($original.login)'."
+  if ($DryRun) {
+    Write-Host "  DRYRUN> az sql server ad-admin create -g $Rg -s $ServerName --display-name $meName --object-id $meId" -ForegroundColor DarkGray
+    & $Action
+    Write-Host "  DRYRUN> az sql server ad-admin create -g $Rg -s $ServerName --display-name $($original.login) --object-id $($original.sid)" -ForegroundColor DarkGray
+    return
+  }
+
+  az sql server ad-admin create -g $Rg -s $ServerName --display-name $meName --object-id $meId -o none
+  if ($LASTEXITCODE -ne 0) { throw "Could not take the Entra SQL admin role on $ServerName." }
+  try {
+    Start-Sleep -Seconds 10   # the new admin is not immediately usable for a login
+    & $Action
+  }
+  finally {
+    az sql server ad-admin create -g $Rg -s $ServerName --display-name $original.login --object-id $original.sid -o none
+    if ($LASTEXITCODE -ne 0) {
+      Write-Err "COULD NOT RESTORE the Entra SQL admin. The app's identity is NOT the SQL admin right now, so its next migration will fail. Run this yourself:"
+      Write-Host "  az sql server ad-admin create -g $Rg -s $ServerName --display-name $($original.login) --object-id $($original.sid)" -ForegroundColor Yellow
+    }
+    else { Write-Ok "Entra SQL admin restored to '$($original.login)'." }
+  }
+}
+
 function Phase-GrantSreSql {
   Write-Step 9 'Grant the SRE Agent read-only access to the SQL database'
   $agent = Get-TfOutput 'sre_agent_name'
   if (-not $agent) { Write-Warn 'No SRE Agent in state (enable_sre_agent=false or not applied). Skipping.'; return }
   $server = Get-TfOutput 'sql_server_fqdn'; $db = Get-TfOutput 'sql_database_name'
+  $rg = Get-TfOutput 'resource_group'; $sqlServerName = Get-TfOutput 'sql_server_name'
   if (-not ($server -and $db)) { Write-Warn 'Could not read SQL outputs (infra not applied?). Skipping.'; return }
   Write-Info "Server $server · DB $db · Agent identity $agent"
   if (-not $script:Acct) { Ensure-Az }
-  Write-Info "You must be the Entra SQL admin (or in the admin group) for this to succeed ($($script:Acct.user.name))."
+
+  # Unlike the APP grant (step 5), this one is ALWAYS required: the agent is a DIFFERENT principal
+  # from the app's identity, so whoever administers SQL, the agent still needs its own database user.
+  #
+  # The borrow-and-restore dance is needed only when the APP is the admin — i.e. self-admin mode
+  # with no human named. Keyed on both, not on identity_mode alone: a user-assigned identity WITH a
+  # named admin needs no swap, because you are the admin already.
+  $appIsSqlAdmin = ((Get-TfVar 'identity_mode') -ne 'system_assigned') -and -not (Get-TfVar 'sql_admin_object_id')
 
   $manual = "Run this against the $db DB as the Entra SQL admin (Portal -> SQL database -> Query editor):`n`n" +
             "CREATE USER [$agent] FROM EXTERNAL PROVIDER;`nALTER ROLE db_datareader ADD MEMBER [$agent];`nGRANT VIEW DATABASE STATE TO [$agent];"
 
-  # PUBLIC pattern: the AllowDeployerIP firewall rule from `-Task grant-sql` (or a fresh apply)
-  # opens the path. If it isn't open, the direct attempt fails with a clear firewall error.
+  # PUBLIC pattern: open the deployer firewall rule ourselves rather than depending on step 5 having
+  # done it — step 5 does not run at all when the app is its own SQL admin, and this task is also
+  # runnable standalone (`-Task grant-sre-sql`) from a machine whose IP was never added.
   if ((Get-TfVar 'use_private_networking') -ne 'true') {
     if (-not (Ensure-SqlServerModule)) { Write-Info $manual; return }
+    Open-SqlFirewallForDeployer
     if (-not (AskYesNo 'Apply the read-only agent grant now?' $true)) { Write-Warn 'Skipped. Later: ./deploy.ps1 -Task grant-sre-sql'; return }
-    try { Invoke-SreSqlGrantDirect -Server $server -Database $db -AgentName $agent }
+    try {
+      if ($appIsSqlAdmin -and $rg -and $sqlServerName) {
+        Invoke-WithTemporarySqlAdmin -Rg $rg -ServerName $sqlServerName -Action {
+          Invoke-SreSqlGrantDirect -Server $server -Database $db -AgentName $agent
+        }
+      }
+      else { Invoke-SreSqlGrantDirect -Server $server -Database $db -AgentName $agent }
+    }
     catch {
       Write-Err "Grant failed: $($_.Exception.Message)"
-      if ($_.Exception.Message -match 'is not allowed to access the server') { Write-Info 'Your IP may not be open on the SQL firewall — run ./deploy.ps1 -Task grant-sql first (it opens AllowDeployerIP), then re-run this.' }
+      if ($_.Exception.Message -match 'is not allowed to access the server') { Write-Info 'The AllowDeployerIP rule was just applied but may not have propagated — wait a minute and re-run: ./deploy.ps1 -Task grant-sre-sql' }
       else { Write-Info $manual }
     }
     return

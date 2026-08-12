@@ -267,7 +267,7 @@ Key deployment choices, all one Terraform variable each:
 | VNet source | `custom_network_mode` | `false` (this stack creates the VNet) / `true` (bring your own existing VNet/subnets — enterprise IPAM/landing zone) |
 | Test the private path | `enable_jumpbox` | `true` adds a Windows jump-box VM + Azure Bastion inside the VNet (self-created-VNet path only) so you can RDP in and browse the private app/Key Vault/SQL endpoints — it's also one of several access modes `deploy.ps1` offers for the SQL grant/PAT set-up (see below), alongside direct access and a temporary-public-access escape hatch |
 | Data source | `use_mock_data` | `true` (synthetic demo data, default, no PAT needed) / `false` (real GitHub billing data — needs an enterprise PAT in Key Vault) |
-| SQL/identity model | `identity_mode` | `system_assigned` (customer/prod default) / `user_assigned_selfadmin` (testing in a hybrid/shared tenant where your identity can't be the SQL admin) |
+| Managed identity type | `identity_mode` | `system_assigned` (default — created with the app) / `user_assigned` (standalone `id-…` identity, created before it). Both are production-supported and otherwise equivalent; only `user_assigned` can make the app its own SQL admin, since a system-assigned identity can't exist before the SQL server that would name it. Who administers SQL is the separate `sql_admin_*` pair |
 
 Full details, the resource list, quota preflight checks, and troubleshooting live in
 **[infra/README.md](infra/README.md)**.

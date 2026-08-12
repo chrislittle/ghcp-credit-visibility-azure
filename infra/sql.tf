@@ -7,23 +7,22 @@ resource "azurerm_mssql_server" "sql" {
   minimum_tls_version           = "1.2"
   public_network_access_enabled = !var.use_private_networking
 
-  # user_assigned_selfadmin: the web app's UAMI IS the SQL Entra admin (app applies its EF
-  #   migrations on startup via Database.Migrate(); no human grant; works when your corp
-  #   identity isn't in this tenant).
-  # system_assigned: an external Entra group/user is the admin and later grants the
-  #   system-assigned MI db_ddladmin/read/write (see post_deploy_sql_grant output) so the
-  #   app can apply migrations on deploy.
+  # A named admin (sql_admin_group_name/object_id) always wins, in EITHER identity mode — see
+  # local.sql_admin_external. The app's identity becomes the admin ONLY when no human was named,
+  # which requires user_assigned (system_assigned rejects a blank admin in the precondition below).
+  # That case exists for tenants where your identity cannot be a SQL admin at all; there, the app
+  # applies its own EF migrations via Database.Migrate() and no human can query the database.
   azuread_administrator {
-    login_username              = local.use_uami ? azurerm_user_assigned_identity.app[0].name : var.sql_admin_group_name
-    object_id                   = local.use_uami ? azurerm_user_assigned_identity.app[0].principal_id : var.sql_admin_object_id
+    login_username              = local.sql_admin_external ? var.sql_admin_group_name : azurerm_user_assigned_identity.app[0].name
+    object_id                   = local.sql_admin_external ? var.sql_admin_object_id : azurerm_user_assigned_identity.app[0].principal_id
     tenant_id                   = data.azurerm_client_config.current.tenant_id
     azuread_authentication_only = true
   }
 
   lifecycle {
     precondition {
-      condition     = local.use_uami || (var.sql_admin_object_id != "" && var.sql_admin_group_name != "")
-      error_message = "identity_mode=\"system_assigned\" requires sql_admin_group_name and sql_admin_object_id (the external Entra SQL admin that grants the app's managed identity). Use identity_mode=\"user_assigned_selfadmin\" to self-provision without them."
+      condition     = local.use_uami || local.sql_admin_external
+      error_message = "identity_mode=\"system_assigned\" requires sql_admin_group_name and sql_admin_object_id — the Entra SQL admin who grants the app's managed identity. Set them (recommended in either identity mode) to be the SQL admin yourself. Only identity_mode=\"user_assigned\" may leave them blank, which makes the app its own SQL admin and leaves no human able to query the database."
     }
   }
 

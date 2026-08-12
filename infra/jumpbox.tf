@@ -174,7 +174,7 @@ resource "azurerm_network_interface" "jumpbox" {
 # conditional count reliably fails at plan time with "Missing required argument" for a brand-new
 # resource — even when the count resolves to 1. A standalone identity resource's principal_id is
 # a top-level attribute (same shape as azurerm_user_assigned_identity.app[0].principal_id, already
-# used successfully elsewhere in this codebase for the user_assigned_selfadmin path), which avoids
+# used successfully elsewhere in this codebase for the user_assigned path), which avoids
 # the nested-block-through-count problem entirely.
 resource "azurerm_user_assigned_identity" "jumpbox" {
   count               = local.create_jumpbox ? 1 : 0

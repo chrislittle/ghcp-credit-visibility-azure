@@ -33,7 +33,7 @@ output "sql_database_name" {
 }
 
 output "app_principal_id" {
-  description = "The identity object ID used for RBAC + SQL. system_assigned: the web app's system MI. user_assigned_selfadmin: the user-assigned identity."
+  description = "The identity object ID used for RBAC + SQL. system_assigned: the web app's system MI. user_assigned: the user-assigned identity."
   value       = local.app_principal_id
 }
 
@@ -79,14 +79,21 @@ output "jumpbox_admin_password" {
 }
 
 output "post_deploy_sql_grant" {
-  description = "system_assigned: run this against the ghcpvisibility DB (as the Entra SQL admin) to grant the app MI the roles needed to APPLY EF MIGRATIONS on startup (db_ddladmin) plus read/write. user_assigned_selfadmin: not required (the UAMI is the SQL admin; the app applies migrations itself)."
-  value       = local.use_uami ? "Not required — the user-assigned identity is the SQL Entra admin, so the app applies its EF Core migrations on startup (Database.Migrate) and builds/updates the schema automatically. No manual grant." : <<-EOT
+  description = "The one-time grant that lets the app's identity APPLY EF MIGRATIONS (db_ddladmin) plus read/write. Required whenever the app's identity is not itself the SQL Entra admin — i.e. always in system_assigned, and in user_assigned whenever a human admin is named via sql_admin_group_name/object_id. deploy.ps1 keys off the leading 'Not required' to decide whether to run step 5."
+  value = !local.app_needs_sql_grant ? "Not required — the user-assigned identity is the SQL Entra admin, so the app applies its EF Core migrations on startup (Database.Migrate) and builds/updates the schema automatically. No manual grant." : <<-EOT
     -- Connect to the ghcpvisibility DB as the Entra SQL admin, then run this ONCE.
     -- Grants the app's managed identity permission to APPLY EF MIGRATIONS (DDL) + read/write,
     -- so Database.Migrate() can create/update tables (incl. __EFMigrationsHistory) on each deploy.
-    CREATE USER [${azurerm_linux_web_app.app.name}] FROM EXTERNAL PROVIDER;
-    ALTER ROLE db_datareader ADD MEMBER [${azurerm_linux_web_app.app.name}];
-    ALTER ROLE db_datawriter ADD MEMBER [${azurerm_linux_web_app.app.name}];
-    ALTER ROLE db_ddladmin   ADD MEMBER [${azurerm_linux_web_app.app.name}];
+    -- NOTE the principal is the IDENTITY that presents the token: the user-assigned identity when
+    -- one is in use, otherwise the web app's own system-assigned identity.
+    CREATE USER [${local.app_sql_principal_name}] FROM EXTERNAL PROVIDER;
+    ALTER ROLE db_datareader ADD MEMBER [${local.app_sql_principal_name}];
+    ALTER ROLE db_datawriter ADD MEMBER [${local.app_sql_principal_name}];
+    ALTER ROLE db_ddladmin   ADD MEMBER [${local.app_sql_principal_name}];
   EOT
+}
+
+output "app_sql_principal_name" {
+  description = "Database principal name for the app's managed identity — the UAMI's name when identity_mode=user_assigned, otherwise the web app's. deploy.ps1 grants THIS, not web_app_name, which would create a principal that never authenticates."
+  value       = local.app_sql_principal_name
 }

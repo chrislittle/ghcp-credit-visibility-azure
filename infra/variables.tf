@@ -3,15 +3,38 @@ variable "subscription_id" {
   description = "Azure subscription ID to deploy into."
 }
 
-# ── Identity model (flip switch) ──────────────────────────────
+# ── Identity model ────────────────────────────────────────────
 variable "identity_mode" {
   type        = string
-  description = "system_assigned = normal App Service system-assigned MI + external Entra SQL admin + one-time grant (incl. db_ddladmin so EF migrations apply on startup; simplified single-tenant CUSTOMER model). user_assigned_selfadmin = a user-assigned MI is both the web app identity AND the SQL Entra admin so the app applies its EF migrations on startup with no human grant (TEST model for hybrid/shared tenants where your identity can't be the SQL admin)."
+  description = <<-EOT
+    Which managed identity TYPE the web app runs as. Both values are production-supported and
+    functionally equivalent for the app itself — everything here is one Terraform state, so neither
+    identity outlives the deployment.
+
+      system_assigned — created with the web app. One less resource, and no AZURE_CLIENT_ID app
+        setting needed since there is only one identity the SDK could mean.
+
+      user_assigned   — a standalone identity (id-...) the app references. Requires the
+        AZURE_CLIENT_ID app setting so the SDK knows which identity to present (set automatically
+        by appservice.tf; omitting it is a classic silent failure).
+
+    The ONE structural difference: a system-assigned identity does not exist until the web app does,
+    and the web app depends on the SQL connection string, which depends on the SQL server, whose
+    admin would be that identity — a dependency cycle. A standalone identity is created before both
+    and breaks it. That is why only user_assigned can leave sql_admin_* blank and let the app
+    administer its own database.
+
+    Who administers SQL is otherwise a SEPARATE choice — see sql_admin_group_name/sql_admin_object_id,
+    settable in either mode and recommended in both.
+
+    "user_assigned_selfadmin" is the former name of user_assigned, still accepted. It was named for
+    the SQL behaviour that used to be bundled with it and no longer is.
+  EOT
   default     = "system_assigned"
 
   validation {
-    condition     = contains(["system_assigned", "user_assigned_selfadmin"], var.identity_mode)
-    error_message = "identity_mode must be \"system_assigned\" or \"user_assigned_selfadmin\"."
+    condition     = contains(["system_assigned", "user_assigned", "user_assigned_selfadmin"], var.identity_mode)
+    error_message = "identity_mode must be \"system_assigned\" or \"user_assigned\" (\"user_assigned_selfadmin\" is accepted as the former name of user_assigned)."
   }
 }
 
@@ -292,13 +315,13 @@ variable "enable_easy_auth" {
 # ── SQL ───────────────────────────────────────────────────────
 variable "sql_admin_group_name" {
   type        = string
-  description = "Display name of the Entra group/user to set as SQL Entra administrator. Required only when identity_mode=system_assigned. Ignored when identity_mode=user_assigned_selfadmin (the UAMI is the admin)."
+  description = "Display name of the Entra group/user to set as SQL Entra administrator. REQUIRED when identity_mode=system_assigned; OPTIONAL but RECOMMENDED when identity_mode=user_assigned — set it with sql_admin_object_id and you become the admin instead of the app's identity, which is what lets a human query the database at all. Leave both blank only when your identity cannot be a SQL admin (a subscription whose tenant differs from your sign-in identity)."
   default     = ""
 }
 
 variable "sql_admin_object_id" {
   type        = string
-  description = "Object ID of the Entra group/user to set as SQL Entra administrator. Required only when identity_mode=system_assigned. Ignored when identity_mode=user_assigned_selfadmin."
+  description = "Object ID of the Entra group/user to set as SQL Entra administrator. Pairs with sql_admin_group_name — both must be set for either to take effect, in either identity mode. Find yours with: az ad signed-in-user show --query id -o tsv"
   default     = ""
 }
 

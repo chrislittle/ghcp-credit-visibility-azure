@@ -99,19 +99,38 @@ Minimum subnet sizes: the private-endpoint subnet needs at least a `/27` (this s
 
 > **Private DNS default (important):** `create_private_dns_zones` defaults to **`false`** — the enterprise/CAF-safe choice. A private deployment does **not** create private DNS zones; the landing zone wires DNS centrally (hub zones + DeployIfNotExists), or you supply hub zone IDs. When there's **no central DNS/DINE policy** in this subscription, set `create_private_dns_zones = true` so the stack creates its own local zones. See *Reusing a centralized Private DNS* below.
 
-## Identity model (flip switch): `identity_mode`
+## Identity model: `identity_mode`
 
-The SQL/identity wiring flips with one variable so the same code serves both the shared-tenant **test** and the customer **prod** deployment:
+`identity_mode` selects the **web app's identity type** — nothing more. Both values are
+production-supported and, for the app itself, equivalent: this is all one Terraform state, so neither
+identity outlives the deployment. Who administers SQL is a **separate** choice
+(`sql_admin_group_name` + `sql_admin_object_id`), settable in either mode:
 
-| | `system_assigned` *(default — CUSTOMER / prod)* | `user_assigned_selfadmin` *(TEST — hybrid/shared tenant)* |
+| | `system_assigned` *(default)* | `user_assigned` |
 |---|---|---|
-| Web app identity | App Service **system-assigned** MI (the normal model) | A **user-assigned** MI (`id-…`) |
-| SQL Entra admin | An **external** Entra group/user (`sql_admin_object_id`) | **The app's UAMI itself** |
-| Schema provisioning | App MI granted via one-time T-SQL (`terraform output post_deploy_sql_grant`) incl. **`db_ddladmin`** so **EF migrations** apply on startup | **App applies EF migrations** on startup (`Database.Migrate()`; the UAMI is the SQL admin) — **no grant** |
-| Your identity needed as SQL admin? | Yes (must live in the SQL server's tenant) | **No** — solves the cross-tenant problem |
-| Best for | Simplified single-tenant customer deploy | Testing where your identity isn't in the subscription's tenant |
+| Web app identity | App Service **system-assigned** MI — created *with* the app | A **user-assigned** MI (`id-…`) — created *before* it |
+| Extra wiring | None | `AZURE_CLIENT_ID` app setting, so the SDK knows which identity to present (set automatically) |
+| SQL Entra admin | The named `sql_admin_object_id` — **required** | The named `sql_admin_object_id` if set (**recommended**), else the app's own UAMI |
+| Schema provisioning | App MI granted via one-time T-SQL (`terraform output post_deploy_sql_grant`) incl. **`db_ddladmin`** so **EF migrations** apply on startup | Same, when an admin is named. With no admin named the UAMI *is* the admin, so the app applies migrations with no grant |
+| Can a human query the DB? | Yes | Yes when an admin is named; **no** otherwise |
 
-**Why the test mode exists:** Azure SQL's Entra auth only trusts principals in the **subscription's home tenant**. If you deploy into a subscription whose tenant differs from your own sign-in identity (common in hybrid/managed subscriptions), your identity can't be the SQL admin or run the grant. Making the app's *own* user-assigned MI the SQL admin sidesteps this entirely while still exercising the real managed-identity path you'll ship to the customer.
+> **These used to be one knob**, so asking for a user-assigned identity silently handed the SQL admin
+> role to the app. Azure SQL allows exactly ONE Entra admin, so that left no human able to query the
+> database — every operational grant (the SRE agent, the SQL runbooks) had to borrow the role from
+> the app and hand it back. Name yourself as SQL admin and none of that applies.
+
+**Why the app can only self-administer under `user_assigned`:** a system-assigned identity does not
+exist until the web app does; the web app depends on the SQL connection string, which depends on the
+SQL server, whose Entra admin would be that identity — a dependency cycle Terraform cannot resolve. A
+standalone identity is created before both and breaks it. That ordering is the *only* structural
+difference between the two modes.
+
+**Why self-administering SQL is still supported:** Azure SQL's Entra auth only trusts principals in
+the **subscription's home tenant**. If you deploy into a subscription whose tenant differs from your
+own sign-in identity (common in hybrid/managed subscriptions), your identity *cannot* be the SQL
+admin or run the grant. Leaving `sql_admin_*` blank under `user_assigned` makes the app's
+own UAMI the admin and sidesteps this — at the cost of no human DB access. `deploy.ps1 -Task configure`
+offers it as an explicit third option, never as a default.
 
 > Customer hand-off = just set `identity_mode = "system_assigned"` (the default), provide `sql_admin_object_id`, and set `use_private_networking = true`. Nothing else changes.
 
@@ -119,7 +138,7 @@ The SQL/identity wiring flips with one variable so the same code serves both the
 
 **Easiest:** run `./deploy.ps1` from the repo root — **one** guided, colorized script that does the whole journey: prereqs → preflight → **configure** (interactive `terraform.tfvars`, incl. "who is admin — Myself/Group") → provision → in-cloud image build → SQL grant → PAT seed → health. Run a single phase with `-Task` (e.g. `-Task configure`, `-Task grant-sql`, `-Task set-pat`, `-Task status`), or the whole thing with no args. `-DryRun` previews without changing anything.
 
-Or copy `terraform.tfvars.example` to `terraform.tfvars` and set `identity_mode = "user_assigned_selfadmin"`, `use_private_networking = false`, `create_acr = true` by hand.
+Or copy `terraform.tfvars.example` to `terraform.tfvars` and set `identity_mode = "user_assigned"`, `use_private_networking = false`, `create_acr = true` by hand.
 
 ```bash
 # 0) Auth to the target subscription's tenant so both azurerm + azuread target it.
@@ -208,7 +227,7 @@ The deploy touches four permission planes. The ones that bite are the first two 
 | **Azure RBAC** (subscription) | **Owner** — or **Contributor *plus* User Access Administrator** (or *Role Based Access Control Administrator*) | Contributor alone is **not enough**: the apply creates role assignments (`AcrPull` on the registry, `Key Vault Secrets User` for the app, `Key Vault Secrets Officer` for the deployer and jump box, and the SRE agent's roles — one at **subscription** scope), which need `Microsoft.Authorization/roleAssignments/write`. |
 | **Entra ID** (directory) | Ability to create **app registrations + service principals**: either the tenant default *"Users can register applications" = Yes*, or a directory role — **Application Developer** (minimum), Application Administrator, or Cloud Application Administrator | `enable_easy_auth = true` (default) creates the Entra app registration, its service principal, and a client secret. The deployer is added as **owner** of both, which is also what lets it grant the `Admin` app role (`admin_principal_object_id`) and later destroy them. **`enable_easy_auth = false` is *not* a workaround for a usable app** — the app refuses to serve requests when platform authentication is absent (see the root README's security notes); it exists only for infra-only smoke deploys. |
 | **Entra ID** (licensing) | **Entra ID P1+** — only if you assign the `Admin` app role to a **group** | User-based app-role assignment works on any tier; *group*-based assignment is a P1 feature. |
-| **Azure SQL** (data plane) | Be (or be a member of) the configured **SQL Entra admin** when running the one-time grant (`-Task grant-sql` / `-Task grant-sre-sql`) | The grant creates the app's managed identity as a database user — only the Entra SQL admin can. A different person (e.g. a DBA) can run just that task later; nothing else requires it. Not needed for `identity_mode = user_assigned_selfadmin`. |
+| **Azure SQL** (data plane) | Be (or be a member of) the configured **SQL Entra admin** when running the one-time grant (`-Task grant-sql` / `-Task grant-sre-sql`) | The grant creates the app's managed identity as a database user — only the Entra SQL admin can. A different person (e.g. a DBA) can run just that task later; nothing else requires it. Not needed when the app is its own SQL admin (`identity_mode = user_assigned` with `sql_admin_*` left blank). |
 | **Key Vault** (data plane) | Nothing extra — the apply grants the deployer **Key Vault Secrets Officer** on the new vault | Needed for `-Task set-pat` and `github_pat_secret_value`. Allow a couple of minutes for RBAC propagation on a freshly created vault. |
 | **SRE Agent** (data plane, optional) | **SRE Agent Administrator** on the agent — auto-granted to the deployer (or to `sre_agent_admin_object_id`) | `-Task sre-sync` writes skills/agents/hooks over the agent's data-plane API (`https://azuresre.dev` audience). Subscription **Owner is not sufficient** — the data plane has its own RBAC. See [docs/SRE_AGENT.md](../docs/SRE_AGENT.md). |
 
@@ -273,9 +292,9 @@ When there's **no central DNS/DINE policy** in this subscription, set `create_pr
 
 ## Post-deploy
 
-**`identity_mode = user_assigned_selfadmin` (self-admin test): only step 2 applies** — the app applies its EF migrations on startup (the UAMI is the SQL admin, so no SQL grant is needed).
+**Both steps apply whenever a SQL admin is named** (`sql_admin_group_name`/`sql_admin_object_id`) — that is the recommended setup in either identity mode.
 
-**`identity_mode = system_assigned` (customer/prod): both steps.**
+**Only step 2 applies when the app is its own SQL admin** (`identity_mode = user_assigned` with `sql_admin_*` blank): it applies its EF migrations on startup, so there is no grant to run.
 
 1. **Grant the web app's managed identity access to SQL.** Run **`./deploy.ps1 -Task grant-sql`** from the repo root — it reads the server/DB/app names from Terraform outputs, uses your `az login` (you must be the Entra SQL admin), and applies an idempotent grant (`db_ddladmin` + read/write) so the app can run its migrations. No manual SQL needed if you don't want it, no restart (the app retries migrations and picks it up within ~30s). **On a private deployment**, the SQL server's public access is disabled, so your workstation may not have a path to it — `deploy.ps1` walks you through **how** to run the grant:
    - **Try direct access** — works if you're already on the VNet somehow (VPN/ExpressRoute/peering, common in real landing-zone environments). Rather than a separate network probe (Azure SQL's gateway accepts the TCP connection either way and only denies access during the login handshake, so a bare port check can't tell you in advance whether this will work), `deploy.ps1` just attempts the grant directly and interprets the real result.

@@ -14,7 +14,7 @@ locals {
   docker_image_name  = local.image_has_registry ? join("/", slice(split("/", var.container_image), 1, length(split("/", var.container_image)))) : var.container_image
 }
 
-# User-assigned identity (created only in user_assigned_selfadmin mode). Standalone
+# User-assigned identity (created only in user_assigned mode). Standalone
 # resource — avoids the web-app<->SQL dependency cycle and lets a single principal be
 # both the app identity and the SQL Entra admin.
 resource "azurerm_user_assigned_identity" "app" {
@@ -112,7 +112,7 @@ resource "azurerm_linux_web_app" "app" {
       # (enable_easy_auth = false) that header is plain client input and anyone could claim the
       # Admin role. When this is false the app refuses to serve rather than trusting it.
       "Auth__EasyAuthEnabled" = tostring(var.enable_easy_auth)
-      # Managed-identity SQL connection. In user_assigned_selfadmin mode we must name the
+      # Managed-identity SQL connection. In user_assigned mode we must name the
       # identity via "User Id=<UAMI clientId>"; system-assigned needs no User Id.
       "ConnectionStrings__BillingDb" = "Server=tcp:${azurerm_mssql_server.sql.fully_qualified_domain_name},1433;Database=${azurerm_mssql_database.db.name};Authentication=Active Directory Managed Identity;${local.use_uami ? "User Id=${azurerm_user_assigned_identity.app[0].client_id};" : ""}Encrypt=True;TrustServerCertificate=False;"
     },
