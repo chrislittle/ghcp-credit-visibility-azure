@@ -11,7 +11,13 @@ namespace GhcpCreditVisibility.Services
     public interface IGitHubBillingClient
     {
         Task<IReadOnlyList<EnterpriseLicenseUser>> GetEnterpriseUsersAsync(string enterprise, CancellationToken ct = default);
-        Task<UserCreditUsage?> GetCurrentMonthUsageForUserAsync(string enterprise, string user, CancellationToken ct = default);
+        /// <summary>
+        /// One user's AI-credit usage for a specific month. Takes an explicit period rather than
+        /// assuming "now" so the same call serves both live collection and historical backfill —
+        /// backfilled rows are then written by the identical code path and cannot drift in shape
+        /// from rows collected live.
+        /// </summary>
+        Task<UserCreditUsage?> GetUsageForUserAsync(string enterprise, string user, int year, int month, CancellationToken ct = default);
         Task<IReadOnlyList<CostCenter>> GetCostCentersAsync(string enterprise, CancellationToken ct = default);
         Task<IReadOnlyList<Budget>> GetBudgetsAsync(string enterprise, CancellationToken ct = default);
 

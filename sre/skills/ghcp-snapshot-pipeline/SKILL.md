@@ -40,7 +40,7 @@ and `Measurements` (not `customDimensions`/`customMeasurements`); time → `Time
 | Signal (AppMetrics.Name / AppEvents.Name) | Meaning |
 |---|---|
 | `ghcp.snapshot.age_hours` (dim: enterprise) | Hours since THAT enterprise's last run. Job runs every 12h; **>26h = broken for that enterprise, not slow.** |
-| `ghcp.snapshot.rows_written` (dim: enterprise) | Rows that enterprise's last run wrote. **0 is only a failure signal for an enterprise that PREVIOUSLY had data** (bad slug, PAT scope, licences removed). A newly onboarded enterprise legitimately writes 0 rows until usage accrues — per-user history is NOT backfilled — and so does one whose users genuinely consumed nothing. Cross-check `ghcp.data.months_with_data`: if that is 0 too, there is no history and nothing is wrong. |
+| `ghcp.snapshot.rows_written` (dim: enterprise) | Rows that enterprise's last run wrote. **0 is only a failure signal for an enterprise that PREVIOUSLY had data** (bad slug, PAT scope, licences removed). A newly onboarded enterprise legitimately writes 0 rows until usage accrues — per-user history is collected forward unless an admin opts into backfill — and so does one whose users genuinely consumed nothing. Cross-check `ghcp.data.months_with_data`: if that is 0 too, there is no history and nothing is wrong. |
 | `ghcp.github.token_resolved` (dim: enterprise) | 0 = that enterprise's PAT (Key Vault secret from its registry row) did not resolve (check this BEFORE blaming GitHub). Mock enterprises never emit it. |
 | `ghcp.github.rate_limit_remaining` (dim: enterprise) | That enterprise's PAT budget left. Limits are PER PAT — one enterprise being throttled says nothing about the others. |
 | `ghcp.data.org_usage_rows` (dim: enterprise) | Rows of organization/repository attribution held for that enterprise. |
@@ -64,6 +64,14 @@ and `Measurements` (not `customDimensions`/`customMeasurements`); time → `Time
   enterprise not yet on that endpoint, or a PAT lacking scope, logs a warning and the run still
   reports **succeeded** — per-user data, the app's primary output, is already written by then. Look
   for `Organization usage unavailable for '<slug>'` and `Backfilled organization usage for ...`.
+- If `Enterprises.UserBackfillEnabled = 1`, the run ALSO fills past months of **per-user** usage —
+  one call per user per month, which is why it is opt-in. `rowsWritten` for such a run is legitimately
+  many times its normal value; that is the backfill, not a duplication bug. It fills whole months
+  only, advancing `UserBackfillOldestYear`/`Month` after each, pauses when the rate limit nears its
+  reserve (resuming next cycle), and clears its own flag when the floor is reached. Look for
+  `Backfilled per-user usage for '<slug>' <year>-<month>`, `... pausing before ...`, and
+  `Per-user backfill complete for '<slug>'`. A run rate-limited by backfill is a config choice, not
+  an incident — but if the regular per-user collection starts failing on rate limits, that is one.
 - `rowsPurged` is the **combined** total of monthly, daily and organization rows purged. Daily rows are ~30x more
   numerous, so once daily history starts ageing past its retention window this number jumps sharply
   and stays high. **That is expected, not a runaway purge.** The two windows are separate:

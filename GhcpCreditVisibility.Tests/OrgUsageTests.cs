@@ -48,7 +48,7 @@ namespace GhcpCreditVisibility.Tests
         {
             private readonly MockGitHubBillingClient _inner = new();
             public Task<IReadOnlyList<EnterpriseLicenseUser>> GetEnterpriseUsersAsync(string e, CancellationToken ct = default) => _inner.GetEnterpriseUsersAsync(e, ct);
-            public Task<UserCreditUsage?> GetCurrentMonthUsageForUserAsync(string e, string u, CancellationToken ct = default) => _inner.GetCurrentMonthUsageForUserAsync(e, u, ct);
+            public Task<UserCreditUsage?> GetUsageForUserAsync(string e, string u, int y, int m, CancellationToken ct = default) => _inner.GetUsageForUserAsync(e, u, y, m, ct);
             public Task<IReadOnlyList<CostCenter>> GetCostCentersAsync(string e, CancellationToken ct = default) => _inner.GetCostCentersAsync(e, ct);
             public Task<IReadOnlyList<Budget>> GetBudgetsAsync(string e, CancellationToken ct = default) => _inner.GetBudgetsAsync(e, ct);
             public Task<IReadOnlyList<OrgUsageItem>> GetOrgUsageAsync(string e, int y, int m, CancellationToken ct = default)
@@ -61,7 +61,7 @@ namespace GhcpCreditVisibility.Tests
             {
                 ["Retention:Months"] = "6",
             }).Build();
-            return new SnapshotService(new MockFactory(client), r, f, config, NullLogger<SnapshotService>.Instance);
+            return new SnapshotService(new MockFactory(client), r, f, config, NullLogger<SnapshotService>.Instance, new GitHubRateLimitRegistry());
         }
 
         [Fact]

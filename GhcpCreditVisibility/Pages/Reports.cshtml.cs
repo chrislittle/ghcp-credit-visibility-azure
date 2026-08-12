@@ -68,7 +68,8 @@ namespace GhcpCreditVisibility.Pages
         /// none of the usual filters can compose with this dimension.</summary>
         public bool IsOrganization => Dim == "organization";
 
-        /// <summary>When per-user collection began for this scope (not backfilled — see
+        /// <summary>When per-user collection began for this scope (backfilled only if an admin
+        /// enabled it, and this date is that job's progress marker — see
         /// <see cref="UsageQueryService.GetCollectingSinceAsync"/>).</summary>
         public DateOnly? CollectingSince { get; private set; }
 

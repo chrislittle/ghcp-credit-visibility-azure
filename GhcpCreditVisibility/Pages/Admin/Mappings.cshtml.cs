@@ -69,6 +69,32 @@ namespace GhcpCreditVisibility.Pages.Admin
         /// remove-with-purge and re-add.</summary>
         [BindProperty(SupportsGet = true)] public long? EditEnterprise { get; set; }
         public Enterprise? EditingEnterprise { get; private set; }
+
+        /// <summary>?BackfillEnterprise=&lt;id&gt; opens the per-user history panel — same place the edit
+        /// form appears. Backfill is opt-in because it costs one GitHub call per user per month, so
+        /// the panel exists to show that cost BEFORE anything is committed.</summary>
+        [BindProperty(SupportsGet = true)] public long? BackfillEnterprise { get; set; }
+
+        /// <summary>What the backfill panel shows: how far back is reachable, and what it will cost.</summary>
+        public sealed record BackfillPlan(
+            Enterprise Enterprise,
+            int LicensedUsers,
+            IReadOnlyList<(int Year, int Month)> Months,
+            int EstimatedCalls)
+        {
+            public bool HasWork => Months.Count > 0;
+            public (int Year, int Month)? Oldest => Months.Count > 0 ? Months[^1] : null;
+
+            /// <summary>
+            /// Whether the whole job can plausibly finish in a single run. GitHub allows 5,000
+            /// requests per hour per token and the job holds part of that in reserve for the regular
+            /// snapshot. Below the line it finishes in one go; above it, it stages across cycles —
+            /// which is not a failure, just slower, and worth saying before someone starts it.
+            /// </summary>
+            public bool FitsInOneRun => EstimatedCalls <= 5000 - SnapshotService.BackfillRateLimitReserve;
+        }
+
+        public BackfillPlan? Backfill { get; private set; }
         /// <summary>Id → display label for enterprise badges on mapping rows.</summary>
         public IReadOnlyDictionary<long, string> EnterpriseNames { get; private set; } = new Dictionary<long, string>();
 
@@ -127,6 +153,21 @@ namespace GhcpCreditVisibility.Pages.Admin
 
             RetentionMonths = _config.GetValue("Retention:Months", 12);
             UseMock = _config.GetValue("GitHub:UseMock", true);
+
+            if (BackfillEnterprise is long backfillId
+                && enterprises.FirstOrDefault(e => e.Id == backfillId) is { } target)
+            {
+                var watermark = target.UserBackfillOldestYear is int by && target.UserBackfillOldestMonth is int bm
+                    ? (by, bm)
+                    : ((int, int)?)null;
+                var months = SnapshotService.PlanUserBackfill(DateTime.UtcNow, RetentionMonths, watermark);
+                // Licensed-user count comes from the last snapshot, NOT a live GitHub call: this page
+                // must render without network I/O, and an enterprise that has never run has no count
+                // to show — which is itself the right thing to say.
+                var licensed = target.LicensedUserCount ?? 0;
+                Backfill = new BackfillPlan(target, licensed, months,
+                    SnapshotService.EstimateUserBackfillCalls(licensed, months.Count));
+            }
             var conn = _config.GetConnectionString("BillingDb") ?? _config["ConnectionStrings:BillingDb"];
             UsingSqlServer = !string.IsNullOrWhiteSpace(conn);
         }
@@ -210,6 +251,45 @@ namespace GhcpCreditVisibility.Pages.Admin
                         "If another run holds the snapshot lease, this one is skipped rather than queued.",
                     _ => $"A snapshot for '{ent.Slug}' is already running on this instance.",
                 };
+            }
+            catch (Exception ex) { Error = ex.Message; }
+            return RedirectToPage();
+        }
+
+        /// <summary>
+        /// Turns on per-user history backfill. The work itself is done by the snapshot job, not here:
+        /// a web request must not sit on hundreds of sequential GitHub calls, and the job already owns
+        /// the distributed lease that stops two instances collecting the same months at once.
+        /// </summary>
+        public async Task<IActionResult> OnPostStartBackfillAsync(long id, CancellationToken ct)
+        {
+            if (!await _admin.IsAdminAsync(User, ct)) return Forbid();
+            try
+            {
+                var ent = (await _registry.GetAllAsync(ct)).FirstOrDefault(e => e.Id == id);
+                if (ent is null) { Error = "That enterprise is no longer in the registry."; return RedirectToPage(); }
+                if (!ent.Enabled) { Error = $"'{ent.Slug}' is disabled — enable it before backfilling."; return RedirectToPage(); }
+
+                await _registry.SetUserBackfillEnabledAsync(id, true, ct);
+                Message = $"History backfill enabled for '{ent.Slug}'. It fills one whole month at a time, newest first, " +
+                          "during snapshot runs, and stops on its own when there is nothing left. " +
+                          "Run a snapshot now to start immediately.";
+            }
+            catch (Exception ex) { Error = ex.Message; }
+            return RedirectToPage();
+        }
+
+        /// <summary>
+        /// Stops backfill. Months already completed are KEPT — the watermark records where it got to,
+        /// so restarting later resumes rather than redoing.
+        /// </summary>
+        public async Task<IActionResult> OnPostCancelBackfillAsync(long id, CancellationToken ct)
+        {
+            if (!await _admin.IsAdminAsync(User, ct)) return Forbid();
+            try
+            {
+                await _registry.SetUserBackfillEnabledAsync(id, false, ct);
+                Message = "History backfill stopped. Months already collected are kept; starting it again resumes where it left off.";
             }
             catch (Exception ex) { Error = ex.Message; }
             return RedirectToPage();

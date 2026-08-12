@@ -223,5 +223,50 @@ namespace GhcpCreditVisibility.Services
             row.OrgBackfillOldestMonth = month;
             await db.SaveChangesAsync(ct);
         }
+
+        /// <summary>
+        /// Turns the OPT-IN per-user history backfill on or off. Unlike the organization backfill —
+        /// which is one call per month and simply always runs — this one costs a call per user per
+        /// month, so an operator enables it deliberately after seeing the estimate. Clearing it is
+        /// also the cancel button: the snapshot job checks the flag each cycle and stops between
+        /// months, leaving completed months intact.
+        /// </summary>
+        public async Task SetUserBackfillEnabledAsync(long id, bool enabled, CancellationToken ct = default)
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var row = await db.Enterprises.FindAsync(new object[] { id }, ct);
+            if (row is null) return;
+            row.UserBackfillEnabled = enabled;
+            await db.SaveChangesAsync(ct);
+        }
+
+        /// <summary>
+        /// Records the OLDEST month whose per-user usage is COMPLETE — every licensed user fetched.
+        /// Written only after a whole month finishes, so an interrupted run resumes at a clean
+        /// boundary and never leaves a half-filled month that looks like a real usage drop.
+        /// </summary>
+        public async Task SetUserBackfillWatermarkAsync(long id, int year, int month, CancellationToken ct = default)
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var row = await db.Enterprises.FindAsync(new object[] { id }, ct);
+            if (row is null) return;
+            row.UserBackfillOldestYear = year;
+            row.UserBackfillOldestMonth = month;
+            await db.SaveChangesAsync(ct);
+        }
+
+        /// <summary>
+        /// Remembers how many licensed users the last snapshot saw, so the admin console can show a
+        /// backfill cost estimate (users x months) without calling GitHub. Pages in this app never
+        /// touch the GitHub API; only the snapshot job does.
+        /// </summary>
+        public async Task SetLicensedUserCountAsync(long id, int count, CancellationToken ct = default)
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var row = await db.Enterprises.FindAsync(new object[] { id }, ct);
+            if (row is null || row.LicensedUserCount == count) return;
+            row.LicensedUserCount = count;
+            await db.SaveChangesAsync(ct);
+        }
     }
 }

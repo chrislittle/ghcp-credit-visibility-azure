@@ -50,13 +50,14 @@ namespace GhcpCreditVisibility.Services
             return users;
         }
 
-        public async Task<UserCreditUsage?> GetCurrentMonthUsageForUserAsync(string enterprise, string user, CancellationToken ct = default)
+        public async Task<UserCreditUsage?> GetUsageForUserAsync(string enterprise, string user, int year, int month, CancellationToken ct = default)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(enterprise);
             ArgumentException.ThrowIfNullOrWhiteSpace(user);
-            var now = DateTime.UtcNow;
+            // year/month are explicit: GitHub serves a rolling 24-month window, so this same call
+            // fetches a past month for backfill exactly as it fetches the current one.
             var uri = $"/enterprises/{Uri.EscapeDataString(enterprise)}/settings/billing/ai_credit/usage" +
-                      $"?year={now.Year}&month={now.Month}&user={Uri.EscapeDataString(user)}";
+                      $"?year={year}&month={month}&user={Uri.EscapeDataString(user)}";
             return await SendAsync<UserCreditUsage>(uri, ct);
         }
 

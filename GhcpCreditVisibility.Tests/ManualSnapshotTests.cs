@@ -47,7 +47,7 @@ namespace GhcpCreditVisibility.Tests
             {
                 ["Retention:Months"] = "6",
             }).Build();
-            return new SnapshotService(new MockFactory(), r, f, config, NullLogger<SnapshotService>.Instance);
+            return new SnapshotService(new MockFactory(), r, f, config, NullLogger<SnapshotService>.Instance, new GitHubRateLimitRegistry());
         }
 
         [Fact]

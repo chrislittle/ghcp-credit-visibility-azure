@@ -65,13 +65,16 @@ namespace GhcpCreditVisibility.Services
         /// earliest month that actually has data, or, when there is none yet, the earliest
         /// registration date among the enterprises in scope.
         ///
-        /// Exists because per-user history is NOT backfilled. GitHub is asked only for the CURRENT
-        /// month, every run, so a newly onboarded enterprise has an empty dashboard until usage
-        /// accrues — and "empty" is indistinguishable from "broken" without being told why.
+        /// Exists because per-user history starts empty. A newly onboarded enterprise has an empty
+        /// dashboard until usage accrues — and "empty" is indistinguishable from "broken" without
+        /// being told why.
         ///
-        /// Deliberately not solved by partial backfill: filling some users/months and not others
-        /// would make an incomplete month look like a month of genuinely low spend, which is worse
-        /// than a visible gap in an app whose numbers people reconcile against invoices.
+        /// Also serves as the PROGRESS INDICATOR for the opt-in per-user backfill (see
+        /// <see cref="SnapshotService"/>): that job fills WHOLE months, oldest boundary moving back
+        /// one complete month at a time, so this date is accurate at every instant rather than only
+        /// once the job finishes. Partial fills are avoided on purpose — an incomplete month would
+        /// look like a month of genuinely low spend, which is worse than a visible gap in an app
+        /// whose numbers people reconcile against invoices.
         /// </summary>
         public async Task<DateOnly?> GetCollectingSinceAsync(UserScope scope, CancellationToken ct = default)
         {

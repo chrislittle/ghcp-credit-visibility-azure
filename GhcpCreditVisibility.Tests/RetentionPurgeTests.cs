@@ -140,7 +140,7 @@ public class RetentionPurgeTests
 
         var registry = new EnterpriseRegistryService(factory, config, NullLogger<EnterpriseRegistryService>.Instance);
         return new SnapshotService(
-            new MockOnlyClientFactory(), registry, factory, config, NullLogger<SnapshotService>.Instance);
+            new MockOnlyClientFactory(), registry, factory, config, NullLogger<SnapshotService>.Instance, new GitHubRateLimitRegistry());
     }
 
     private static SnapshotService BuildService(IDbContextFactory<BillingDbContext> factory, int retentionMonths)

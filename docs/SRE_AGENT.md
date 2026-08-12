@@ -103,7 +103,7 @@ standing instructions that survive a fresh conversation.
 |---|---|
 | `ghcp_incident_triage` | The entry point for any alert or "something's wrong". Classifies first — availability / freshness / correctness / access — and is forbidden from concluding "healthy" off HTTP 200s alone. |
 | `ghcp_db_expert` | Azure SQL specialist. Always establishes serverless-vs-provisioned first, so a 30–60s auto-pause resume isn't reported as an outage. Uses Query Store and the DMVs when the read-only SQL grant has run. |
-| `ghcp_data_auditor` | Data-correctness audits: volume swings, gaps in the monthly trend series, orphaned rows, budget/cost-center drift. Read-only and safe to schedule. Treats a trend gap as HIGH — GitHub only serves the current month, so purged history is unrecoverable. |
+| `ghcp_data_auditor` | Data-correctness audits: volume swings, gaps in the monthly trend series, orphaned rows, budget/cost-center drift. Read-only and safe to schedule. Treats a trend gap as HIGH — recoverable inside GitHub's 24-month window via the opt-in per-user backfill, but never before 1 June 2026 and never at day granularity. |
 | `ghcp_network_expert` | Private-networking failures, triaged in a fixed order (DNS → identity/RBAC → outbound egress) because each masquerades as the next one down. |
 
 Agent-to-agent handoffs aren't supported in workspace mode, so the specialists are reached either by

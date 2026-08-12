@@ -84,11 +84,26 @@ healthy usage that happens to cost nothing — never as "no usage" and never as 
 > **two-year** window; beyond it they fail with *"Time period cannot be more than 2 years in the
 > past."* So a gap inside 24 months is **RECOVERABLE IN PRINCIPLE**.
 >
-> Two caveats keep it serious. **The app has no backfill job** — it only ever requests the current
-> month — so recovery is a code change, not an operator action, and there is nothing to run today.
-> And a gap older than 24 months **is** permanently gone. Report a gap as: which enterprise, which
-> (Year, Month), whether it falls inside the 24-month window, and whether retention config or a
+> **Recovery is now an operator action, within limits.** Admin → GitHub enterprises → **History**
+> opens a per-user backfill panel showing the cost (one GitHub request per user per month) before
+> anything starts. It fills whole months, newest first, during snapshot runs and stops on its own.
+> Three floors bound it — whichever is most recent wins:
+>
+> | Floor | Value |
+> |---|---|
+> | AI-credits epoch | **1 June 2026** — that meter did not exist before it |
+> | GitHub API window | 24 months |
+> | This app's retention | `Retention:Months` (min 3) |
+>
+> Two caveats keep a gap serious. Backfill fills **whole months only** — it cannot restore
+> `DailyUsageSnapshots` intra-month detail, because a past month comes back as a single figure. And
+> a gap older than 24 months **is** permanently gone. Report a gap as: which enterprise, which
+> (Year, Month), whether it falls inside all three floors above, and whether retention config or a
 > disabled period explains it. Do not describe it as unrecoverable without checking its age.
+>
+> An enterprise mid-backfill has `Enterprises.UserBackfillEnabled = 1`; `UserBackfillOldestYear` /
+> `UserBackfillOldestMonth` name the oldest COMPLETE month. Months older than that watermark are
+> "not collected yet", not gaps — do not report them as findings while the flag is on.
 
 `UsageSnapshots` rows are keyed `Day = 1` — one row per user/model/sku per MONTH, rewritten in place
 on every run. (Intra-month detail lives in `DailyUsageSnapshots`; see Check 5. Do not look for

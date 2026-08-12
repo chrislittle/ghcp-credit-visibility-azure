@@ -189,8 +189,8 @@ namespace GhcpCreditVisibility.Tests
         public void Daily_retention_can_be_shortened_independently()
             => Assert.Equal(3, SnapshotService.ResolveDailyRetentionMonths(12, 3));
 
-        /// <summary>Nothing in this app refetches purged rows (GitHub's 24-month window would allow
-        /// it, but no backfill job exists), so the floor is absolute.</summary>
+        /// <summary>Backfill can restore a purged month's TOTAL but never its daily detail — a past
+        /// month comes back as one figure — so this floor is absolute for daily rows.</summary>
         [Theory]
         [InlineData(0)]
         [InlineData(1)]

@@ -308,16 +308,24 @@ namespace GhcpCreditVisibility.Services
             return Task.FromResult(result);
         }
 
-        public Task<UserCreditUsage?> GetCurrentMonthUsageForUserAsync(string enterprise, string user, CancellationToken ct = default)
+        public Task<UserCreditUsage?> GetUsageForUserAsync(string enterprise, string user, int year, int month, CancellationToken ct = default)
         {
             ThrowIfBroken(enterprise);
             var seed = SeedFor(enterprise);
             var s = seed.Users.FirstOrDefault(s => string.Equals(s.Login, user, StringComparison.OrdinalIgnoreCase));
             if (s.Login is null) return Task.FromResult<UserCreditUsage?>(null);
 
-            var now = DateTime.UtcNow;
+            // Months before the AI-credits epoch return NOTHING, as the real API does — that meter
+            // did not exist until 1 June 2026. Without this the mock would happily fabricate credit
+            // usage for periods that cannot have any, and backfill would look like it worked when
+            // pointed somewhere it should refuse.
+            var period = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc);
+            if (period < SnapshotService.AiCreditEpoch) return Task.FromResult<UserCreditUsage?>(null);
+
+            var now = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc);
             // Seed the RNG with (enterprise, user, month) so a login that exists in two enterprises
-            // gets DIFFERENT spend in each — visibly distinct rows, as with real billing.
+            // gets DIFFERENT spend in each — visibly distinct rows, as with real billing — and so a
+            // given month always regenerates identically, making backfill deterministic.
             var rng = new Random(StableSeed(enterprise + "|" + user) + now.Year * 100 + now.Month);
             var items = new List<UsageItem>();
             foreach (var (model, price) in Models)

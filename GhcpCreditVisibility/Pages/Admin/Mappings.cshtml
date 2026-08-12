@@ -51,12 +51,16 @@
         <span class="hint">registry — snapshots run per enabled enterprise; no redeploy to add one</span>
     </div>
     <table>
-        <thead><tr><th>Slug</th><th>Display name</th><th>Data source</th><th>PAT secret</th><th>PAT status</th><th>Last snapshot</th><th>Status</th><th></th></tr></thead>
+        <thead><tr><th>Slug</th><th>Display name</th><th>Data source</th><th>PAT secret</th><th>PAT status</th><th>Last snapshot</th><th>History</th><th>Status</th><th></th></tr></thead>
         <tbody>
             @foreach (var row in Model.Enterprises)
             {
                 var e = row.Enterprise;
-                <tr>
+                @* The panel below the table acts on ONE row, but nothing in the table said which —
+                   with several enterprises registered, "Edit" and "History" opened a form whose
+                   subject you had to infer from the slug in its heading. *@
+                var isTarget = Model.EditEnterprise == e.Id || Model.BackfillEnterprise == e.Id;
+                <tr style="@(isTarget ? "background:#fff8e5;box-shadow:inset 3px 0 0 #d9822b;" : "")">
                     <td><code>@e.Slug</code></td>
                     <td>@(e.DisplayName ?? "—")</td>
                     <td>@(e.UseMockData ? "Mock (demo)" : "Live GitHub")</td>
@@ -74,6 +78,22 @@
                             else if (row.LastRunRowsWritten == 0) { <span class="badge text-bg-warning ms-1">0 rows</span> }
                         }
                         else { <span>never</span> }
+                    </td>
+                    @* Per-user history is collected forward from the day this app started watching, so a
+                       new enterprise has no past. This column says how far back the data goes and links
+                       to the panel that offers to fetch more — GitHub keeps 24 months, but AI credits
+                       only exist from June 2026, so there is a real floor on what "more" can mean. *@
+                    @* Offered for mock enterprises too: the mock honors the same epoch and serves the
+                       same past months, so the demo exercises the real path rather than hiding it. *@
+                    <td style="white-space:nowrap">
+                        @if (e.UserBackfillEnabled) { <a href="?BackfillEnterprise=@e.Id"><span class="badge text-bg-info">backfilling…</span></a> }
+                        else if (e.UserBackfillOldestYear is int hy && e.UserBackfillOldestMonth is int hm)
+                        {
+                            <a href="?BackfillEnterprise=@e.Id" style="color:#66707d" title="Per-user history collected back to this month.">
+                                since @(new DateTime(hy, hm, 1).ToString("MMM yyyy"))
+                            </a>
+                        }
+                        else { <a href="?BackfillEnterprise=@e.Id" title="Only usage collected since this app started watching. Click to see what history can still be fetched.">forward only</a> }
                     </td>
                     <td>
                         @if (e.Enabled) { <span class="badge text-bg-success">enabled</span> }
@@ -110,8 +130,86 @@
         </tbody>
     </table>
     <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);background:#fafbff;">
-        @if (Model.EditingEnterprise is { } editing)
+        @if (Model.Backfill is { } bf)
         {
+            var ent = bf.Enterprise;
+            <div class="d-flex justify-content-between align-items-start">
+                <h3 class="h6 mb-1">Fetch older history — <code>@ent.Slug</code></h3>
+                <a class="btn btn-sm btn-outline-secondary" href="?">Close</a>
+            </div>
+            <p class="gh-note">
+                Per-user usage is normally collected forward from the day this app started watching.
+                GitHub will also serve <strong>past</strong> months — but one request per user per month,
+                which is why this is off by default and why the cost is shown before you start it.
+            </p>
+
+            @if (ent.LicensedUserCount is null)
+            {
+                <div class="alert alert-warning py-2 mb-0">
+                    No snapshot has run for <code>@ent.Slug</code> yet, so there is no user count to estimate with.
+                    Run a snapshot first, then come back — the estimate will be exact rather than a guess.
+                </div>
+            }
+            else if (!bf.HasWork)
+            {
+                <div class="alert alert-success py-2 mb-0">
+                    Nothing left to fetch. History goes back as far as it can:
+                    AI credits began <strong>1 June 2026</strong>, GitHub serves 24 months, and this app keeps
+                    @Model.RetentionMonths months — whichever of those is most recent is the floor, and you are at it.
+                </div>
+            }
+            else
+            {
+                <table class="mb-2" style="width:auto">
+                    <tbody>
+                        <tr><td class="gh-note pe-3">Months to fetch</td><td><strong>@bf.Months.Count</strong>
+                            @if (bf.Oldest is { } o) { <span class="gh-note">(back to @(new DateTime(o.Year, o.Month, 1).ToString("MMMM yyyy")))</span> }
+                        </td></tr>
+                        <tr><td class="gh-note pe-3">Licensed users</td><td><strong>@bf.LicensedUsers</strong> <span class="gh-note">(from the last snapshot)</span></td></tr>
+                        <tr><td class="gh-note pe-3">GitHub requests</td><td><strong>@bf.EstimatedCalls.ToString("N0")</strong>
+                            <span class="gh-note">
+                                @if (bf.FitsInOneRun) { <text>— fits inside one hour's rate limit, so it should finish in a single run.</text> }
+                                else { <text>— more than one hour's rate limit allows, so it fills a few months per run and continues on later runs. That is expected, not a failure.</text> }
+                            </span>
+                        </td></tr>
+                    </tbody>
+                </table>
+                <p class="gh-note">
+                    It fills <strong>whole months, newest first</strong>, and only records a month once every user in it
+                    is done — so the dashboard never shows a half-collected month that looks like a usage drop.
+                    Backfilled months carry no day-level detail (that would cost 30× the requests); they appear at
+                    month granularity. Stopping keeps everything already collected.
+                </p>
+
+                @if (ent.UserBackfillEnabled)
+                {
+                    <form method="post" asp-page-handler="CancelBackfill" style="display:inline">
+                        <input type="hidden" name="id" value="@ent.Id" />
+                        <span class="badge text-bg-info me-2">running</span>
+                        <button class="btn btn-sm btn-outline-danger" type="submit">Stop backfill</button>
+                    </form>
+                    <span class="gh-note ms-2">Runs during snapshots. Use <strong>▶ Run now</strong> above to advance it immediately.</span>
+                }
+                else
+                {
+                    <form method="post" asp-page-handler="StartBackfill" style="display:inline">
+                        <input type="hidden" name="id" value="@ent.Id" />
+                        <button class="btn btn-sm btn-primary" type="submit" @(ent.Enabled ? "" : "disabled")>Start backfill</button>
+                    </form>
+                    @if (!ent.Enabled) { <span class="gh-note ms-2" style="color:#d9822b">Enable this enterprise first — backfill runs as part of its snapshot.</span> }
+                }
+            }
+        }
+        else if (Model.EditingEnterprise is { } editing)
+        {
+            @* Titled like the backfill panel above it. This slot hosts three different forms that
+               look nearly identical once rendered — without a heading, clicking Edit only fills the
+               add-enterprise fields in, and there is nothing on screen saying the page changed mode
+               or which enterprise it changed mode FOR. *@
+            <div class="d-flex justify-content-between align-items-start mb-2">
+                <h3 class="h6 mb-0">Edit enterprise — <code>@editing.Slug</code></h3>
+                <a class="btn btn-sm btn-outline-secondary" href="?">Cancel</a>
+            </div>
             <form method="post" asp-page-handler="UpdateEnterprise" class="row g-2 align-items-end">
                 <input type="hidden" name="id" value="@editing.Id" />
                 <div class="col-md-2">
@@ -133,19 +231,19 @@
                         <option value="true" selected="@(editing.UseMockData)">Mock (demo)</option>
                     </select>
                 </div>
-                <div class="col-md-2 d-flex gap-2">
-                    <button class="btn btn-sm btn-primary flex-fill" type="submit">Save</button>
-                    <a class="btn btn-sm btn-outline-secondary" href="?">Cancel</a>
+                <div class="col-md-2">
+                    <button class="btn btn-sm btn-primary w-100" type="submit">Save</button>
                 </div>
             </form>
             <div class="gh-note mt-2">
-                Editing <strong>@editing.Slug</strong>. Changing the slug or data source changes what the <em>next</em> snapshot
+                Changing the slug or data source changes what the <em>next</em> snapshot
                 ingests — existing history stays attached to this enterprise either way. Switching Live → Mock (or renaming the
                 slug of a mock enterprise) can mix differently-shaped current-month data until retention ages it out.
             </div>
         }
         else
         {
+        <h3 class="h6 mb-2">Add an enterprise</h3>
         <form method="post" asp-page-handler="AddEnterprise" class="row g-2 align-items-end">
             <div class="col-md-2">
                 <label class="form-label mb-0 gh-note">Slug (API)</label>
@@ -161,18 +259,20 @@
             </div>
             <div class="col-md-2">
                 <label class="form-label mb-0 gh-note">Data source</label>
+                @* The hint that used to sit here pushed this column's inputs out of line with the
+                   other four, because it is inside the align-items-end row. It lives below the form
+                   now, where it says the same thing without bending the layout. *@
                 <select name="useMockData" class="form-select form-select-sm">
                     <option value="false">Live GitHub</option>
                     <option value="true">Mock (demo)</option>
                 </select>
-                <div class="gh-note mt-1" style="color:#d9822b">Live needs a PAT seeded before it can snapshot; Mock needs none.</div>
             </div>
             <div class="col-md-2">
                 <button class="btn btn-sm btn-primary w-100" type="submit">Add enterprise</button>
             </div>
         </form>
-        }
         <div class="gh-note mt-2">
+            <span style="color:#d9822b">Live needs a PAT seeded before it can snapshot; Mock needs none.</span>
             New enterprises start <strong>disabled</strong>: seed the PAT out-of-band
             (<code>./deploy.ps1 -Task set-pat -Enterprise &lt;slug&gt;</code> — the PAT value is never entered in this console),
             wait for "PAT status: resolved", <strong>Enable</strong>, verify the first snapshot above, then map principals below.
@@ -180,6 +280,7 @@
             Mock enterprises named <code>contoso</code> / <code>fabrikam</code> come with demo data; the mock slug
             <code>demo-broken</code> always fails — register it to fire-drill the per-enterprise alerts safely.
         </div>
+        }
     </div>
 </div>
 

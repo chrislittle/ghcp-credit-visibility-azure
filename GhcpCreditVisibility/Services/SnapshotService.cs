@@ -21,6 +21,7 @@ namespace GhcpCreditVisibility.Services
         private readonly IDbContextFactory<BillingDbContext> _dbFactory;
         private readonly IConfiguration _config;
         private readonly ILogger<SnapshotService> _logger;
+        private readonly GitHubRateLimitRegistry _rateLimits;
         private readonly TelemetryClient? _telemetry;
 
         public SnapshotService(
@@ -29,6 +30,7 @@ namespace GhcpCreditVisibility.Services
             IDbContextFactory<BillingDbContext> dbFactory,
             IConfiguration config,
             ILogger<SnapshotService> logger,
+            GitHubRateLimitRegistry rateLimits,
             TelemetryClient? telemetry = null)
         {
             _clientFactory = clientFactory;
@@ -36,6 +38,7 @@ namespace GhcpCreditVisibility.Services
             _dbFactory = dbFactory;
             _config = config;
             _logger = logger;
+            _rateLimits = rateLimits;
             _telemetry = telemetry;
         }
 
@@ -53,9 +56,11 @@ namespace GhcpCreditVisibility.Services
         /// than 2 years in the past." Earlier comments here claimed the API served the current month
         /// only; that was wrong, and it made every retention decision look more final than it is.
         ///
-        /// The floor still earns its place. Recovery needs a BACKFILL JOB THAT DOES NOT EXIST YET
-        /// (this app only ever requests the current month), so a purge today still means data gone
-        /// until someone writes one — and anything older than 24 months genuinely is gone for good.
+        /// The floor still earns its place. Purged months CAN now be re-fetched — organization data
+        /// automatically, per-user data via the opt-in backfill below — but per-user recovery costs a
+        /// request per user per month, and anything older than 24 months is gone for good regardless.
+        /// A short retention window therefore still trades cheap storage for expensive (or impossible)
+        /// recovery.
         /// </summary>
         public const int MinRetentionMonths = 3;
 
@@ -78,9 +83,10 @@ namespace GhcpCreditVisibility.Services
         /// a worse default than simply keeping both the same. Daily rows are ~30x more numerous but
         /// still small in absolute terms (single-digit GB at enterprise scale, cents per month on
         /// Azure SQL), so the separate knob exists for very large deployments rather than as the
-        /// expected thing to tune. The same <see cref="MinRetentionMonths"/> floor applies, for the
-        /// same reason: refetching purged rows needs a backfill job that does not exist yet, and
-        /// GitHub's window closes entirely at 24 months.
+        /// expected thing to tune. The same <see cref="MinRetentionMonths"/> floor applies, and here
+        /// it is stricter than it looks: daily rows are the one thing backfill CANNOT restore. It
+        /// fetches a past month as a single figure, so purged intra-month detail is gone even though
+        /// the month's total comes back.
         /// </summary>
         public static int ResolveDailyRetentionMonths(int monthlyRetention, int? dailyRetentionOverride) =>
             Math.Max(MinRetentionMonths, dailyRetentionOverride ?? monthlyRetention);
@@ -94,6 +100,67 @@ namespace GhcpCreditVisibility.Services
         /// beyond it returns HTTP 400, so the plan never does.
         /// </summary>
         public const int GitHubHistoryMonths = 24;
+
+        /// <summary>
+        /// The month AI credits became GitHub Copilot's billing unit, replacing premium requests.
+        ///
+        /// Nothing before this can have AI-credit usage — the meter did not exist — so requesting
+        /// earlier periods spends API calls to receive empty responses, and any pre-epoch figure
+        /// would be denominated in premium requests, a different unit that must never sit alongside
+        /// credits in the same chart. This is a fact about GitHub's billing, not a preference, which
+        /// is why it is a constant rather than configuration.
+        ///
+        /// It is currently the BINDING bound on backfill depth (tighter than either retention or
+        /// GitHub's 24-month window); retention will usually become the binding one from mid-2027.
+        /// </summary>
+        public static readonly DateTime AiCreditEpoch = new(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        /// <summary>
+        /// Whole months of PER-USER history still to fetch, newest first.
+        ///
+        /// Whole months, deliberately: at any instant the stored data is then "complete from month X
+        /// to now, absent before" — a clean boundary the "collecting since" marker states truthfully.
+        /// Filling user-by-user across months instead would leave some users with history and others
+        /// without, which is invisible in a chart and indistinguishable from those people not having
+        /// used Copilot.
+        ///
+        /// The floor is the MOST RECENT of three bounds, because each is a hard reason the data
+        /// cannot exist or cannot be kept:
+        ///   * the AI-credits epoch — the meter did not exist earlier
+        ///   * GitHub's 24-month window — the API refuses beyond it
+        ///   * the retention window — the purge would delete it on the same run
+        /// </summary>
+        public static IReadOnlyList<(int Year, int Month)> PlanUserBackfill(
+            DateTime nowUtc, int retentionMonths, (int Year, int Month)? oldestDone)
+        {
+            var current = new DateTime(nowUtc.Year, nowUtc.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+
+            var retentionFloor = current.AddMonths(-Math.Max(MinRetentionMonths, retentionMonths));
+            var apiFloor = current.AddMonths(-GitHubHistoryMonths);
+            var floor = new[] { retentionFloor, apiFloor, AiCreditEpoch }.Max();
+
+            // Resume one month older than the watermark; with none, start at last month. The CURRENT
+            // month is never included — the normal snapshot path owns it.
+            var next = oldestDone is { } w
+                ? new DateTime(w.Year, w.Month, 1, 0, 0, 0, DateTimeKind.Utc).AddMonths(-1)
+                : current.AddMonths(-1);
+
+            var plan = new List<(int, int)>();
+            while (next >= floor)
+            {
+                plan.Add((next.Year, next.Month));
+                next = next.AddMonths(-1);
+            }
+            return plan;
+        }
+
+        /// <summary>
+        /// Estimated API calls to fill the outstanding months: one call per user per month. Used to
+        /// show an operator the cost BEFORE they commit — 14 calls and 60,000 calls are the same
+        /// button otherwise.
+        /// </summary>
+        public static int EstimateUserBackfillCalls(int licensedUsers, int monthsOutstanding) =>
+            Math.Max(0, licensedUsers) * Math.Max(0, monthsOutstanding);
 
         /// <summary>
         /// Which past months to fetch organization usage for on this cycle.
@@ -203,13 +270,17 @@ namespace GhcpCreditVisibility.Services
                 var costCenters = await client.GetCostCentersAsync(enterprise.Slug, ct);
                 var userToCc = BuildUserCostCenterMap(costCenters);
 
+                // Remembered so the admin console can estimate backfill cost (users x months) without
+                // calling GitHub — pages in this app never do.
+                await _registry.SetLicensedUserCountAsync(enterprise.Id, users.Count, ct);
+
                 var written = 0;
                 foreach (var u in users)
                 {
                     ct.ThrowIfCancellationRequested();
                     if (string.IsNullOrWhiteSpace(u.GitHubComLogin)) continue;
 
-                    var usage = await client.GetCurrentMonthUsageForUserAsync(enterprise.Slug, u.GitHubComLogin, ct);
+                    var usage = await client.GetUsageForUserAsync(enterprise.Slug, u.GitHubComLogin, now.Year, now.Month, ct);
                     if (usage?.UsageItems is null) continue;
 
                     var (ccId, ccName) = usage.CostCenter is not null
@@ -397,6 +468,21 @@ namespace GhcpCreditVisibility.Services
                         });
                 }
 
+                // ── Per-user history backfill (OPT-IN, staged across cycles) ──
+                // Runs only when an operator enabled it after seeing the cost estimate. Fills WHOLE
+                // months, newest first, so the stored data is always "complete from month X to now"
+                // rather than a scatter of half-filled months — the boundary the "collecting since"
+                // marker reports, and the reason this walks months rather than users.
+                //
+                // Bounded per cycle by the live rate-limit reading, not by a fixed count: the regular
+                // snapshot above has already run, so whatever remains this hour is genuinely spare.
+                // Large enterprises therefore converge over several cycles instead of being refused.
+                if (enterprise.UserBackfillEnabled)
+                {
+                    var backfilled = await BackfillUserMonthsAsync(db, enterprise, client, users, userToCc, now, retentionMonths, ct);
+                    written += backfilled;
+                }
+
                 // ── Cost-center directory (current names, keyed by (enterprise, GitHub's stable id)) ──
                 // Refreshed every run so a rename in GitHub propagates to reports/trends/the admin
                 // mapping dropdown without rewriting the frozen historical name on past snapshot rows.
@@ -561,6 +647,120 @@ namespace GhcpCreditVisibility.Services
                     });
                 throw;
             }
+        }
+
+        /// <summary>
+        /// Reserve of hourly rate limit never spent on backfill, so the regular snapshot always has
+        /// room. GitHub allows 5,000 requests/hour per token and a normal cycle uses a few dozen;
+        /// this leaves an order of magnitude more than that untouched.
+        /// </summary>
+        public const int BackfillRateLimitReserve = 500;
+
+        /// <summary>
+        /// Fills whole past months of per-user history, newest first, until the plan is exhausted or
+        /// the rate limit approaches the reserve. Returns rows written.
+        ///
+        /// A month is only marked done once EVERY user in it has been fetched, so an interruption
+        /// leaves a clean boundary rather than a partially-filled month. Nothing here writes daily
+        /// rows: intra-month detail for a past month would cost one call per user PER DAY, and a
+        /// single month-end reading rendered as a daily row would attribute the whole month to one
+        /// day. Backfilled months therefore appear at month granularity, which the read path already
+        /// handles per-month.
+        /// </summary>
+        private async Task<int> BackfillUserMonthsAsync(
+            BillingDbContext db, Enterprise enterprise, IGitHubBillingClient client,
+            IReadOnlyList<Models.EnterpriseLicenseUser> users, Dictionary<string, (string?, string?)> userToCc,
+            DateTime now, int retentionMonths, CancellationToken ct)
+        {
+            var watermark = enterprise.UserBackfillOldestYear is int wy && enterprise.UserBackfillOldestMonth is int wm
+                ? (wy, wm)
+                : ((int, int)?)null;
+
+            var plan = PlanUserBackfill(now, retentionMonths, watermark);
+            if (plan.Count == 0)
+            {
+                // Nothing left — clear the flag so the console shows "complete" and no later cycle
+                // re-plans the same finished work.
+                await _registry.SetUserBackfillEnabledAsync(enterprise.Id, false, ct);
+                _logger.LogInformation("Per-user backfill complete for '{Slug}'.", enterprise.Slug);
+                return 0;
+            }
+
+            var rate = _rateLimits.For(enterprise.Slug);
+            var written = 0;
+
+            foreach (var (year, month) in plan)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                // Stop BEFORE a month rather than partway through: a month must be all-or-nothing so
+                // the watermark keeps meaning "everything from here forward is complete".
+                if (rate.Remaining is int remaining && remaining - users.Count < BackfillRateLimitReserve)
+                {
+                    _logger.LogInformation(
+                        "Per-user backfill for '{Slug}' pausing before {Year}-{Month:00}: {Remaining} rate-limit remaining " +
+                        "would not cover {Users} users while holding {Reserve} in reserve. Resumes next cycle.",
+                        enterprise.Slug, year, month, remaining, users.Count, BackfillRateLimitReserve);
+                    break;
+                }
+
+                foreach (var u in users)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (string.IsNullOrWhiteSpace(u.GitHubComLogin)) continue;
+
+                    var usage = await client.GetUsageForUserAsync(enterprise.Slug, u.GitHubComLogin, year, month, ct);
+                    if (usage?.UsageItems is null) continue;
+
+                    var (ccId, ccName) = usage.CostCenter is not null
+                        ? (usage.CostCenter.Id, usage.CostCenter.Name)
+                        : userToCc.GetValueOrDefault(u.GitHubComLogin);
+
+                    foreach (var item in usage.UsageItems)
+                    {
+                        var existing = await db.UsageSnapshots.FirstOrDefaultAsync(x =>
+                            x.EnterpriseId == enterprise.Id &&
+                            x.Year == year && x.Month == month && x.Day == 1 &&
+                            x.UserLogin == u.GitHubComLogin && x.Model == item.Model && x.Sku == item.Sku, ct);
+
+                        if (existing is null)
+                        {
+                            db.UsageSnapshots.Add(new UsageSnapshot
+                            {
+                                EnterpriseId = enterprise.Id,
+                                SnapshotUtc = now, Year = year, Month = month, Day = 1,
+                                UserLogin = u.GitHubComLogin, UserName = u.GitHubComName,
+                                CostCenterId = ccId, CostCenterName = ccName,
+                                Product = item.Product, Sku = item.Sku, Model = item.Model, UnitType = item.UnitType,
+                                NetQuantity = item.NetQuantity, NetAmount = item.NetAmount, GrossAmount = item.GrossAmount,
+                                DiscountQuantity = item.DiscountQuantity, DiscountAmount = item.DiscountAmount,
+                                PricePerUnit = item.PricePerUnit, GrossQuantity = item.GrossQuantity
+                            });
+                        }
+                        else
+                        {
+                            // Re-running a month is safe: the same row is refreshed, never duplicated.
+                            existing.SnapshotUtc = now;
+                            existing.CostCenterId = ccId; existing.CostCenterName = ccName;
+                            existing.NetQuantity = item.NetQuantity; existing.NetAmount = item.NetAmount; existing.GrossAmount = item.GrossAmount;
+                            existing.DiscountQuantity = item.DiscountQuantity; existing.DiscountAmount = item.DiscountAmount;
+                            existing.PricePerUnit = item.PricePerUnit; existing.GrossQuantity = item.GrossQuantity;
+                        }
+                        written++;
+                    }
+                }
+
+                await db.SaveChangesAsync(ct);
+
+                // Only NOW is the month complete, so only now does the watermark move.
+                await _registry.SetUserBackfillWatermarkAsync(enterprise.Id, year, month, ct);
+                enterprise.UserBackfillOldestYear = year;
+                enterprise.UserBackfillOldestMonth = month;
+                _logger.LogInformation("Backfilled per-user usage for '{Slug}' {Year}-{Month:00} ({Users} users).",
+                    enterprise.Slug, year, month, users.Count);
+            }
+
+            return written;
         }
 
         private static Dictionary<string, (string?, string?)> BuildUserCostCenterMap(IReadOnlyList<Models.CostCenter> costCenters)

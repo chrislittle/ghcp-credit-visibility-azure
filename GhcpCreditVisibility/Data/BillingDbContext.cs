@@ -310,6 +310,29 @@ namespace GhcpCreditVisibility.Data
         // contain zero usage — using row-absence as the signal would re-query those months forever.
         public int? OrgBackfillOldestYear { get; set; }
         public int? OrgBackfillOldestMonth { get; set; }
+
+        // ── Per-user history backfill ──
+        // OPT-IN, unlike the organization backfill. Org history costs one call per month regardless
+        // of headcount; per-user costs one call PER USER per month, which is 14 calls for a small
+        // enterprise and tens of thousands for a large one. An operator sees the estimate and starts
+        // it deliberately.
+        //
+        // A flag rather than a fire-and-forget task: the work can span many snapshot cycles, so it
+        // has to survive restarts, resume by itself, and be cancellable by clearing the flag.
+
+        /// <summary>True while per-user history is being filled. Set from the admin console; cleared
+        /// automatically on completion, or by the operator to cancel.</summary>
+        public bool UserBackfillEnabled { get; set; }
+
+        /// <summary>Oldest month whose per-user history has been fetched. Whole months only — see
+        /// <see cref="Services.SnapshotService.PlanUserBackfill"/> for why the boundary matters.</summary>
+        public int? UserBackfillOldestYear { get; set; }
+        public int? UserBackfillOldestMonth { get; set; }
+
+        /// <summary>Licensed users seen on the last snapshot. Stored so the admin console can show a
+        /// cost estimate WITHOUT calling GitHub — pages in this app never call GitHub live. Null
+        /// means no snapshot has run yet, so no estimate can be offered.</summary>
+        public int? LicensedUserCount { get; set; }
     }
 
     /// <summary>

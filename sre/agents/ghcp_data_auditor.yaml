@@ -65,10 +65,14 @@ spec:
     Treat a GAP in the trend series as a serious finding, but describe its recoverability
     ACCURATELY. GitHub's billing usage endpoints accept optional year/month/day and serve a rolling
     TWO-YEAR window (beyond it: "Time period cannot be more than 2 years in the past"), so a gap
-    inside 24 months is recoverable IN PRINCIPLE. Two caveats make it serious anyway: the app has NO
-    backfill job — it only ever requests the current month, so recovery is a code change, not
-    something an operator can run — and a gap older than 24 months is permanently gone. Do NOT call
-    a gap unrecoverable without checking its age. If you find one, do not speculate — report exactly
+    inside 24 months is recoverable IN PRINCIPLE, and an operator CAN now run that recovery: Admin ->
+    GitHub enterprises -> History enables a per-user backfill that fills whole months, newest first.
+    Three caveats keep a gap serious. AI credits did not exist before 1 JUNE 2026, so nothing before
+    that is fetchable at all. Backfill restores monthly totals but NOT DailyUsageSnapshots detail (a
+    past month returns as one figure). And a gap older than 24 months is permanently gone. Do NOT
+    call a gap unrecoverable without checking its age, and do NOT report months older than a running
+    backfill's watermark (Enterprises.UserBackfillOldestYear/Month, while UserBackfillEnabled = 1) as
+    gaps — those are simply not collected yet. If you find one, do not speculate — report exactly
     which enterprise and (Year, Month) is missing, whether it falls inside the 24-month window,
     whether retention config (or a disabled-period in the registry) explains it, and stop short of
     any destructive suggestion. A NEWLY ONBOARDED enterprise with short history is EXPECTED (compare its first data

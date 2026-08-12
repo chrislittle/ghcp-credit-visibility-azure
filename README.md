@@ -83,7 +83,7 @@ This app closes that gap:
 
 | Admin console — enterprise registry + access mappings | |
 |---|---|
-| ![Admin console with the GitHub enterprises registry, the two-level access model, and principal-to-cost-center mappings](docs/images/admin-mappings.png) | |
+| ![Admin console with the GitHub enterprises registry — per-enterprise snapshot and history controls — the two-level access model, and principal-to-cost-center mappings](docs/images/admin-mappings.png) | |
 
 *(Screenshots above were captured from a local run against the built-in synthetic demo data — two
 mock enterprises, **Contoso** and **Fabrikam**, seeded automatically; note the enterprise dropdown,
@@ -113,6 +113,13 @@ your organization's actual enterprises, users, cost centers, and spend.)*
   to break spend down by organization and repository, with real per-day dates. Past months
   backfill themselves automatically, a few per snapshot cycle, as far back as your retention
   window allows. Admin-only: that report has no cost center, so it cannot be scoped to a team.
+- **Opt-in per-user history backfill** — per-user data is normally collected forward from the day
+  you deploy, because GitHub's AI-credit report costs *one request per user per month*. When you
+  want the history anyway, **Admin → GitHub enterprises → History** prices the job first (users ×
+  months) and then fills whole months, newest first, during snapshot runs — never a partly-filled
+  month, which would read as a drop in spend rather than as missing history. It stops on its own at
+  the earliest of your retention window, GitHub's 24-month window, and **1 June 2026**, when AI
+  credits replaced premium requests and before which there is nothing to fetch.
 - **Intra-month history** — GitHub's usage API reports a running month-to-date total, so a monthly
   snapshot knows the total but not how the month got there. A separate daily table records each
   day's reading, making *"which day did spend jump?"* answerable without disturbing the monthly
@@ -330,8 +337,10 @@ scope, so a new `github-pat-<slug>` secret is usable the moment it exists:
    bad first snapshot is invisible to users and reversible by disabling the row.
 
 Removing an enterprise (decommission/consolidation) is the reverse: **Remove** in the console
-cascade-purges all of its usage history, budgets, mappings and run history — with a confirmation,
-since GitHub's API only serves the current month and purged history is unrecoverable.
+cascade-purges all of its usage history, budgets, mappings and run history — with a confirmation.
+Some of that can be re-fetched (GitHub serves a rolling 24 months, and AI credits only exist from
+June 2026), but per-user recovery costs a request per user per month and intra-month detail cannot
+be recovered at all.
 
 Same user in two enterprises? They appear as **distinct rows per enterprise** — that's how GitHub
 bills them — and identically-named cost centers ("Engineering" in both) are always
