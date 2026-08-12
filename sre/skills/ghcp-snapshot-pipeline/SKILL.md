@@ -40,7 +40,8 @@ and `Measurements` (not `customDimensions`/`customMeasurements`); time → `Time
 | Signal (AppMetrics.Name / AppEvents.Name) | Meaning |
 |---|---|
 | `ghcp.snapshot.age_hours` (dim: enterprise) | Hours since THAT enterprise's last run. Job runs every 12h; **>26h = broken for that enterprise, not slow.** |
-| `ghcp.snapshot.rows_written` (dim: enterprise) | Rows that enterprise's last run wrote. **0 is only a failure signal for an enterprise that PREVIOUSLY had data** (bad slug, PAT scope, licences removed). A newly onboarded enterprise legitimately writes 0 rows until usage accrues — per-user history is collected forward unless an admin opts into backfill — and so does one whose users genuinely consumed nothing. Cross-check `ghcp.data.months_with_data`: if that is 0 too, there is no history and nothing is wrong. |
+| `ghcp.snapshot.rows_written` (dim: enterprise) | Rows that enterprise's last run wrote. **0 is NOT a failure signal on its own** — it has three causes, and two are healthy: an empty user list (the incident), users whose usage call returned no items, and users who genuinely consumed nothing this month. This metric cannot separate them, so do not alert on it; read `ghcp.github.licensed_users` for the incident case. Useful as a trend against the same enterprise's own history. |
+| `ghcp.github.licensed_users` (dim: enterprise) | Users the consumed-licenses endpoint returned on that enterprise's last run. **0 = the user list came back EMPTY** — wrong slug in the registry row, PAT lost enterprise scope, or licences removed. This is the alertable signal (`empty_user_list`), because unlike rows written it means only that one thing. Not published until an enterprise's first users call completes, so "no series yet" means never-yet-run, not zero. |
 | `ghcp.github.token_resolved` (dim: enterprise) | 0 = that enterprise's PAT (Key Vault secret from its registry row) did not resolve (check this BEFORE blaming GitHub). Mock enterprises never emit it. |
 | `ghcp.github.rate_limit_remaining` (dim: enterprise) | That enterprise's PAT budget left. Limits are PER PAT — one enterprise being throttled says nothing about the others. |
 | `ghcp.data.org_usage_rows` (dim: enterprise) | Rows of organization/repository attribution held for that enterprise. |
@@ -55,10 +56,10 @@ and `Measurements` (not `customDimensions`/`customMeasurements`); time → `Time
 `UsageSnapshots` row and the cumulative `DailyUsageSnapshots` row for today:
 
 - `rowsWritten` counts **usage line items processed**, not database rows. Each item now produces two
-  rows, so the database grows about twice as fast as this number suggests. Its value as a signal is
-  unchanged: **0 on a success is a failure signal ONLY where history exists** (see the metric note
-  above — a new or genuinely idle enterprise writes 0 legitimately), and comparing it
-  against the same enterprise's own history is still the right read.
+  rows, so the database grows about twice as fast as this number suggests. **0 on a success is
+  ambiguous and is not alerted on** — see the metric note above; pair it with
+  `ghcp.github.licensed_users` to tell an empty user list from an idle enterprise. Comparing it
+  against the same enterprise's own history is still the right read for trends.
 - A run also fetches **organization usage** (one call per enterprise per month) and backfills a few
   PAST months per cycle. Neither is counted in `rowsWritten`. Both are wrapped in a catch: an
   enterprise not yet on that endpoint, or a PAT lacking scope, logs a warning and the run still
@@ -107,11 +108,17 @@ AppEvents
           rows = toreal(Measurements.rowsWritten), instance = tostring(Properties.instanceId)
 ```
 
-- **Succeeded, rows == 0** → GitHub returned an empty user list for that enterprise. Cause is the
-  **enterprise slug in its REGISTRY ROW or that PAT's scope**, not the DB. Check the slug in the
-  admin console's enterprise registry (NOT `GitHub__Enterprise` — that app setting only seeds the
-  first registry row on upgrade) and the PAT's `read:enterprise` / `manage_billing:enterprise`
-  scopes. Do NOT touch SQL.
+- **Succeeded, rows == 0** → **do not conclude anything yet.** Read that enterprise's
+  `ghcp.github.licensed_users` before acting:
+  - **licensed_users == 0** → GitHub returned an empty user list. Cause is the **enterprise slug in
+    its REGISTRY ROW or that PAT's scope**, not the DB. Check the slug in the admin console's
+    enterprise registry (NOT `GitHub__Enterprise` — that app setting only seeds the first registry
+    row on upgrade) and the PAT's `read:enterprise` / `manage_billing:enterprise` scopes. Do NOT
+    touch SQL. This is what the `empty_user_list` alert fires on.
+  - **licensed_users > 0** → the users are there and simply consumed nothing this month. **Healthy
+    — no action.** Common on lab and low-traffic enterprises. Note that stored history does NOT
+    contradict this: the opt-in per-user backfill fills PAST months, so an idle enterprise can hold
+    months of history while legitimately writing 0 rows today.
 - **SnapshotFailed** → read `error` (and `enterprise`) and branch:
 
 ## Step 3 — Branch on the error string

@@ -97,6 +97,19 @@ namespace GhcpCreditVisibility.Services
                 telemetry.GetMetric("ghcp.data.budgets", "enterprise").TrackValue(e.Budgets, e.Slug);
                 telemetry.GetMetric("ghcp.data.months_with_data", "enterprise").TrackValue(e.MonthsWithData, e.Slug);
 
+                // The DIRECT "GitHub returned no users" signal, and the one an alert should key off
+                // for a wrong slug / lost enterprise scope / removed licences. The app has always
+                // known this (the snapshot job stores it on the registry row) but never published
+                // it, which forced the alert rules to INFER an empty user list from 0 rows written
+                // — an inference that also catches a licensed-but-idle enterprise, and that a
+                // per-user backfill breaks outright by giving such an enterprise stored history.
+                //
+                // Null means the enterprise has not completed its first users call yet. Publishing
+                // 0 for that would page for every newly onboarded enterprise, so it is skipped
+                // rather than defaulted — the same reason token_resolved is conditional.
+                if (e.LicensedUsers is int entLicensed)
+                    telemetry.GetMetric("ghcp.github.licensed_users", "enterprise").TrackValue(entLicensed, e.Slug);
+
                 // Organization attribution + its backfill. These were reported at /health/diag but
                 // NOT published, so the only way to check backfill progress was reading raw container
                 // stdout — and it could not be alerted on at all. Every other field in the

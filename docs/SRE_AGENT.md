@@ -21,7 +21,8 @@ and the UI only reads the DB. So the failures that actually matter here are **in
 monitoring**:
 
 - the snapshot job silently stops → the site is 200 OK while serving month-old numbers
-- a run "succeeds" but writes 0 rows, or the wrong rows → the app is fully up while wrong
+- a run "succeeds" but collects nothing (GitHub returns an empty user list), or the wrong rows →
+  the app is fully up while wrong
 - the Key Vault PAT reference never resolves → a GitHub 401 three layers from its cause
 
 A billing app can be **100% available while 100% wrong**, and nothing in stock availability

@@ -26,6 +26,20 @@ namespace GhcpCreditVisibility.Services
         public int Budgets { get; init; }
         public int MonthsWithData { get; init; }
 
+        /// <summary>
+        /// Users GitHub's consumed-licenses endpoint returned on this enterprise's last run
+        /// (<c>Enterprises.LicensedUserCount</c>, recorded by the snapshot job).
+        ///
+        /// This is the DIRECT reading of "did the user list come back empty" — 0 means GitHub
+        /// reported no licensed users, which is the wrong-slug / lost-enterprise-scope /
+        /// licences-removed failure. Rows written cannot carry that meaning: an enterprise whose
+        /// users are licensed but consumed nothing this month also writes 0 rows, and after a
+        /// per-user backfill it has stored history too, so neither signal separates the two.
+        ///
+        /// Null until the first run reaches the users call — "not known yet", not "none".
+        /// </summary>
+        public int? LicensedUsers { get; init; }
+
         // ── Organization attribution + backfill ──
         /// <summary>Rows in OrgUsageSnapshots (organization / repository attribution).</summary>
         public int OrgUsageRows { get; init; }
@@ -224,6 +238,9 @@ namespace GhcpCreditVisibility.Services
                         CostCenters = ccCounts.GetValueOrDefault(e.Id),
                         Budgets = budgetCounts.GetValueOrDefault(e.Id),
                         MonthsWithData = monthCounts.GetValueOrDefault(e.Id),
+                        // Straight off the registry row — the snapshot job records it right after
+                        // the consumed-licenses call, so it needs no GitHub traffic here.
+                        LicensedUsers = e.LicensedUserCount,
                         OrgUsageRows = orgCounts.GetValueOrDefault(e.Id),
                         OrgMonthsWithData = orgMonthCounts.GetValueOrDefault(e.Id),
                         OrgBackfillOldest = e.OrgBackfillOldestYear is int oy && e.OrgBackfillOldestMonth is int om

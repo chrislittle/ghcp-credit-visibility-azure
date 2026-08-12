@@ -339,37 +339,42 @@ locals {
       operator            = "GreaterThan"
       threshold           = 0
     }
-    zero_rows = {
+    empty_user_list = {
       severity            = 2
       split_by_enterprise = true
-      # NARROWED: only fires for an enterprise that HAS history and then stopped writing.
+      # Replaces the old `zero_rows` rule, which inferred "GitHub returned no users" from a
+      # snapshot writing 0 rows. That inference was never sound and went outright wrong:
       #
-      # The original rule fired on any 0-row run and called it "likely a bad slug or PAT scope".
-      # That is wrong for two common, entirely healthy cases: an enterprise onboarded into a month
-      # with no usage yet, and one whose users genuinely consumed nothing. Per-user history is not
-      # backfilled, so a newly registered enterprise legitimately writes 0 rows for its whole first
-      # month — verified against a live enterprise. Paging someone for that trains them to ignore
-      # the alert.
+      #   - 0 rows written has THREE causes — an empty user list, users whose usage call returned
+      #     no items, and users who genuinely consumed nothing this month. Only the first is an
+      #     incident, and rowsWritten cannot tell them apart.
+      #   - The narrowing bolted on to fix that (fire only where ghcp.data.months_with_data > 0,
+      #     i.e. "this enterprise previously had data") rested on per-user history being
+      #     collect-forward-only, so stored history implied usage was recently flowing. The opt-in
+      #     per-user backfill broke that: it writes rows for PAST months, so an idle enterprise
+      #     acquires history without any current usage, and its next 0-row cycle pages. Verified
+      #     against a lab enterprise, which is exactly the false page the narrowing set out to stop.
       #
-      # months_with_data > 0 means we have previously stored usage for that enterprise, so 0 rows is
-      # a CHANGE rather than a starting state — which is the thing actually worth waking up for.
-      description         = "An enterprise that previously had usage data wrote 0 rows in a snapshot — its GitHub user list came back empty (registry slug changed, PAT scope lost, or licences removed). Enterprises with no history yet are excluded: a newly onboarded enterprise legitimately writes 0 rows until usage accrues, because per-user history is not backfilled."
+      # ghcp.github.licensed_users is the reading itself rather than a proxy for it: the count the
+      # consumed-licenses endpoint returned on that enterprise's last run. 0 means GitHub reported
+      # no licensed users — a wrong slug in the registry row, a PAT that lost enterprise scope, or
+      # licences actually removed. An idle-but-licensed enterprise reports its real user count and
+      # is silent here no matter how many rows it wrote or how much history it holds.
+      #
+      # The metric is not published until an enterprise's first users call completes, so a newly
+      # onboarded one cannot fire this on "not known yet" (see SreDiagnosticsPublisher).
+      description         = "An enterprise's GitHub user list came back EMPTY — the consumed-licenses endpoint reported 0 licensed users on its last snapshot. Causes: the enterprise slug in its registry row is wrong, its PAT lost enterprise scope, or the licences were removed. That enterprise collects no new usage until this is fixed; its stored history is untouched. The alert's enterprise dimension names which one. An enterprise whose users simply consumed nothing does NOT fire this."
       query               = <<-KQL
-        let hasHistory = AppMetrics
-          | where Name == "ghcp.data.months_with_data"
-          | extend enterprise = tostring(Properties["enterprise"])
-          | summarize months = max(Max) by enterprise
-          | where months > 0
-          | project enterprise;
-        AppEvents
-        | where Name == "SnapshotRunCompleted"
-        | extend rows = toreal(Measurements["rowsWritten"]), enterprise = tostring(Properties["enterprise"])
-        | where rows == 0
-        | where enterprise in (hasHistory)
-        | summarize AggregatedValue = count() by bin(TimeGenerated, 30m), enterprise
+        AppMetrics
+        | where Name == "ghcp.github.licensed_users"
+        | extend enterprise = tostring(Properties["enterprise"])
+        | summarize AggregatedValue = max(Max) by bin(TimeGenerated, 15m), enterprise
       KQL
-      operator            = "GreaterThan"
-      threshold           = 0
+      # max(Max) per bin, with the rule's Maximum aggregation across bins, means EVERY reading in
+      # the window must be 0 before this fires — the publisher emits every 5 minutes, so a single
+      # healthy tick is enough to stay silent.
+      operator            = "LessThan"
+      threshold           = 1
     }
     org_usage_unavailable = {
       severity            = 3

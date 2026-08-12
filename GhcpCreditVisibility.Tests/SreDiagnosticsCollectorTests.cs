@@ -194,4 +194,59 @@ public class SreDiagnosticsCollectorTests
         // Mock enterprises need no PAT — token status is "not applicable", never "missing".
         Assert.Null(contoso.TokenResolved);
     }
+
+    /// <summary>
+    /// The empty_user_list alert fires on licensed_users == 0, so the three states must stay
+    /// distinct: never-run (null, not alertable), empty list (0, the incident), and licensed
+    /// (> 0). Collapsing null to 0 would page for every newly onboarded enterprise.
+    /// </summary>
+    [Fact]
+    public async Task Reports_licensed_user_count_per_enterprise_and_null_before_the_first_run()
+    {
+        var factory = NewFactory();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            db.Enterprises.Add(new Enterprise { Slug = "contoso", DisplayName = "Contoso", UseMockData = true, Enabled = true, LicensedUserCount = 250 });
+            // Slug wrong or PAT scope lost: GitHub returned an empty user list.
+            db.Enterprises.Add(new Enterprise { Slug = "fabrikam", DisplayName = "Fabrikam", UseMockData = true, Enabled = true, LicensedUserCount = 0 });
+            // Registered but never snapshotted — "not known yet", which must NOT read as 0.
+            db.Enterprises.Add(new Enterprise { Slug = "initech", DisplayName = "Initech", UseMockData = true, Enabled = true });
+            await db.SaveChangesAsync();
+        }
+
+        var snap = await Collector(factory, Config(useMock: true)).CollectAsync();
+
+        Assert.Equal(250, snap.Enterprises.Single(e => e.Slug == "contoso").LicensedUsers);
+        Assert.Equal(0, snap.Enterprises.Single(e => e.Slug == "fabrikam").LicensedUsers);
+        Assert.Null(snap.Enterprises.Single(e => e.Slug == "initech").LicensedUsers);
+    }
+
+    /// <summary>
+    /// The false page this replaced: an idle enterprise that opted into the per-user backfill holds
+    /// months of history and writes 0 rows on a healthy cycle. The old rule keyed off exactly that
+    /// pair (months_with_data &gt; 0 AND rowsWritten == 0) and fired. Licensed users stays non-zero
+    /// throughout, which is what keeps the new rule quiet.
+    /// </summary>
+    [Fact]
+    public async Task Idle_backfilled_enterprise_has_history_and_zero_rows_but_still_reports_its_users()
+    {
+        var factory = NewFactory();
+        await using (var db = await factory.CreateDbContextAsync())
+        {
+            var idle = new Enterprise { Slug = "lab", DisplayName = "Lab", UseMockData = true, Enabled = true, LicensedUserCount = 5 };
+            db.Enterprises.Add(idle);
+            await db.SaveChangesAsync();
+
+            // Backfill filled a past month; this month nobody consumed anything, so the run wrote 0.
+            db.UsageSnapshots.Add(new UsageSnapshot { EnterpriseId = idle.Id, Year = 2026, Month = 7, Day = 1, UserLogin = "a", Product = "copilot", Sku = "Copilot AI Credits", Model = "gpt-5" });
+            db.SnapshotRuns.Add(new SnapshotRun { EnterpriseId = idle.Id, StartedUtc = DateTime.UtcNow.AddHours(-1), CompletedUtc = DateTime.UtcNow.AddHours(-1), Status = "succeeded", RowsWritten = 0 });
+            await db.SaveChangesAsync();
+        }
+
+        var lab = Assert.Single((await Collector(factory, Config(useMock: true)).CollectAsync()).Enterprises);
+
+        Assert.True(lab.MonthsWithData > 0);
+        Assert.Equal(0, lab.LastSnapshotRowsWritten);
+        Assert.Equal(5, lab.LicensedUsers);   // > 0 → empty_user_list stays silent
+    }
 }
