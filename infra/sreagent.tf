@@ -342,12 +342,48 @@ locals {
     zero_rows = {
       severity            = 2
       split_by_enterprise = true
-      description         = "A snapshot completed but wrote 0 rows for an enterprise — likely an empty GitHub user list (bad enterprise slug in the registry, or PAT scope). The alert's enterprise dimension names which one."
+      # NARROWED: only fires for an enterprise that HAS history and then stopped writing.
+      #
+      # The original rule fired on any 0-row run and called it "likely a bad slug or PAT scope".
+      # That is wrong for two common, entirely healthy cases: an enterprise onboarded into a month
+      # with no usage yet, and one whose users genuinely consumed nothing. Per-user history is not
+      # backfilled, so a newly registered enterprise legitimately writes 0 rows for its whole first
+      # month — verified against a live enterprise. Paging someone for that trains them to ignore
+      # the alert.
+      #
+      # months_with_data > 0 means we have previously stored usage for that enterprise, so 0 rows is
+      # a CHANGE rather than a starting state — which is the thing actually worth waking up for.
+      description         = "An enterprise that previously had usage data wrote 0 rows in a snapshot — its GitHub user list came back empty (registry slug changed, PAT scope lost, or licences removed). Enterprises with no history yet are excluded: a newly onboarded enterprise legitimately writes 0 rows until usage accrues, because per-user history is not backfilled."
       query               = <<-KQL
+        let hasHistory = AppMetrics
+          | where Name == "ghcp.data.months_with_data"
+          | extend enterprise = tostring(Properties["enterprise"])
+          | summarize months = max(Max) by enterprise
+          | where months > 0
+          | project enterprise;
         AppEvents
         | where Name == "SnapshotRunCompleted"
         | extend rows = toreal(Measurements["rowsWritten"]), enterprise = tostring(Properties["enterprise"])
         | where rows == 0
+        | where enterprise in (hasHistory)
+        | summarize AggregatedValue = count() by bin(TimeGenerated, 30m), enterprise
+      KQL
+      operator            = "GreaterThan"
+      threshold           = 0
+    }
+    org_usage_unavailable = {
+      severity            = 3
+      split_by_enterprise = true
+      # Organization-usage failure is deliberately NON-FATAL — it must never fail a run whose
+      # per-user numbers are already written. The cost of that choice is that the run still reports
+      # "succeeded" while organization attribution silently stops, and the app's own log warning goes
+      # to the container's stdout rather than App Insights, so nothing else here can see it. This
+      # event exists so non-fatal does not mean unmonitored.
+      description         = "Organization usage could not be collected for an enterprise (OrgUsageUnavailable event). Per-user data is UNAFFECTED and the snapshot still succeeded — but the Reports Organization breakdown and any organization budgets will go stale for that enterprise. Common causes: the enterprise is not on the general billing usage endpoint, or the PAT lost billing scope. See the event's error property."
+      query               = <<-KQL
+        AppEvents
+        | where Name == "OrgUsageUnavailable"
+        | extend enterprise = tostring(Properties["enterprise"])
         | summarize AggregatedValue = count() by bin(TimeGenerated, 30m), enterprise
       KQL
       operator            = "GreaterThan"

@@ -382,6 +382,19 @@ namespace GhcpCreditVisibility.Services
                     // numbers — the app's primary output — are already written. A backfill month that
                     // fails simply leaves the watermark where it was and is retried next cycle.
                     _logger.LogWarning(ex, "Organization usage unavailable for '{Slug}'; per-user data is unaffected.", enterprise.Slug);
+
+                    // ...but non-fatal must not mean INVISIBLE. Without this event the run still
+                    // reports "succeeded", the app's own logs go to the container's stdout rather
+                    // than App Insights, and organization data could stop flowing indefinitely with
+                    // nothing to alert on. Same shape as SnapshotFailed so the alert rule can treat
+                    // them alike.
+                    _telemetry?.TrackEvent("OrgUsageUnavailable",
+                        new Dictionary<string, string>
+                        {
+                            ["error"] = ex.Message,
+                            ["instanceId"] = InstanceId,
+                            ["enterprise"] = enterprise.Slug,
+                        });
                 }
 
                 // ── Cost-center directory (current names, keyed by (enterprise, GitHub's stable id)) ──

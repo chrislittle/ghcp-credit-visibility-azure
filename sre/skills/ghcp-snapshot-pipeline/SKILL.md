@@ -40,7 +40,7 @@ and `Measurements` (not `customDimensions`/`customMeasurements`); time → `Time
 | Signal (AppMetrics.Name / AppEvents.Name) | Meaning |
 |---|---|
 | `ghcp.snapshot.age_hours` (dim: enterprise) | Hours since THAT enterprise's last run. Job runs every 12h; **>26h = broken for that enterprise, not slow.** |
-| `ghcp.snapshot.rows_written` (dim: enterprise) | Rows that enterprise's last run wrote. **0 on a success = silent failure (bad slug / PAT scope).** |
+| `ghcp.snapshot.rows_written` (dim: enterprise) | Rows that enterprise's last run wrote. **0 is only a failure signal for an enterprise that PREVIOUSLY had data** (bad slug, PAT scope, licences removed). A newly onboarded enterprise legitimately writes 0 rows until usage accrues — per-user history is NOT backfilled — and so does one whose users genuinely consumed nothing. Cross-check `ghcp.data.months_with_data`: if that is 0 too, there is no history and nothing is wrong. |
 | `ghcp.github.token_resolved` (dim: enterprise) | 0 = that enterprise's PAT (Key Vault secret from its registry row) did not resolve (check this BEFORE blaming GitHub). Mock enterprises never emit it. |
 | `ghcp.github.rate_limit_remaining` (dim: enterprise) | That enterprise's PAT budget left. Limits are PER PAT — one enterprise being throttled says nothing about the others. |
 | `ghcp.data.org_usage_rows` (dim: enterprise) | Rows of organization/repository attribution held for that enterprise. |
@@ -49,13 +49,15 @@ and `Measurements` (not `customDimensions`/`customMeasurements`); time → `Time
 | `ghcp.db.pending_migrations` (no dimension) | Infra-level: schema not fully applied. |
 | `SnapshotRunCompleted` (event) | `Measurements`: rowsWritten, rowsPurged, durationMs; `Properties`: instanceId, status, **enterprise**. See the counting note below — neither measurement is a plain row count. |
 | `SnapshotFailed` (event) | `Properties.error` has the exception message, `Properties.enterprise` names the enterprise — **branch on error (below).** |
+| `OrgUsageUnavailable` (event) | Organization usage could not be collected for that enterprise. The run still **succeeded** and per-user data is unaffected — organization attribution is deliberately non-fatal — but the Reports Organization breakdown and organization budgets go stale until it recovers. `Properties.error` has the cause; common ones are the enterprise not being on the general billing usage endpoint, or the PAT losing billing scope. This event exists because the app's own log warning goes to container stdout, not App Insights, so without it the failure would be completely invisible. |
 
 **How rowsWritten and rowsPurged actually count.** Each run writes to TWO usage tables — the monthly
 `UsageSnapshots` row and the cumulative `DailyUsageSnapshots` row for today:
 
 - `rowsWritten` counts **usage line items processed**, not database rows. Each item now produces two
   rows, so the database grows about twice as fast as this number suggests. Its value as a signal is
-  unchanged: **0 on a success still means silent failure** (bad slug, PAT scope), and comparing it
+  unchanged: **0 on a success is a failure signal ONLY where history exists** (see the metric note
+  above — a new or genuinely idle enterprise writes 0 legitimately), and comparing it
   against the same enterprise's own history is still the right read.
 - A run also fetches **organization usage** (one call per enterprise per month) and backfills a few
   PAST months per cycle. Neither is counted in `rowsWritten`. Both are wrapped in a catch: an

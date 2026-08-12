@@ -54,14 +54,20 @@
         chart.Append($"<text x='{X(i)}' y='{H - 14}' text-anchor='middle' font-size='10' fill='#98a2b3'>{System.Net.WebUtility.HtmlEncode(buckets[i])}</text>");
     }
     bool showDots = n <= 60;
+    // A single bucket cannot draw a line — a polyline needs two points — so the chart renders as
+    // bare floating dots and looks broken rather than sparse. That is every new deployment's first
+    // impression, since per-user history starts at zero and accrues one month at a time. Enlarge
+    // the markers so they read as deliberate, and say why below the plot.
+    bool singleBucket = n == 1;
     foreach (var s in ranked)
     {
         var col = ColorKey(s.Key);
         var line = string.Join(" ", s.Points.Select((p, i) => $"{X(i)},{Y(p.NetAmount)}"));
-        chart.Append($"<polyline fill='none' stroke='{col}' stroke-width='2.5' points='{line}'></polyline>");
-        if (showDots)
+        if (!singleBucket)
+            chart.Append($"<polyline fill='none' stroke='{col}' stroke-width='2.5' points='{line}'></polyline>");
+        if (showDots || singleBucket)
             for (int i = 0; i < s.Points.Count; i++)
-                chart.Append($"<circle cx='{X(i)}' cy='{Y(s.Points[i].NetAmount)}' r='2.5' fill='{col}'></circle>");
+                chart.Append($"<circle cx='{X(i)}' cy='{Y(s.Points[i].NetAmount)}' r='{(singleBucket ? "5" : "2.5")}' fill='{col}'></circle>");
     }
 
     string Q(string dim, string gran, int range, string? fu, string? fm, string? fc, string view)
@@ -313,6 +319,13 @@ else
                 <svg viewBox="0 0 @W @H" width="100%" height="@H" role="img" aria-label="Spend trend by @Model.DimLabel" style="max-width:100%;">
                     @Html.Raw(chart.ToString())
                 </svg>
+                @if (singleBucket)
+                {
+                    <p class="gh-note" style="margin:4px 2px 0;">
+                        📍 Only one @Model.GranLabel has data, so there's no line to draw — a trend needs at least two points.
+                        The value@(ranked.Count > 1 ? "s are" : " is") plotted above.
+                    </p>
+                }
             </div>
             @if (ranked.Count > 1 || Model.Dim != "total")
             {
