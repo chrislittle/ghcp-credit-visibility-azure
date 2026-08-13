@@ -285,26 +285,38 @@
                         if (p.ProjectedMonthEnd is decimal proj && last.Day < days)
                             g.Append($"<line x1='{X(last.Day)}' y1='{Y(last.CumulativeCredits)}' x2='{X(days)}' y2='{Y(proj)}' stroke='#d9822b' stroke-width='2' stroke-dasharray='5 4'></line>");
                     }
-                <div class="gh-cardbody" style="padding-bottom:4px;">
-                    @if (pts.Count == 0)
-                    {
-                        <div class="gh-note" style="color:#d9822b">
-                            No daily detail for this month yet, so the burn-down cannot be drawn — the figures below are still exact.
-                            Daily credit consumption is recorded from the first snapshot run after this feature was deployed.
+                @* With no points there is no burn-down, so DON'T draw the frame. Rendering an empty
+                   chart directly beneath a note saying the chart cannot be drawn contradicts itself,
+                   and the lone dotted even-burn diagonal reads as a projection that does not exist. *@
+                @if (pts.Count == 0)
+                {
+                    <div class="gh-cardbody">
+                        <div class="gh-note mb-0" style="color:#d9822b">
+                            <strong>No burn-down yet for @Model.MonthLabel.</strong> The curve is drawn from daily credit
+                            consumption, which is recorded from the first snapshot run each day — so it appears once this
+                            month has usage and at least one run has captured it. The figures below are exact regardless.
                         </div>
-                    }
-                    <svg viewBox="0 0 @W @H" width="100%" height="@H" role="img"
-                         aria-label="Allowance burn-down for @p.EnterpriseName: cumulative credits per day against a capacity of @cap.ToString("N0")"
-                         style="max-width:100%;">
-                        @Html.Raw(g.ToString())
-                    </svg>
-                    <div class="gh-legend" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px;color:#66707d;padding:0 0 8px 0;">
-                        <span><span class="sw" style="background:#2563eb"></span> consumed to date</span>
-                        <span><span class="sw" style="background:#d9822b"></span> projected at current rate</span>
-                        <span><span class="sw" style="background:#98a2b3"></span> even burn</span>
-                        <span><span class="sw" style="background:#d93025"></span> capacity</span>
                     </div>
-                </div>
+                }
+                else
+                {
+                    <div class="gh-cardbody" style="padding-bottom:4px;">
+                        <svg viewBox="0 0 @W @H" width="100%" height="@H" role="img"
+                             aria-label="Allowance burn-down for @p.EnterpriseName: cumulative credits per day against a capacity of @cap.ToString("N0")"
+                             style="max-width:100%;">
+                            @Html.Raw(g.ToString())
+                        </svg>
+                    </div>
+                    @* gh-serieslegend, not gh-legend: the latter is flex-direction:COLUMN and sizes its
+                       swatches only inside a `.row`, so this rendered as a vertical list with invisible
+                       swatches. This is the same horizontal legend the Reports trend chart uses. *@
+                    <div class="gh-serieslegend">
+                        <span class="row"><span class="sw" style="background:#2563eb"></span> consumed to date</span>
+                        <span class="row"><span class="sw" style="background:#d9822b"></span> projected at current rate</span>
+                        <span class="row"><span class="sw" style="background:#98a2b3"></span> even burn</span>
+                        <span class="row"><span class="sw" style="background:#d93025"></span> capacity</span>
+                    </div>
+                }
 
                 <div class="gh-budgets">
                     <div class="gh-budget">
