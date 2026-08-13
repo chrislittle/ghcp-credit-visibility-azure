@@ -81,7 +81,7 @@ This app closes that gap:
 |---|---|
 | ![Budgets page grouped by enterprise, showing enterprise-wide, cost-center and organization budgets, with hard-stop budgets flagged](docs/images/budgets.png) | ![Reports broken down by GitHub organization, including an Unattributed row for enterprise-level charges that belong to no organization](docs/images/reports-organization.png) |
 
-| Admin console — enterprise registry + access mappings | |
+| Admin console — enterprise registry + the three access roles | |
 |---|---|
 | ![Admin console with the GitHub enterprises registry — per-enterprise snapshot and history controls — the two-level access model, and principal-to-cost-center mappings](docs/images/admin-mappings.png) | |
 
