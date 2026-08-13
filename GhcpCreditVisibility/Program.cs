@@ -164,6 +164,54 @@ if (app.Environment.IsDevelopment() && useLocalDevDb)
                 GhcpCreditVisibility.Services.MockGitHubBillingClient.BuildHistorySnapshots(12, endOfLastMonth, e.Id, e.Slug));
         }
     }
+    // Intra-month daily rows for the CURRENT month, so the allowance burn-down has a curve to draw
+    // rather than the single point the startup snapshot would leave. Demo-only.
+    //
+    // Seeded for days 1..YESTERDAY and derived from the mock's own monthly figure, scaled linearly —
+    // so the curve is monotonic and meets today's real value where the snapshot job writes it. The
+    // job owns TODAY; seeding it here as well would fight that write and could make the curve dip.
+    if (!db.DailyUsageSnapshots.Any())
+    {
+        var mockDaily = scope.ServiceProvider.GetRequiredService<GhcpCreditVisibility.Services.MockGitHubBillingClient>();
+        var utcNow = DateTime.UtcNow;
+        foreach (var e in seedEnterprises)
+        {
+            var ccOf = mockDaily.GetCostCentersAsync(e.Slug).Result
+                .SelectMany(c => c.Resources
+                    .Where(r => !string.IsNullOrWhiteSpace(r.Name))
+                    .Select(r => (Login: r.Name!, c.Id, c.Name)))
+                .ToDictionary(x => x.Login, x => (x.Id, x.Name), StringComparer.OrdinalIgnoreCase);
+
+            foreach (var u in mockDaily.GetEnterpriseUsersAsync(e.Slug).Result)
+            {
+                if (string.IsNullOrWhiteSpace(u.GitHubComLogin)) continue;
+                var usage = mockDaily.GetUsageForUserAsync(e.Slug, u.GitHubComLogin, utcNow.Year, utcNow.Month).Result;
+                if (usage is null) continue;
+                ccOf.TryGetValue(u.GitHubComLogin, out var cc);
+
+                foreach (var item in usage.UsageItems)
+                {
+                    for (var day = 1; day < utcNow.Day; day++)
+                    {
+                        // Cumulative month-to-date, ramping to just under today's figure.
+                        var frac = (decimal)day / utcNow.Day;
+                        db.DailyUsageSnapshots.Add(new GhcpCreditVisibility.Data.DailyUsageSnapshot
+                        {
+                            EnterpriseId = e.Id, SnapshotUtc = utcNow,
+                            Year = utcNow.Year, Month = utcNow.Month, Day = day,
+                            UserLogin = u.GitHubComLogin, UserName = u.GitHubComName,
+                            CostCenterId = cc.Item1, CostCenterName = cc.Item2,
+                            Product = item.Product, Sku = item.Sku, Model = item.Model, UnitType = item.UnitType,
+                            NetQuantity = item.NetQuantity * frac,
+                            GrossQuantity = item.GrossQuantity * frac,
+                            NetAmount = item.NetAmount * frac,
+                            GrossAmount = item.GrossAmount * frac
+                        });
+                    }
+                }
+            }
+        }
+    }
     if (!db.PrincipalCostCenterMappings.Any())
     {
         var contosoId = seedEnterprises.First(e => e.Slug == "contoso").Id;

@@ -77,7 +77,7 @@ This app closes that gap:
 |---|---|
 | ![Usage dashboard: total spend annotated with how much the included allowance covered, a gross-usage KPI, and per-user net and gross columns](docs/images/dashboard.png) | ![Reports page breaking spend down by cost center across enterprises, with the enterprise filter](docs/images/reports.png) |
 
-| Budgets — enterprise, cost-center and organization scopes | Reports — spend by GitHub organization |
+| Budgets &amp; allowance — the pool burn-down above every budget | Reports — spend by GitHub organization |
 |---|---|
 | ![Budgets page grouped by enterprise, showing enterprise-wide, cost-center and organization budgets, with hard-stop budgets flagged](docs/images/budgets.png) | ![Reports broken down by GitHub organization, including an Unattributed row for enterprise-level charges that belong to no organization](docs/images/reports-organization.png) |
 
@@ -141,8 +141,17 @@ your organization's actual enterprises, users, cost centers, and spend.)*
   reaches a helpdesk as "Copilot is broken" rather than as a billing question. The dashboard
   surfaces only budgets **needing attention** (over / near limit, worst first) once more than a
   handful are visible — an exec spanning several enterprises sees the two red ones, not a wall of
-  dozens of green meters — while a dedicated **Budgets** page lists every budget, grouped by
+  dozens of green meters — while the **Budgets &amp; allowance** page lists every budget, grouped by
   enterprise and filterable by status. GitHub still sends the actual alert emails.
+- **Included-allowance pool — the one leading indicator.** Every other view reports spend already
+  incurred; this one says when billing *starts*. Each Copilot seat includes a monthly credit
+  allowance (Business 1,900, Enterprise 3,900) that is **pooled across the enterprise**, and nothing
+  is billable until the pool is empty. **Budgets &amp; allowance** shows a per-enterprise burn-down —
+  consumed to date against an even-burn reference, projected forward to the day the pool runs dry,
+  with the capacity ceiling drawn on — plus the seat breakdown and which cost centers are driving
+  the burn. Capacity comes from **assigned Copilot seats**, not licence holders: they are different
+  populations, and confusing them overstates headroom in the direction that makes an enterprise
+  about to overspend look comfortable.
 - **Microsoft Entra ID authentication** (Azure App Service Easy Auth) — no anonymous access, ever.
 - **Group- and user-based access scoping, many-to-many** — an in-app Admin console maps Entra
   security groups *and/or* individual users to **one or more** GitHub cost centers each. An

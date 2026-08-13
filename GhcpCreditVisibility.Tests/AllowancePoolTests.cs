@@ -62,11 +62,35 @@ namespace GhcpCreditVisibility.Tests
 
         public void Dispose() => _conn.Dispose();
 
-        private void AddSeats(long ent, string planType, int seats)
+        /// <param name="year">Defaults to the month under test. Pass an earlier one to prove history
+        /// is retained but NOT counted toward the current month's capacity.</param>
+        private void AddSeats(long ent, string planType, int seats, int? year = null, int? month = null)
         {
             using var db = _factory.CreateDbContext();
             db.EnterpriseCopilotSeats.Add(new EnterpriseCopilotSeat
-            { EnterpriseId = ent, PlanType = planType, Seats = seats, SnapshotUtc = AsOf });
+            {
+                EnterpriseId = ent,
+                Year = year ?? AsOf.Year,
+                Month = month ?? AsOf.Month,
+                PlanType = planType,
+                Seats = seats,
+                SnapshotUtc = AsOf
+            });
+            db.SaveChanges();
+        }
+
+        /// <summary>A cumulative month-to-date daily reading, as the snapshot job writes them.</summary>
+        private void AddDaily(long ent, string login, int day, decimal? cumulativeGross,
+            string unitType = UsageUnitTypes.AiCredits)
+        {
+            using var db = _factory.CreateDbContext();
+            db.DailyUsageSnapshots.Add(new DailyUsageSnapshot
+            {
+                EnterpriseId = ent, Year = 2026, Month = 8, Day = day, UserLogin = login,
+                Product = "copilot", Sku = "Copilot AI Credits", Model = "gpt-5",
+                UnitType = unitType, GrossQuantity = cumulativeGross,
+                NetQuantity = 0m, NetAmount = 0m, GrossAmount = 0m
+            });
             db.SaveChanges();
         }
 
@@ -78,6 +102,21 @@ namespace GhcpCreditVisibility.Tests
                 EnterpriseId = ent, Year = 2026, Month = 8, Day = 1, UserLogin = login,
                 Product = "copilot", Sku = "Copilot AI Credits", Model = "gpt-5",
                 UnitType = unitType, GrossQuantity = grossQuantity, NetAmount = 0m, GrossAmount = 0m
+            });
+            db.SaveChanges();
+        }
+
+        /// <summary>As <see cref="AddCredits"/>, but attributed to a cost center.</summary>
+        private void AddCreditsFor(long ent, string login, string? costCenterId, decimal grossQuantity)
+        {
+            using var db = _factory.CreateDbContext();
+            db.UsageSnapshots.Add(new UsageSnapshot
+            {
+                EnterpriseId = ent, Year = 2026, Month = 8, Day = 1, UserLogin = login,
+                CostCenterId = costCenterId, CostCenterName = costCenterId,
+                Product = "copilot", Sku = "Copilot AI Credits", Model = "gpt-5",
+                UnitType = UsageUnitTypes.AiCredits, GrossQuantity = grossQuantity,
+                NetAmount = 0m, GrossAmount = 0m
             });
             db.SaveChanges();
         }
@@ -342,6 +381,150 @@ namespace GhcpCreditVisibility.Tests
                 2026, 8, UserScope.All(), new Dictionary<string, decimal>(), AsOf);
 
             Assert.Empty(pools);
+        }
+
+        // ── Seat history ────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Seat rows are kept per month so a capacity trend becomes possible, but capacity TODAY is
+        /// today's seats. Reading the whole table would sum every retained month into a wildly
+        /// inflated ceiling — the same shape of error as summing cumulative daily rows.
+        /// </summary>
+        [Fact]
+        public async Task Earlier_months_seats_are_retained_but_not_counted_toward_this_month()
+        {
+            AddSeats(Contoso, "business", 3);                          // August: the month under test
+            AddSeats(Contoso, "business", 40, year: 2026, month: 7);   // July: history, must not count
+            AddCredits(Contoso, "a", 1000m);
+
+            var pool = (await Pools(UserScope.Reader(Contoso))).Single();
+
+            Assert.Equal(3, pool.TotalSeats);
+            Assert.Equal(5_700m, pool.Capacity);   // 3 x 1900, NOT 43 x 1900
+
+            // ...and July's row is still there to trend against later.
+            await using var db = _factory.CreateDbContext();
+            Assert.Equal(2, await db.EnterpriseCopilotSeats.CountAsync());
+        }
+
+        // ── Burn-down ───────────────────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Daily rows are ALREADY cumulative, so the series passes through untouched. Differencing
+        /// them would turn a burn-down into per-day consumption and understate every point but the
+        /// first; summing across days would inflate it ~30x.
+        /// </summary>
+        [Fact]
+        public async Task Burn_down_passes_cumulative_values_through_undifferenced()
+        {
+            AddDaily(Contoso, "a", day: 1, cumulativeGross: 100m);
+            AddDaily(Contoso, "a", day: 2, cumulativeGross: 250m);
+            AddDaily(Contoso, "a", day: 3, cumulativeGross: 400m);
+
+            var pts = await new UsageQueryService(_factory)
+                .GetAllowanceBurnDownAsync(Contoso, 2026, 8, UserScope.Reader(Contoso));
+
+            Assert.Equal(new[] { 100m, 250m, 400m }, pts.Select(p => p.CumulativeCredits));
+            Assert.Equal(new[] { 1, 2, 3 }, pts.Select(p => p.Day));
+        }
+
+        /// <summary>Within ONE day, summing across users is correct — that is the enterprise total.</summary>
+        [Fact]
+        public async Task Burn_down_sums_across_users_within_a_day()
+        {
+            AddDaily(Contoso, "a", day: 1, cumulativeGross: 100m);
+            AddDaily(Contoso, "b", day: 1, cumulativeGross: 50m);
+
+            var pts = await new UsageQueryService(_factory)
+                .GetAllowanceBurnDownAsync(Contoso, 2026, 8, UserScope.Reader(Contoso));
+
+            Assert.Equal(150m, Assert.Single(pts).CumulativeCredits);
+        }
+
+        /// <summary>
+        /// A month whose daily rows predate the GrossQuantity column yields NO curve. A flat zero
+        /// line would assert that nothing was consumed, which is a different and false claim.
+        /// </summary>
+        [Fact]
+        public async Task Burn_down_skips_days_with_uncaptured_gross_quantity()
+        {
+            AddDaily(Contoso, "a", day: 1, cumulativeGross: null);
+            AddDaily(Contoso, "a", day: 2, cumulativeGross: null);
+
+            var pts = await new UsageQueryService(_factory)
+                .GetAllowanceBurnDownAsync(Contoso, 2026, 8, UserScope.Reader(Contoso));
+
+            Assert.Empty(pts);
+        }
+
+        [Fact]
+        public async Task Burn_down_ignores_other_unit_types()
+        {
+            AddDaily(Contoso, "a", day: 1, cumulativeGross: 100m);
+            AddDaily(Contoso, "b", day: 1, cumulativeGross: 9_999m, unitType: "requests");
+
+            var pts = await new UsageQueryService(_factory)
+                .GetAllowanceBurnDownAsync(Contoso, 2026, 8, UserScope.Reader(Contoso));
+
+            Assert.Equal(100m, Assert.Single(pts).CumulativeCredits);
+        }
+
+        [Fact]
+        public async Task Burn_down_is_enterprise_grain_gated()
+        {
+            AddDaily(Contoso, "a", day: 1, cumulativeGross: 100m);
+            var manager = new UserScope(false, new[] { new EnterpriseCostCenter(Contoso, "cc-eng") }, Array.Empty<string>());
+
+            Assert.Empty(await new UsageQueryService(_factory)
+                .GetAllowanceBurnDownAsync(Contoso, 2026, 8, manager));
+
+            // ...and a reader for a DIFFERENT enterprise gets nothing either.
+            Assert.Empty(await new UsageQueryService(_factory)
+                .GetAllowanceBurnDownAsync(Contoso, 2026, 8, UserScope.Reader(Fabrikam)));
+        }
+
+        // ── Contributors ────────────────────────────────────────────────────────────────────────
+
+        [Fact]
+        public async Task Contributors_rank_cost_centers_by_credits()
+        {
+            AddSeats(Contoso, "business", 10);
+            AddCreditsFor(Contoso, "a", "cc-eng", 900m);
+            AddCreditsFor(Contoso, "b", "cc-data", 300m);
+
+            var rows = await new UsageQueryService(_factory)
+                .GetPoolContributorsAsync(Contoso, 2026, 8, UserScope.Reader(Contoso));
+
+            Assert.Equal(new[] { "cc-eng", "cc-data" }, rows.Select(r => r.CostCenterId));
+            Assert.Equal(900m, rows[0].Credits);
+        }
+
+        /// <summary>
+        /// Enterprise-level rows carry no cost center. Folding them into an unattributed entry keeps
+        /// the ranking reconciling against the pool total; dropping them would make the parts
+        /// silently fail to sum to the whole.
+        /// </summary>
+        [Fact]
+        public async Task Contributors_keep_rows_with_no_cost_center()
+        {
+            AddCreditsFor(Contoso, "svc", null, 500m);
+
+            var rows = await new UsageQueryService(_factory)
+                .GetPoolContributorsAsync(Contoso, 2026, 8, UserScope.Reader(Contoso));
+
+            Assert.Equal(500m, Assert.Single(rows).Credits);
+        }
+
+        /// <summary>Seeing the ranking means seeing every other team's consumption, so it needs the
+        /// same enterprise grain as the rest of the pool.</summary>
+        [Fact]
+        public async Task Contributors_are_enterprise_grain_gated()
+        {
+            AddCreditsFor(Contoso, "a", "cc-eng", 900m);
+            var manager = new UserScope(false, new[] { new EnterpriseCostCenter(Contoso, "cc-eng") }, Array.Empty<string>());
+
+            Assert.Empty(await new UsageQueryService(_factory)
+                .GetPoolContributorsAsync(Contoso, 2026, 8, manager));
         }
 
         /// <summary>GitHub returns lowercase plan names; configuration should not have to know that.</summary>

@@ -299,9 +299,12 @@ namespace GhcpCreditVisibility.Services
                         .Select(g => new { Plan = g.Key, Count = g.Count() })
                         .ToList();
 
-                    // Replace-per-enterprise rather than upsert: one response IS the whole seat list,
-                    // so a plan that disappears must vanish from the table rather than linger.
-                    var existingSeatRows = db.EnterpriseCopilotSeats.Where(x => x.EnterpriseId == enterprise.Id);
+                    // Replace-per-enterprise-per-MONTH rather than upsert: one response IS the whole
+                    // current seat list, so a plan that disappears must vanish from this month's rows
+                    // rather than linger — while earlier months stay untouched, because they are the
+                    // history GitHub cannot re-serve.
+                    var existingSeatRows = db.EnterpriseCopilotSeats
+                        .Where(x => x.EnterpriseId == enterprise.Id && x.Year == now.Year && x.Month == now.Month);
                     if (db.Database.IsRelational())
                     {
                         await existingSeatRows.ExecuteDeleteAsync(ct);
@@ -317,6 +320,8 @@ namespace GhcpCreditVisibility.Services
                         db.EnterpriseCopilotSeats.Add(new EnterpriseCopilotSeat
                         {
                             EnterpriseId = enterprise.Id,
+                            Year = now.Year,
+                            Month = now.Month,
                             PlanType = p.Plan,
                             Seats = p.Count,
                             SnapshotUtc = now
@@ -406,14 +411,19 @@ namespace GhcpCreditVisibility.Services
                                 UserLogin = u.GitHubComLogin, UserName = u.GitHubComName,
                                 CostCenterId = ccId, CostCenterName = ccName,
                                 Product = item.Product, Sku = item.Sku, Model = item.Model, UnitType = item.UnitType,
-                                NetQuantity = item.NetQuantity, NetAmount = item.NetAmount, GrossAmount = item.GrossAmount
+                                // GrossQuantity is what the allowance burn-down is drawn from —
+                                // NetQuantity is post-discount and sits at ZERO for any month the
+                                // allowance covers, which is precisely the month you want the curve for.
+                                NetQuantity = item.NetQuantity, GrossQuantity = item.GrossQuantity,
+                                NetAmount = item.NetAmount, GrossAmount = item.GrossAmount
                             });
                         }
                         else
                         {
                             daily.SnapshotUtc = now;
                             daily.CostCenterId = ccId; daily.CostCenterName = ccName;
-                            daily.NetQuantity = item.NetQuantity; daily.NetAmount = item.NetAmount; daily.GrossAmount = item.GrossAmount;
+                            daily.NetQuantity = item.NetQuantity; daily.GrossQuantity = item.GrossQuantity;
+                            daily.NetAmount = item.NetAmount; daily.GrossAmount = item.GrossAmount;
                         }
                         written++;
                     }

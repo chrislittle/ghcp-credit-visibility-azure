@@ -582,8 +582,11 @@ namespace GhcpCreditVisibility.Services
                 .Select(x => new { x.EnterpriseId, x.GrossQuantity })
                 .ToListAsync(ct);
 
+            // CURRENT month's seat rows only. Earlier months are retained as history for a capacity
+            // trend, but capacity today is today's seats — reading the whole table would sum a
+            // year's worth of monthly counts into a wildly inflated ceiling.
             var seatRows = await db.EnterpriseCopilotSeats
-                .Where(x => entIds.Contains(x.EnterpriseId))
+                .Where(x => entIds.Contains(x.EnterpriseId) && x.Year == year && x.Month == month)
                 .Select(x => new { x.EnterpriseId, x.PlanType, x.Seats })
                 .ToListAsync(ct);
 
@@ -632,6 +635,85 @@ namespace GhcpCreditVisibility.Services
                     daysElapsed, daysInMonth, runRate, projected, exhaustionDay));
             }
             return pools;
+        }
+
+        /// <summary>One day of the month-to-date burn, in credits. <see cref="CumulativeCredits"/> is
+        /// the running total AS OF that day, not that day's own consumption.</summary>
+        public sealed record BurnDownPoint(int Day, decimal CumulativeCredits);
+
+        /// <summary>
+        /// The allowance burn-down for one enterprise's current month: cumulative credits consumed,
+        /// per day.
+        ///
+        /// <see cref="DailyUsageSnapshot"/> rows are ALREADY CUMULATIVE month-to-date, so this is a
+        /// per-day SUM ACROSS USERS of a value that is itself a running total — there is no
+        /// differencing to do, and none must be introduced. Summing across DAYS, by contrast, is the
+        /// ~30x inflation the table's own comment warns about, and is exactly what a naive
+        /// GROUP BY-less aggregation would produce.
+        ///
+        /// Reads <c>GrossQuantity</c>, not <c>NetQuantity</c>: net is post-discount and sits at zero
+        /// for any month the allowance fully covers, which is precisely the month a burn-down is
+        /// wanted for. Days whose rows predate that column are skipped rather than counted as zero,
+        /// so a partially-captured month shows a shorter curve instead of a false dip to nothing.
+        /// </summary>
+        public async Task<IReadOnlyList<BurnDownPoint>> GetAllowanceBurnDownAsync(
+            long enterpriseId, int year, int month, UserScope scope, CancellationToken ct = default)
+        {
+            if (!scope.CanReadEnterprise(enterpriseId)) return Array.Empty<BurnDownPoint>();
+
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var rows = await db.DailyUsageSnapshots
+                .Where(x => x.EnterpriseId == enterpriseId && x.Year == year && x.Month == month)
+                .Where(x => x.UnitType == UsageUnitTypes.AiCredits && x.GrossQuantity != null)
+                .Select(x => new { x.Day, Qty = x.GrossQuantity!.Value })
+                .ToListAsync(ct);
+
+            return rows
+                .GroupBy(r => r.Day)
+                .Select(g => new BurnDownPoint(g.Key, g.Sum(r => r.Qty)))
+                .OrderBy(p => p.Day)
+                .ToList();
+        }
+
+        /// <summary>A cost center's share of one enterprise's allowance burn.</summary>
+        public sealed record PoolContributor(string? CostCenterId, string? CostCenterName, decimal Credits);
+
+        /// <summary>
+        /// Cost centers ranked by credits consumed against one enterprise's pool this month.
+        ///
+        /// An OUTLIER view, not a bill. Credits are pooled across the enterprise, so a cost center
+        /// above its notional share costs nothing at all while the pool holds — this answers "who is
+        /// driving the burn", never "who owes what". The UI must say so.
+        ///
+        /// Enterprise-grain gated like the rest of the pool: a cost-center manager gets nothing,
+        /// because seeing the ranking means seeing every other team's consumption.
+        /// </summary>
+        public async Task<IReadOnlyList<PoolContributor>> GetPoolContributorsAsync(
+            long enterpriseId, int year, int month, UserScope scope, int top = 8, CancellationToken ct = default)
+        {
+            if (!scope.CanReadEnterprise(enterpriseId)) return Array.Empty<PoolContributor>();
+
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var rows = await db.UsageSnapshots
+                .Where(x => x.EnterpriseId == enterpriseId && x.Year == year && x.Month == month)
+                .Where(x => x.UnitType == UsageUnitTypes.AiCredits && x.GrossQuantity != null)
+                .Select(x => new { x.CostCenterId, x.CostCenterName, Qty = x.GrossQuantity!.Value })
+                .ToListAsync(ct);
+
+            var ranked = rows
+                .GroupBy(r => new { r.CostCenterId, r.CostCenterName })
+                .Select(g => new PoolContributor(g.Key.CostCenterId, g.Key.CostCenterName, g.Sum(r => r.Qty)))
+                .OrderByDescending(c => c.Credits)
+                .ToList();
+
+            // Rows with no cost center are enterprise-level consumption, not an error. Folding them
+            // into an "Unattributed" row keeps the ranking reconciling against the pool total;
+            // dropping them would make the parts silently fail to sum to the whole.
+            if (ranked.Count <= top) return ranked;
+            var head = ranked.Take(top).ToList();
+            var rest = ranked.Skip(top).Sum(c => c.Credits);
+            if (rest > 0) head.Add(new PoolContributor(null, "Other cost centers", rest));
+            return head;
         }
 
         public async Task<IReadOnlyList<TrendPoint>> GetTrendAsync(int months, UserScope scope, CancellationToken ct = default)

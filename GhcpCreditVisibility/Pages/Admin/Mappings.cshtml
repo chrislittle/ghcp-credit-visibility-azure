@@ -290,6 +290,67 @@
     </div>
 </div>
 
+@* ── HOW ACCESS WORKS ────────────────────────────────────────────────────────────────────────
+   The overview lives in its own card rather than inside one role's section. It used to sit in the
+   cost-center card purely because that card came first, which meant the answer to "what are the
+   roles?" was buried inside one of them, and that card described the other two while they said
+   nothing about themselves. Each role card below now explains only ITSELF. *@
+<div class="gh-card">
+    <div class="ch">
+        <h2>How access works</h2>
+        <span class="hint">three roles, granted independently</span>
+    </div>
+    <div class="gh-cardbody">
+        <p class="gh-note mb-0">
+            Entra owns <strong>membership</strong>; this console owns <strong>what that group or user can do here</strong>.
+            The three roles below are independent and <strong>combine</strong> — a principal may hold cost centers in one
+            enterprise and a reader grant in another. Changes take effect on next page load, with no re-login.
+        </p>
+    </div>
+    <table>
+        <thead><tr><th>Role</th><th>Can see</th><th>Can configure</th><th>Granted by</th></tr></thead>
+        <tbody>
+            <tr>
+                <td><strong>Cost center access</strong></td>
+                <td>only the cost centers mapped to it</td>
+                <td>nothing</td>
+                <td>a mapping below</td>
+            </tr>
+            <tr>
+                <td><strong>Enterprise reader</strong></td>
+                <td><strong>everything</strong> within the enterprises granted — every cost center, the organization breakdown, enterprise-wide budgets, the allowance pool</td>
+                <td>nothing</td>
+                <td>a reader grant below (one enterprise, or all)</td>
+            </tr>
+            <tr>
+                <td><strong>Administrator</strong></td>
+                <td><strong>nothing by itself</strong></td>
+                <td>this console — mappings, enterprises, roles, backfills</td>
+                <td>the Entra <code>Admin</code> app role, or an admin principal below</td>
+            </tr>
+        </tbody>
+    </table>
+    <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
+        <p class="gh-note mb-0">
+            ⚠️ <strong>Some views cannot be delegated to a cost center at all.</strong> The Reports
+            <em>Organization</em> breakdown, <em>organization-scoped budgets</em> and the <em>allowance pool</em> come from
+            sources carrying no cost center, so there is nothing to narrow them by — showing them to a cost-center
+            principal would expose every other team's spend in that enterprise. That is the grain
+            <strong>Enterprise reader</strong> exists for, and the reason it is a separate role rather than a wider mapping.
+        </p>
+        <p class="gh-note mb-0" style="margin-top:8px;">
+            So if someone reports they cannot see an organization breakdown, that is working as intended: grant them
+            Enterprise reader for that enterprise. <strong>Do not make them an administrator</strong> — that hands over
+            console access while granting none of the visibility they asked for.
+        </p>
+        <p class="gh-note mb-0" style="margin-top:8px;">
+            The Entra <code>Admin</code> app role is the <strong>bootstrap</strong> and grants both, so a fresh deployment
+            with an empty database is never locked out. An administrator holding no reader grant sees an empty dashboard,
+            and the dashboard says exactly that rather than looking broken.
+        </p>
+    </div>
+</div>
+
 <!-- Principal -> Cost Center mappings -->
 <div class="gh-card">
     <div class="ch">
@@ -298,24 +359,9 @@
     </div>
     <div class="gh-cardbody" style="border-bottom:1px solid var(--gh-line);">
         <p class="gh-note mb-0">
-            <strong>Three roles, granted independently</strong> — this card and the two below it:
-        </p>
-        <ul class="gh-note mb-0" style="margin-top:6px;padding-left:18px;">
-            <li><strong>Cost center access</strong> (here) — sees usage, budgets and reports for the cost centers
-                mapped to it, and nothing else. The narrowest grant, and the only one that delegates a <em>part</em>
-                of an enterprise.</li>
-            <li><strong>Enterprise reader</strong> — sees <em>everything</em> within the enterprises granted, including
-                the views below that cannot be narrowed to a cost center. No access to this console.</li>
-            <li><strong>Administrator</strong> — manages this console. Grants <em>no</em> data access on its own.</li>
-        </ul>
-        <p class="gh-note mb-0" style="margin-top:8px;">
-            ⚠️ <strong>GitHub organization views cannot be delegated to a cost center.</strong> The Reports
-            <em>Organization</em> breakdown, <em>organization-scoped budgets</em> and the <em>allowance pool</em> need the
-            <strong>Enterprise reader</strong> role. GitHub's organization usage report carries no cost center, so there is
-            nothing to narrow it by — granting it to a cost-center principal would expose every other team's spend in
-            that enterprise. If a manager reports they cannot see an organization breakdown, that is working as intended:
-            grant them Enterprise reader for that enterprise. <strong>Do not make them an administrator</strong> — that
-            grants console access without granting the visibility they actually asked for.
+            <strong>Many-to-many.</strong> A group or user can be mapped to any number of cost centers, across any
+            number of enterprises — that is how a manager spanning several teams gets one combined view without a
+            separate rollup feature. Remove one cost center at a time with the <strong>&times;</strong> on its badge.
         </p>
     </div>
     <table>
@@ -481,10 +527,9 @@
             </div>
         </form>
         <div class="gh-note mt-2">
-            An <strong>Enterprise Reader</strong> sees every cost center's spend, the organization breakdown and
-            enterprise-wide budgets — but <strong>only for the enterprises granted</strong>, and with no access to this console.
-            This is the role for finance and reporting users; it exists so they need not be made administrators.
-            Granting <strong>All enterprises</strong> replaces any per-enterprise grants that principal already had.
+            <strong>All enterprises</strong> covers any enterprise registered <em>later</em> too — it is a standing grant,
+            not a snapshot of today's list — and granting it replaces any per-enterprise grants that principal already had.
+            This is the role for finance and reporting people.
         </div>
     </div>
 </div>
@@ -539,6 +584,11 @@
                 <button class="btn btn-sm btn-primary w-100" type="submit">Add administrator</button>
             </div>
         </form>
+        <div class="gh-note mt-2">
+            Administrators added here get <strong>no data access</strong> — grant Enterprise reader as well if they should
+            also see spend. Only the Entra <code>Admin</code> app role grants both, and it exists so a fresh deployment
+            cannot lock itself out.
+        </div>
     </div>
 </div>
 

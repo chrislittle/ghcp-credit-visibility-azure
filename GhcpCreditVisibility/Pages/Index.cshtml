@@ -406,10 +406,13 @@ else if (!Model.SeesAll && Model.UserCount == 0)
     </div>
 </div>
 
-@* ALLOWANCE POOL — deliberately directly above Budgets, because the two are cause and effect.
-   A budget can read comfortably green while the pool is days from empty, and the pool emptying is
-   precisely what makes the budget's number start moving. Read top to bottom you get the warning
-   before the symptom. Rendered per enterprise and NEVER summed: each pool has its own ceiling. *@
+@* ALLOWANCE POOL — SUMMARY ONLY. The burn-down curve, seat breakdown and contributor ranking live
+   on Budgets & allowance; the dashboard's job is to say whether this needs attention and then get
+   out of the way. Still placed directly above Budgets, because the two are cause and effect: a
+   budget can read comfortably green while the pool is days from empty, and the pool emptying is
+   precisely what makes the budget's number start moving. Rendered per enterprise and NEVER summed —
+   each pool has its own ceiling, and a combined figure would let one enterprise's headroom mask
+   another's breach. *@
 @if (Model.AllowancePools.Count > 0)
 {
     <div class="gh-card">
@@ -426,7 +429,7 @@ else if (!Model.SeesAll && Model.UserCount == 0)
                             🎟️ @p.EnterpriseName
                             @if (!p.IsComputable)
                             {
-                                <span class="gh-badge" title="Either no Copilot seat counts have been collected yet, every seat is on a plan this deployment does not price, or this month's rows predate the gross-quantity column. Not zero — unknown.">Not available</span>
+                                <span class="gh-badge" title="No Copilot seats collected yet, every seat is on a plan this deployment does not price, or this month's rows carry no gross quantity. Not zero — unknown.">Not available</span>
                             }
                             else if (p.IsExhausted)
                             {
@@ -439,10 +442,6 @@ else if (!Model.SeesAll && Model.UserCount == 0)
                             else
                             {
                                 <span class="gh-badge ok">On track</span>
-                            }
-                            @if (p.HasIncompleteData)
-                            {
-                                <span class="gh-badge warn" title="Some rows this month carry no gross quantity, so consumption is understated. Figures are a lower bound.">Partial data</span>
                             }
                         </span>
                         @if (p.IsComputable)
@@ -459,66 +458,36 @@ else if (!Model.SeesAll && Model.UserCount == 0)
                         <div class="meter" style="position:relative;">
                             <i class="fill-@p.Level" style="width:@(pct)%"></i>
                             @* Pace marker: how far through the month we are. Fill past the marker means
-                               burning faster than the month is passing — the whole point of the card. *@
+                               burning faster than the month is passing. *@
                             <i style="position:absolute;top:-2px;bottom:-2px;left:@(pace)%;width:2px;background:#66707d;border-radius:0;"
                                title="@pace% of the month has elapsed"></i>
                         </div>
                         <div class="sub">
                             <span>@p.PctUsed.ToString("N0")% used · pace marker at @pace%</span>
-                            <span>@(p.Remaining >= 0 ? $"{p.Remaining:N0} credits remaining" : $"{Math.Abs(p.Remaining ?? 0):N0} credits over")</span>
-                        </div>
-                        <div class="gh-note mt-1 mb-0">
-                            @* Shows its working per plan. Business seats include 1,900 credits and
-                               Enterprise 3,900, so one seat count and one rate cannot describe a
-                               mixed enterprise — and these are COPILOT SEATS, not licence holders. *@
-                            @string.Join(" + ", p.Plans.Where(x => x.CreditsPerSeat is not null)
-                                .Select(x => $"{x.Seats} {x.PlanType} × {x.CreditsPerSeat:N0}"))
-                            credits · pooled across the enterprise, not per person
-                            @if (p.RunRatePerDay is decimal rate && rate > 0)
-                            {
-                                <text> · burning @rate.ToString("N0") credits/day</text>
-                                @if (p.ProjectedOverageCredits is decimal over)
+                            <span>
+                                @if (p.IsExhausted)
                                 {
-                                    <text> · projected @over.ToString("N0") credits over (~$@((over * 0.01m).ToString("N2")) billable)</text>
+                                    <text>@Math.Abs(p.Remaining ?? 0).ToString("N0") credits over</text>
                                 }
-                            }
+                                else if (p.ExhaustionDay is int day)
+                                {
+                                    <text>empties ~@day @IndexModel.ShortMonth(Model.Year, Model.Month)</text>
+                                }
+                                else
+                                {
+                                    <text>@p.Remaining?.ToString("N0") credits remaining</text>
+                                }
+                            </span>
                         </div>
-                        @if (p.HasUnpricedPlans)
-                        {
-                            @* Never silently excluded: dropping unpriced seats understates capacity,
-                               which overstates the percentage used and manufactures false alarms. *@
-                            <div class="gh-note mt-1 mb-0" style="color:#d9822b">
-                                @p.UnknownPlanSeats seat(s) on an unrecognised plan (@string.Join(", ", p.UnknownPlanTypes))
-                                are NOT counted in this capacity — set <code>Allowance:CreditsPerSeat:@p.UnknownPlanTypes.First()</code> to include them.
-                            </div>
-                        }
-                    }
-                    else
-                    {
-                        @* Three genuinely different causes; naming which one avoids a support call. *@
-                        <div class="sub"><span>
-                            @if (p.TotalSeats == 0)
-                            {
-                                <text>No Copilot seats recorded yet — the snapshot job collects them on its next run.</text>
-                            }
-                            else if (p.HasUnpricedPlans && p.Capacity is null)
-                            {
-                                <text>All @p.TotalSeats seat(s) are on an unrecognised plan (@string.Join(", ", p.UnknownPlanTypes)); set <code>Allowance:CreditsPerSeat</code> for it.</text>
-                            }
-                            else
-                            {
-                                <text>This month's usage rows carry no gross quantity, so consumption cannot be computed.</text>
-                            }
-                        </span></div>
                     }
                 </div>
             }
         </div>
-        <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
+        <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
             <div class="gh-note mb-0">
-                Included credits reset monthly and do not carry over. Usage beyond the pool is billed at
-                $0.01 per credit — which is what the <strong>Total spend</strong> figure above measures.
+                Included credits reset monthly and do not carry over. Usage beyond the pool is billed at $0.01 per credit.
             </div>
+            <a href="@Url.Page("Budgets", new { Period = Model.PeriodValue, Ent = Model.Ent })" style="font-weight:600;font-size:13px;white-space:nowrap;">Burn-down &amp; contributors →</a>
         </div>
     </div>
 }

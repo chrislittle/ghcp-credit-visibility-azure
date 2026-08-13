@@ -311,25 +311,52 @@ Assigned Copilot seats per plan, refreshed every run from
 > makes an enterprise about to exhaust its pool look comfortable. If you ever find yourself reaching
 > for `LicensedUserCount` to explain a pool figure, stop: that is the bug, not the explanation.
 
+Rows are kept **per month**, replaced wholesale for the current month on every run. GitHub reports
+only the seats assigned *right now* — there is no historical seat API — so a month that goes
+uncaptured is unrecoverable, which is why history is retained rather than overwritten.
+
 ```sql
-SELECT e.Slug, s.PlanType, s.Seats, s.SnapshotUtc, e.LicensedUserCount AS ghec_licences
+-- Current month, against the licence count it must never be confused with
+SELECT e.Slug, s.PlanType, s.Seats, s.Year, s.Month, s.SnapshotUtc, e.LicensedUserCount AS ghec_licences
 FROM EnterpriseCopilotSeats s JOIN Enterprises e ON e.Id = s.EnterpriseId
+WHERE s.Year = YEAR(SYSUTCDATETIME()) AND s.Month = MONTH(SYSUTCDATETIME())
 ORDER BY e.Slug, s.PlanType;
 ```
 
 What is normal, and what is not:
 
 - **Seats < licences** is expected. Seats ≥ licences is worth a look, not necessarily wrong.
-- **Several rows per enterprise** means a mixed-plan enterprise. Business seats include 1,900 credits
-  and Enterprise 3,900, so capacity is a sum over plans — never seats × one rate.
+- **Several rows per enterprise per month** means a mixed-plan enterprise. Business seats include
+  1,900 credits and Enterprise 3,900, so capacity is a sum over plans — never seats × one rate.
+- **Rows for earlier months are history, not staleness.** Capacity is computed from the CURRENT
+  month's rows only. A query that omits the month filter will sum every retained month into a wildly
+  inflated ceiling — the same shape of error as summing cumulative daily rows.
 - **A `PlanType` the app does not price** is a FINDING, not corruption. GitHub introduced a plan;
-  those seats are excluded from capacity and the dashboard says so. Fix by setting
+  those seats are excluded from capacity and the UI says so. Fix by setting
   `Allowance:CreditsPerSeat:<plan>`, not by editing data.
-- **No rows for an enabled enterprise** means collection failed or has not run. Look for a
-  `CopilotSeatsUnavailable` event — the call is non-fatal by design, so the run still reports
-  success. The pool shows "not available"; it must never fall back to a licence-derived number.
-- **`SnapshotUtc` far behind the last run** means seat collection has been failing while the rest of
-  the run succeeded. Same event to look for.
+- **No rows for the CURRENT month on an enabled enterprise** means collection failed or has not yet
+  run this month. Look for a `CopilotSeatsUnavailable` event — the call is non-fatal by design, so
+  the run still reports success. The pool shows "not available"; it must never fall back to a
+  licence-derived number.
+- **`Seats` is the LAST OBSERVED count for that month, not an average.** A month in which seats were
+  added late reports the end state. It is a capacity ceiling, not a seat-months figure.
+
+## Check 8 — Daily gross credits (`DailyUsageSnapshots.GrossQuantity`)
+
+Feeds the allowance burn-down chart. `NetQuantity` is post-discount and sits at ZERO for any month
+the allowance covered, so it cannot draw the curve — only `GrossQuantity` can.
+
+```sql
+SELECT e.Slug, d.Year, d.Month, COUNT(*) AS rows_,
+       SUM(CASE WHEN d.GrossQuantity IS NULL THEN 1 ELSE 0 END) AS uncaptured
+FROM DailyUsageSnapshots d JOIN Enterprises e ON e.Id = d.EnterpriseId
+GROUP BY e.Slug, d.Year, d.Month ORDER BY d.Year DESC, d.Month DESC, e.Slug;
+```
+
+- **NULL means "not captured"**, never zero — rows written before this column existed. Those months
+  render with no curve and say so, which is correct; they must not be charted as a flat zero line.
+- **These rows are CUMULATIVE month-to-date.** The burn-down sums across USERS within a day and
+  never across days. Summing across days is the ~30x inflation this table's own comment warns about.
 
 ## Check 6 — Organization attribution (`OrgUsageSnapshots`)
 

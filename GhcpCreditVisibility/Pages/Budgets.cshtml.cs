@@ -7,23 +7,33 @@ using GhcpCreditVisibility.Services;
 namespace GhcpCreditVisibility.Pages
 {
     /// <summary>
-    /// The complete budgets view — every budget in the caller's scope, grouped by enterprise and
-    /// filterable by status/enterprise/text. The dashboard deliberately shows only exceptions at
-    /// scale (a SeesAll exec can face dozens of budgets across enterprises); this page is where
-    /// "show me everything, including the watch-level ones" lives. Budgets remain GOVERNED IN
-    /// GITHUB: read-only here, alert emails come from GitHub.
+    /// Ceilings, in the order they bite: the included ALLOWANCE POOL first, then BUDGETS.
+    ///
+    /// The two answer one question — "are we going to overspend, and when" — from opposite ends,
+    /// and the ordering is the point: budget spend cannot begin until the pool is empty, so a budget
+    /// reading comfortably green while the pool is days from exhaustion is not a contradiction, it
+    /// is cause and effect. Splitting them across two pages would leave the reader to join that up.
+    ///
+    /// The pool is the app's only LEADING indicator; everything else reports spend already incurred.
+    /// The dashboard shows a summary of it and links here for the burn-down and contributors.
+    ///
+    /// Budgets themselves remain GOVERNED IN GITHUB: read-only here, alert emails come from GitHub.
+    /// The dashboard shows only exceptions at scale; this page is where "show me everything,
+    /// including the watch-level ones" lives.
     /// </summary>
     public class BudgetsModel : PageModel
     {
         private readonly UsageQueryService _query;
         private readonly IUserScopeResolver _scopeResolver;
         private readonly BudgetService _budgets;
+        private readonly IConfiguration _config;
 
-        public BudgetsModel(UsageQueryService query, IUserScopeResolver scopeResolver, BudgetService budgets)
+        public BudgetsModel(UsageQueryService query, IUserScopeResolver scopeResolver, BudgetService budgets, IConfiguration config)
         {
             _query = query;
             _scopeResolver = scopeResolver;
             _budgets = budgets;
+            _config = config;
         }
 
         [BindProperty(SupportsGet = true)] public string? Period { get; set; }   // "YYYY-MM"
@@ -48,6 +58,44 @@ namespace GhcpCreditVisibility.Pages
         public int NearLimitCount { get; private set; }
         public int WatchCount { get; private set; }
         public int OnTrackCount { get; private set; }
+
+        // ── Allowance pool ──────────────────────────────────────────────────────────────────────
+
+        /// <summary>Included credits per seat by plan — see <see cref="IndexModel.DefaultCreditsPerSeatByPlan"/>.</summary>
+        private IReadOnlyDictionary<string, decimal> CreditsPerSeatByPlan()
+        {
+            var section = _config.GetSection("Allowance:CreditsPerSeat");
+            if (!section.Exists()) return IndexModel.DefaultCreditsPerSeatByPlan;
+            var map = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            foreach (var child in section.GetChildren())
+                if (decimal.TryParse(child.Value, out var v) && v > 0) map[child.Key] = v;
+            return map;
+        }
+
+        /// <summary>One pool per visible enterprise, with its burn-down curve and contributors.</summary>
+        public sealed record PoolDetail(
+            UsageQueryService.AllowancePool Pool,
+            IReadOnlyList<UsageQueryService.BurnDownPoint> BurnDown,
+            IReadOnlyList<UsageQueryService.PoolContributor> Contributors);
+
+        public IReadOnlyList<PoolDetail> Pools { get; private set; } = Array.Empty<PoolDetail>();
+
+        /// <summary>
+        /// The selected month is not the current one, so there is no pool to show.
+        ///
+        /// Rendered as an explanation rather than an absent section: a block that silently vanishes
+        /// when you change the month picker reads as a bug. Seat counts carry no history before this
+        /// feature, and a burn-down of a closed month has nothing left to project.
+        /// </summary>
+        public bool PoolIsPastMonth { get; private set; }
+
+        /// <summary>Billable overage for a past month — what the pool question reduces to once the
+        /// month is closed. Any net spend at all means the allowance was exhausted.</summary>
+        public decimal PastMonthBillable { get; private set; }
+
+        /// <summary>The caller lacks enterprise-grain read, so the pool section is absent entirely
+        /// (not empty) — same gate as the organization rollup.</summary>
+        public bool CanSeePool { get; private set; }
 
         public string PeriodValue => $"{Year:D4}-{Month:D2}";
         public string MonthLabel => new DateTime(Year, Month, 1).ToString("MMMM yyyy", CultureInfo.InvariantCulture);
@@ -78,6 +126,30 @@ namespace GhcpCreditVisibility.Pages
             else if (AvailableMonths.Count > 0)
             {
                 (Year, Month) = (AvailableMonths[0].Year, AvailableMonths[0].Month);
+            }
+
+            // ── Allowance pool, above the budgets it precedes ───────────────────────────────────
+            CanSeePool = scope.HasEnterpriseRead;
+            if (CanSeePool)
+            {
+                var pools = await _query.GetAllowancePoolsAsync(Year, Month, scope, CreditsPerSeatByPlan(), now, ct);
+                PoolIsPastMonth = pools.Count == 0 && (Year != now.Year || Month != now.Month);
+                if (PoolIsPastMonth)
+                {
+                    // A closed month's pool question reduces to one number: did anything become
+                    // billable? Net spend above zero means the allowance ran out.
+                    PastMonthBillable = await _query.GetMonthTotalAsync(Year, Month, scope, ct);
+                }
+
+                var details = new List<PoolDetail>();
+                foreach (var p in pools)
+                {
+                    details.Add(new PoolDetail(
+                        p,
+                        await _query.GetAllowanceBurnDownAsync(p.EnterpriseId, Year, Month, scope, ct),
+                        await _query.GetPoolContributorsAsync(p.EnterpriseId, Year, Month, scope, ct: ct)));
+                }
+                Pools = details;
             }
 
             AllBudgets = await _budgets.GetStatusesAsync(scope, Year, Month, ct);

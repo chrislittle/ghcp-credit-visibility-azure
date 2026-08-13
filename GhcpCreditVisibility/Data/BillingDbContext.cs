@@ -113,6 +113,7 @@ namespace GhcpCreditVisibility.Data
                 e.Property(x => x.NetAmount).HasPrecision(18, 4);
                 e.Property(x => x.GrossAmount).HasPrecision(18, 4);
                 e.Property(x => x.NetQuantity).HasPrecision(18, 4);
+                e.Property(x => x.GrossQuantity).HasPrecision(18, 4);
             });
 
             b.Entity<OrgUsageSnapshot>(e =>
@@ -178,9 +179,11 @@ namespace GhcpCreditVisibility.Data
             b.Entity<EnterpriseCopilotSeat>(e =>
             {
                 e.HasKey(x => x.Id);
-                // One row per (enterprise, plan). Both columns are non-nullable, so this needs none
-                // of the nullable-key care the grants table above required.
-                e.HasIndex(x => new { x.EnterpriseId, x.PlanType }).IsUnique();
+                // One row per (enterprise, plan, month). All four columns are non-nullable, so this
+                // needs none of the nullable-key care the grants table above required.
+                e.HasIndex(x => new { x.EnterpriseId, x.PlanType, x.Year, x.Month }).IsUnique();
+                // The read path asks for one enterprise's current month; this covers it.
+                e.HasIndex(x => new { x.EnterpriseId, x.Year, x.Month });
                 e.Property(x => x.PlanType).HasMaxLength(64).IsRequired();
             });
 
@@ -470,9 +473,13 @@ namespace GhcpCreditVisibility.Data
     /// per seat, Copilot Enterprise 3,900 — so a mixed enterprise's capacity is a sum over plans, not
     /// one multiplication.
     ///
-    /// CURRENT STATE ONLY, no history: the pool is a current-month figure, and a historical seat
-    /// series would be a second thing to keep correct with no reader for it. Rows are replaced
-    /// wholesale per enterprise per run rather than upserted, matching how
+    /// KEPT PER MONTH. GitHub reports only the seats assigned RIGHT NOW — there is no historical
+    /// seat API — so a month that goes uncaptured can never be reconstructed, while the cost of
+    /// keeping it is a handful of rows. That asymmetry is the whole argument: it makes "were we
+    /// close to the ceiling before we tipped over?" and "did adding seats fix the overage, or did
+    /// usage simply grow?" answerable later, and neither is answerable from spend alone.
+    ///
+    /// Rows are replaced wholesale per enterprise PER MONTH rather than upserted, matching how
     /// <see cref="OrgUsageSnapshot"/> replaces a month.
     /// </summary>
     public sealed class EnterpriseCopilotSeat
@@ -480,13 +487,29 @@ namespace GhcpCreditVisibility.Data
         public long Id { get; set; }
         public long EnterpriseId { get; set; }
 
+        // The month this count describes. The pool reads the CURRENT month; earlier rows exist so a
+        // capacity trend can be drawn once a few months have accrued.
+        public int Year { get; set; }
+        public int Month { get; set; }
+
         /// <summary>GitHub's own <c>plan_type</c>, stored verbatim (lower-cased): "business",
         /// "enterprise", or whatever GitHub introduces next. NOT mapped to an enum — an unrecognised
         /// plan must be RECORDED so it can be surfaced, never silently dropped from the capacity sum.
         /// Same reasoning as <see cref="BudgetScopes.Unknown"/>.</summary>
         public string PlanType { get; set; } = "";
 
+        /// <summary>
+        /// Seats on this plan, as of <see cref="SnapshotUtc"/>.
+        ///
+        /// LAST OBSERVED, not an average. Seats change mid-month, and every run overwrites the
+        /// month's row — so a month in which ten seats were added on the 28th reports the END STATE
+        /// for the whole month. That is the right basis for a capacity ceiling (what you are
+        /// entitled to now), but it is NOT a seat-months figure and must never be read as one.
+        /// Saying so here rather than leaving it to be discovered: an unlabelled seat number is
+        /// exactly the trap that made the licence count look usable.
+        /// </summary>
         public int Seats { get; set; }
+
         public DateTime SnapshotUtc { get; set; } = DateTime.UtcNow;
     }
 
@@ -667,6 +690,19 @@ namespace GhcpCreditVisibility.Data
         public string? UnitType { get; set; }
         /// <summary>CUMULATIVE month-to-date quantity as of <see cref="Day"/>.</summary>
         public decimal NetQuantity { get; set; }
+
+        /// <summary>
+        /// CUMULATIVE month-to-date quantity BEFORE the included-allowance discount, as of
+        /// <see cref="Day"/> — i.e. credits actually consumed, which is what the allowance pool is
+        /// denominated in. <see cref="NetQuantity"/> is post-discount and is therefore ZERO for any
+        /// month the allowance fully covered, so it cannot draw a burn-down curve.
+        ///
+        /// NULLABLE ON PURPOSE, same convention as <see cref="UsageSnapshot.GrossQuantity"/>: NULL
+        /// means "not captured" (rows written before this column existed), 0 means GitHub reported
+        /// zero. A month of NULLs must render as "no curve available", never as a flat zero line —
+        /// the latter would assert that nothing was consumed.
+        /// </summary>
+        public decimal? GrossQuantity { get; set; }
         /// <summary>CUMULATIVE month-to-date net amount as of <see cref="Day"/>.</summary>
         public decimal NetAmount { get; set; }
         /// <summary>CUMULATIVE month-to-date gross amount as of <see cref="Day"/>.</summary>
