@@ -421,7 +421,10 @@
                 <label class="form-label mb-0 gh-note">Object ID</label>
                 <input name="principalObjectId" class="form-control form-control-sm" placeholder="00000000-0000-0000-0000-000000000000" required />
             </div>
-            <div class="col-md-3">
+            @* Widths must total 12 across this row. Widening the cost-center column to make room for
+               the checkbox list took it to 13, so Bootstrap wrapped the submit button onto its own
+               line and the tall list overlapped the fields above it. *@
+            <div class="col-md-2">
                 <label class="form-label mb-0 gh-note">Name (label)</label>
                 <input name="principalName" class="form-control form-control-sm" placeholder="SG-Finance / Dana Manager" />
             </div>
