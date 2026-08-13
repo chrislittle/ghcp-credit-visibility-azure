@@ -89,9 +89,14 @@
 @if (Model.IsOverview)
 {
 @* ── ALL-ENTERPRISES OVERVIEW ─────────────────────────────────────────────────────────────────
-       One ROW per enterprise, worst first, with a sparkline instead of a chart. Ten enterprises at
-       full detail is not a long page — it is a page with no answer to "which one should I look at?",
-       which is the only question a reader with ten of them has. Pick one to get everything. *@
+       One ROW per enterprise, worst first. Ten enterprises at full detail is not a long page — it is
+       a page with no answer to "which one should I look at?", which is the only question a reader
+       with ten of them has. Pick one to get everything.
+
+       No sparkline here. A 120px chart of a part-month is a squiggle occupying the left third of its
+       box: too small to read a trend from, and the capacity line dominates it. The meter with its
+       pace marker says the same thing more precisely in less space, and the burn rate says the rest
+       as a number. The full curve is one click away, where it has room to mean something. *@
     <div class="gh-card">
         <div class="ch">
             <h2>Included allowance pool</h2>
@@ -100,8 +105,8 @@
         <table>
             <thead>
                 <tr>
-                    <th>Enterprise</th><th>Status</th><th class="num">Used</th>
-                    <th>Burn to date</th><th class="num">Empties</th><th class="num">Remaining</th><th></th>
+                    <th>Enterprise</th><th>Status</th><th style="min-width:190px;">Used of capacity</th>
+                    <th class="num">Burn rate</th><th class="num">Empties</th><th class="num">Remaining</th><th></th>
                 </tr>
             </thead>
             <tbody>
@@ -116,48 +121,30 @@
                             else if (p.IsProjectedToExceed) { <span class="gh-badge critical">Projected to exceed</span> }
                             else { <span class="gh-badge ok">On track</span> }
                         </td>
-                        <td class="num" style="min-width:130px;">
+                        <td>
                             @if (p.IsComputable)
                             {
                                 var pct = Math.Min(100, (int)Math.Round(p.PctUsed));
                                 var pace = Math.Min(100, (int)Math.Round(p.PctElapsed));
-                                <div>@p.PctUsed.ToString("N0")%</div>
-                                <div class="meter" style="position:relative;height:6px;">
-                                    <i class="fill-@p.Level" style="width:@(pct)%"></i>
-                                    <i style="position:absolute;top:-2px;bottom:-2px;left:@(pace)%;width:2px;background:#66707d;border-radius:0;"
-                                       title="@pace% of the month has elapsed"></i>
+                                <div style="display:flex;justify-content:space-between;font-size:12px;">
+                                    <span style="font-weight:600;">@p.PctUsed.ToString("N0")%</span>
+                                    <span style="color:#66707d;font-variant-numeric:tabular-nums;">@p.Consumed!.Value.ToString("N0") / @p.Capacity!.Value.ToString("N0")</span>
+                                </div>
+                                @* gh-meter, not the budget card's `meter`: that one is scoped to
+                                   .gh-budget and renders as an unstyled empty div anywhere else. *@
+                                <div class="gh-meter" style="margin-top:4px;">
+                                    <i class="fill fill-@p.Level" style="width:@(pct)%"></i>
+                                    <i class="pace" style="left:@(pace)%" title="@pace% of the month has elapsed"></i>
                                 </div>
                             }
                             else { <span style="color:#98a2b3">—</span> }
                         </td>
-                        <td>
-                            @* Sparkline: the SHAPE of the burn without the cost of a chart. Scaled to
-                               whichever is larger of capacity or peak so the dashed capacity line
-                               stays on-canvas when consumption has overshot it. *@
-                            @if (d.BurnDown.Count > 0 && p.IsComputable)
-                            {
-                                var cap = p.Capacity!.Value;
-                                var peak = d.BurnDown.Max(x => x.CumulativeCredits);
-                                var top = Math.Max(cap, peak);
-                                if (top <= 0) { top = 1m; }
-                                var days = p.DaysInMonth;
-                                var sx = new Func<int, int>(day => (int)((double)(day - 1) / Math.Max(1, days - 1) * 118) + 1);
-                                var sy = new Func<decimal, int>(v => 26 - (int)((double)(v / top) * 24));
-                                var pts = string.Join(" ", d.BurnDown.Select(x => $"{sx(x.Day)},{sy(x.CumulativeCredits)}"));
-                                var col = p.Level == "over" ? "#d93025" : p.Level == "critical" ? "#d9822b" : "#2563eb";
-                                <svg width="120" height="28" viewBox="0 0 120 28" role="img"
-                                     aria-label="Burn to date for @p.EnterpriseName: @p.PctUsed.ToString("N0")% of capacity used">
-                                    <line x1="1" y1="@sy(cap)" x2="119" y2="@sy(cap)" stroke="#d93025" stroke-width="1" stroke-dasharray="2 2"></line>
-                                    <polyline fill="none" stroke="@col" stroke-width="2" points="@pts"></polyline>
-                                </svg>
-                            }
-                            else
-                            {
-                                <span class="gh-note mb-0" style="color:#98a2b3">no daily detail yet</span>
-                            }
+                        <td class="num">
+                            @if (p.RunRatePerDay is decimal rate && rate > 0) { <text>@rate.ToString("N0")/day</text> }
+                            else { <span style="color:#98a2b3">—</span> }
                         </td>
                         <td class="num">
-                            @if (p.IsExhausted) { <span style="color:#d93025">exhausted</span> }
+                            @if (p.IsExhausted) { <span style="color:#b42318;font-weight:600;">exhausted</span> }
                             else if (p.ExhaustionDay is int ed) { <text>~@ed @IndexModel.ShortMonth(Model.Year, Model.Month)</text> }
                             else { <span style="color:#98a2b3">—</span> }
                         </td>
@@ -223,7 +210,7 @@
         var p = d.Pool;
         <div class="gh-card">
             <div class="ch">
-                <h2>🎟️ @p.EnterpriseName — allowance pool</h2>
+                <h2>🔋 @p.EnterpriseName — allowance pool</h2>
                 <span class="hint">@Model.MonthLabel · day @p.DaysElapsed of @p.DaysInMonth</span>
             </div>
 

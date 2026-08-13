@@ -167,9 +167,18 @@ else if (!Model.SeesAll && Model.UserCount == 0)
     {
         var p = Model.PrimaryPool;
         var poolPct = (int)Math.Round(p.PctUsed);
+        var poolCount = Model.AllowancePools.Count(x => x.IsComputable);
         <div class="gh-kpi b5">
-            <div class="ic">🎟️</div>
-            <div class="label">Allowance pool <span title="Included AI credits for this enterprise this month, from @p.TotalSeats assigned Copilot seat(s): @string.Join(" + ", p.Plans.Where(x => x.CreditsPerSeat is not null).Select(x => $"{x.Seats} {x.PlanType} × {x.CreditsPerSeat:N0}")) credits. Copilot seats, NOT enterprise licence holders. Credits are POOLED across the enterprise, not per person, and do not carry over.">ⓘ</span></div>
+            @* 🔋 rather than a ticket: a pool that depletes IS a battery, and the glyph stays legible
+               at 20px where a ticket rendered as an unreadable red blob. *@
+            <div class="ic">🔋</div>
+            @* The enterprise is named in the LABEL, not left to a footnote below the number. With
+               several enterprises in scope, "145%" on its own is a statistic about nobody — the
+               reader cannot act on it without knowing whose it is. *@
+            <div class="label">
+                Allowance pool@(poolCount > 1 ? " · " + p.EnterpriseName : "")
+                <span title="Included AI credits for @p.EnterpriseName this month, from @p.TotalSeats assigned Copilot seat(s): @string.Join(" + ", p.Plans.Where(x => x.CreditsPerSeat is not null).Select(x => $"{x.Seats} {x.PlanType} × {x.CreditsPerSeat:N0}")) credits. Copilot seats, NOT enterprise licence holders. Credits are POOLED across the enterprise, not per person, and do not carry over.">ⓘ</span>
+            </div>
             <div class="val">@poolPct%</div>
             @* The headline is the projection, not the raw percentage: 62% used means opposite things
                on day 3 and day 28, and only the run rate distinguishes them. *@
@@ -185,9 +194,9 @@ else if (!Model.SeesAll && Model.UserCount == 0)
             {
                 <div class="delta down">on track — no overage projected</div>
             }
-            @if (Model.AllowancePools.Count(x => x.IsComputable) > 1)
+            @if (poolCount > 1)
             {
-                <div class="delta">@p.EnterpriseName — closest to its limit of @Model.AllowancePools.Count(x => x.IsComputable)</div>
+                <div class="delta" title="Pools are never combined across enterprises — this is the one closest to its own ceiling.">worst of @poolCount enterprises</div>
             }
         </div>
     }
@@ -426,7 +435,7 @@ else if (!Model.SeesAll && Model.UserCount == 0)
                 <div class="gh-budget">
                     <div class="top">
                         <span class="name">
-                            🎟️ @p.EnterpriseName
+                            🔋 @p.EnterpriseName
                             @if (!p.IsComputable)
                             {
                                 <span class="gh-badge" title="No Copilot seats collected yet, every seat is on a plan this deployment does not price, or this month's rows carry no gross quantity. Not zero — unknown.">Not available</span>

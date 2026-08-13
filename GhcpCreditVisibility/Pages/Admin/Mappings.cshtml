@@ -425,19 +425,20 @@
                 <label class="form-label mb-0 gh-note">Name (label)</label>
                 <input name="principalName" class="form-control form-control-sm" placeholder="SG-Finance / Dana Manager" />
             </div>
-            <div class="col-md-2">
+            <div class="col-md-3">
                 <label class="form-label mb-0 gh-note">Cost center(s)</label>
-                <select name="costCenterKeys" class="form-select form-select-sm" multiple size="4" required>
+                @* Checkboxes rather than <select multiple> — see the note on the reader form below.
+                   Grouped by enterprise, since the same cost-center NAME legitimately exists in two. *@
+                <div class="gh-checklist">
                     @foreach (var entGroup in Model.CostCenters.GroupBy(c => new { c.EnterpriseId, c.EnterpriseName }))
                     {
-                        <optgroup label="@(entGroup.Key.EnterpriseName ?? $"enterprise {entGroup.Key.EnterpriseId}")">
-                            @foreach (var c in entGroup)
-                            {
-                                <option value="@c.Key">@(c.Name ?? c.Id)</option>
-                            }
-                        </optgroup>
+                        <div class="grp">@(entGroup.Key.EnterpriseName ?? $"enterprise {entGroup.Key.EnterpriseId}")</div>
+                        @foreach (var c in entGroup)
+                        {
+                            <label><input type="checkbox" name="costCenterKeys" value="@c.Key" /><span>@(c.Name ?? c.Id)</span></label>
+                        }
                     }
-                </select>
+                </div>
             </div>
             <div class="col-md-2">
                 <button class="btn btn-sm btn-primary w-100" type="submit">Add mapping</button>
@@ -449,8 +450,8 @@
         }
         <div class="gh-note mt-2">
             Use <strong>User</strong> for an individual (e.g. a single manager who should see one cost center and has no dedicated group).
-            <strong>Ctrl/Cmd-click</strong> (or shift-click for a range) to select several cost centers at once — a group or user
-            can be granted <strong>any number</strong> of cost centers, so an exec can get a single top-down view across the whole org.
+            Tick <strong>any number</strong> of cost centers, across any number of enterprises — that is how an exec gets a single
+            top-down view spanning the whole org.
             Remove one cost center at a time with the <strong>&times;</strong> on its badge above.
         </div>
     </div>
@@ -514,27 +515,31 @@
             </div>
             <div class="col-md-3">
                 <label class="form-label mb-0 gh-note">Enterprise(s)</label>
-                @* Multi-select, matching cost-center mappings: a finance group usually needs a SET of
-                   enterprises, and one form submission each is the friction multi-select removed there.
-                   "All enterprises" is a separate option rather than "select them all", because it is a
-                   different promise — it covers enterprises that do not exist yet. *@
-                <select name="enterpriseIds" class="form-select form-select-sm" multiple size="4" required>
-                    <option value="all">★ All enterprises (incl. future)</option>
+                @* Checkboxes, not <select multiple>: ctrl/cmd-click is a convention nobody discovers,
+                   and one stray click clears every selection made so far. Fixed height so the form
+                   does not grow as enterprises are registered.
+                   "All enterprises" stays a separate choice rather than "tick them all", because it
+                   is a different promise — it covers enterprises that do not exist yet. *@
+                <div class="gh-checklist">
+                    <label style="font-weight:600;">
+                        <input type="checkbox" name="enterpriseIds" value="all" />
+                        <span>★ All enterprises <span style="color:#66707d;font-weight:400;">(incl. future)</span></span>
+                    </label>
+                    <div class="grp">or pick specific ones</div>
                     @foreach (var kv in Model.EnterpriseNames.OrderBy(k => k.Value))
                     {
-                        <option value="@kv.Key">@kv.Value</option>
+                        <label><input type="checkbox" name="enterpriseIds" value="@kv.Key" /><span>@kv.Value</span></label>
                     }
-                </select>
+                </div>
             </div>
             <div class="col-md-2">
                 <button class="btn btn-sm btn-primary w-100" type="submit">Grant reader</button>
             </div>
         </form>
         <div class="gh-note mt-2">
-            <strong>Ctrl/Cmd-click</strong> (or shift-click for a range) to grant several enterprises at once.
-            <strong>All enterprises</strong> is not the same as selecting every one: it covers any enterprise registered
-            <em>later</em> too, and granting it replaces the per-enterprise grants it supersedes.
-            This is the role for finance and reporting people.
+            Tick several to grant them in one action. <strong>All enterprises</strong> is not the same as ticking every
+            box: it covers any enterprise registered <em>later</em> too, and granting it replaces the per-enterprise
+            grants it supersedes. This is the role for finance and reporting people.
         </div>
     </div>
 </div>
