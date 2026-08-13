@@ -112,7 +112,8 @@ your organization's actual enterprises, users, cost centers, and spend.)*
   organization, so this pulls the general usage report as well (one call per enterprise per month)
   to break spend down by organization and repository, with real per-day dates. Past months
   backfill themselves automatically, a few per snapshot cycle, as far back as your retention
-  window allows. Admin-only: that report has no cost center, so it cannot be scoped to a team.
+  window allows. Needs the **Enterprise reader** role: that report has no cost center, so it cannot
+  be scoped to a team.
 - **Opt-in per-user history backfill** — per-user data is normally collected forward from the day
   you deploy, because GitHub's AI-credit report costs *one request per user per month*. When you
   want the history anyway, **Admin → GitHub enterprises → History** prices the job first (users ×
@@ -281,14 +282,30 @@ stays in Entra (so your existing group lifecycle/governance keeps working); the 
 in this app's database and is editable with no redeploy, taking effect on the mapped user's next
 page load.
 
+There are **three independent roles**. Administering this deployment and seeing spend are separate
+grants — so finance and reporting people never have to be made administrators to read their numbers,
+and whoever wires up the mappings need not be handed visibility of the whole company's spend.
+
+| Role | Can | Granted by |
+|---|---|---|
+| **Cost center manager** | see only the cost centers mapped to them | a principal→cost-center mapping |
+| **Enterprise reader** | see *everything* within granted enterprises — all cost centers, the organization breakdown, enterprise-wide budgets, the allowance pool | an Enterprise Reader grant (one enterprise, or all) |
+| **Administrator** | manage this console: mappings, the enterprise registry, roles, backfills. **No data access of its own.** | the Entra `Admin` app role, or an admin principal in the console |
+
 - **Many-to-many by design** — a group or user can be mapped to **any number** of cost centers.
-  This is exactly the mechanism for an executive who needs a single, top-down view across several
-  cost centers: map their group (or just their user object ID) to all of the relevant cost
-  centers, and they'll see a combined view — no separate "rollup" feature needed.
+  This is the mechanism for a manager who spans several teams: map their group (or just their user
+  object ID) to all the relevant cost centers and they see a combined view.
+- **Enterprise reader is the role for finance and reporting.** Some data — the organization
+  breakdown, the allowance pool — comes from sources with no cost center at all and therefore cannot
+  be narrowed below an enterprise. This role is that grain. Grant it per enterprise, or for all of
+  them (including any registered later).
 - **Group *or* individual user** — covers the common "lone manager with no dedicated group"
   case, in addition to normal group-based access.
-- **Admins see everything** — granted via the Entra `Admin` app role (bootstrap) or by being
-  designated an admin principal in the console itself.
+- **The Entra `Admin` app role is the bootstrap** and grants BOTH, so a fresh deployment with an
+  empty database is never locked out. Admin principals designated *in the console* grant
+  administration only; give them an Enterprise Reader grant as well if they should also see data.
+  An administrator with no reader grant sees an empty dashboard, and the dashboard says exactly that
+  rather than looking broken.
 - **Organization display name** and other light settings are also managed here.
 
 See it in the [screenshot above](#screenshots), or read the full walkthrough in
