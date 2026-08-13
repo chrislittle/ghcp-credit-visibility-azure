@@ -216,7 +216,11 @@ body { background:var(--gh-bg); color:var(--gh-ink); font-family:'Segoe UI',-app
 /* Donut / model legends */
 .gh-legend{display:flex;flex-direction:column;gap:10px;}
 .gh-legend .row{display:flex;align-items:center;gap:10px;font-size:13px;}
-.gh-legend .sw{width:12px;height:12px;border-radius:3px;flex:0 0 auto;}
+/* padding:0 is LOAD-BEARING. These legend items reuse the class name `row`, which is also
+   Bootstrap's grid row — so Bootstrap's `.row > *` applies to every swatch and gives it
+   `padding: calc(var(--bs-gutter-x) * .5)` (12px) each side. Under border-box that padding cannot
+   compress into a 12px width, so the swatch renders 24px and pushes its label out of the row. */
+.gh-legend .sw{width:12px;height:12px;border-radius:3px;flex:0 0 auto;padding:0;}
 .gh-legend .amt{margin-left:auto;font-weight:700;font-variant-numeric:tabular-nums;}
 .gh-foot{color:var(--gh-muted);font-size:12px;text-align:center;margin-top:26px;}
 .gh-cardbody{padding:16px 18px;}
@@ -268,5 +272,9 @@ body { background:var(--gh-bg); color:var(--gh-ink); font-family:'Segoe UI',-app
 .gh-filters label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.4px;color:var(--gh-muted);}
 .gh-filters select{border:1px solid var(--gh-line);border-radius:9px;padding:7px 10px;font-size:13px;background:#fff;color:var(--gh-ink);min-width:150px;}
 .gh-serieslegend{display:flex;flex-wrap:wrap;gap:14px;padding:4px 18px 16px;}
-.gh-serieslegend .row{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;}
-.gh-serieslegend .sw{width:12px;height:12px;border-radius:3px;}
+/* nowrap + a fixed swatch basis: without them the swatch is a growable flex item that absorbs the
+   free space (rendering ~24px wide instead of 12) and squeezes the label beside it, so entries
+   clipped mid-word — "consumed to da", "even bu". */
+.gh-serieslegend .row{display:flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;white-space:nowrap;}
+/* padding:0 for the Bootstrap `.row > *` gutter — see the note on .gh-legend .sw above. */
+.gh-serieslegend .sw{width:12px;height:12px;border-radius:3px;flex:0 0 12px;padding:0;}
