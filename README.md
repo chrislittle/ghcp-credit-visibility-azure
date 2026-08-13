@@ -75,21 +75,22 @@ This app closes that gap:
 
 | Usage dashboard — consumption vs. billable spend | Reports — cost centers across enterprises |
 |---|---|
-| ![Usage dashboard: total spend annotated with how much the included allowance covered, a gross-usage KPI, and per-user net and gross columns](docs/images/dashboard.png) | ![Reports page breaking spend down by cost center across enterprises, with the enterprise filter](docs/images/reports.png) |
+| ![Usage dashboard: total spend annotated with how much the included allowance covered, an allowance-pool KPI naming the enterprise closest to its ceiling, and a per-enterprise pool meter above the budgets](docs/images/dashboard.png) | ![Reports page breaking spend down by cost center across enterprises, with the enterprise filter](docs/images/reports.png) |
 
 | Budgets &amp; allowance — the pool burn-down above every budget | Reports — spend by GitHub organization |
 |---|---|
-| ![Budgets page grouped by enterprise, showing enterprise-wide, cost-center and organization budgets, with hard-stop budgets flagged](docs/images/budgets.png) | ![Reports broken down by GitHub organization, including an Unattributed row for enterprise-level charges that belong to no organization](docs/images/reports-organization.png) |
+| ![Budgets and allowance page: the included-allowance pool first, with a burn-down chart of consumed credits against an even-burn reference, a projection to the day the pool empties and the capacity ceiling, then the budgets grouped by enterprise with hard-stop budgets flagged](docs/images/budgets.png) | ![Reports broken down by GitHub organization, including an Unattributed row for enterprise-level charges that belong to no organization](docs/images/reports-organization.png) |
 
 | Admin console — enterprise registry + the three access roles | |
 |---|---|
-| ![Admin console with the GitHub enterprises registry — per-enterprise snapshot and history controls — the two-level access model, and principal-to-cost-center mappings](docs/images/admin-mappings.png) | |
+| ![Admin console with the GitHub enterprises registry — per-enterprise snapshot and history controls — the three-role access guide, and the cost center, Enterprise reader and administrator grants](docs/images/admin-mappings.png) | |
 
 *(Screenshots above were captured from a local run against the built-in synthetic demo data — two
 mock enterprises, **Contoso** and **Fabrikam**, seeded automatically; note the enterprise dropdown,
 the `Engineering · Contoso` vs `Engineering · Fabrikam` disambiguation, the same users appearing
 once per enterprise, and the admin console's enterprise registry. Worth spotting: the dashboard's
-`covered by allowance` annotation under Total spend, the `⛔ HARD STOP` badges on budgets that
+`covered by allowance` annotation under Total spend, the allowance pool's **pace marker** — fill past
+it means burning faster than the month is passing — the `⛔ HARD STOP` badges on budgets that
 **block** usage rather than alerting, and the `Unattributed` row in the organization report —
 enterprise-level charges that belong to no organization, surfaced rather than dropped so the
 breakdown still reconciles. Every screenshot is the **default configuration** — nothing here needs a
