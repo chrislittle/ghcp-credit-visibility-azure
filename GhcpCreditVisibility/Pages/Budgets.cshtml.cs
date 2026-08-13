@@ -72,13 +72,40 @@ namespace GhcpCreditVisibility.Pages
             return map;
         }
 
-        /// <summary>One pool per visible enterprise, with its burn-down curve and contributors.</summary>
+        /// <summary>One pool per visible enterprise, with its burn-down curve and contributors.
+        /// <see cref="Contributors"/> is empty in overview mode, where it is not rendered.</summary>
         public sealed record PoolDetail(
             UsageQueryService.AllowancePool Pool,
             IReadOnlyList<UsageQueryService.BurnDownPoint> BurnDown,
             IReadOnlyList<UsageQueryService.PoolContributor> Contributors);
 
         public IReadOnlyList<PoolDetail> Pools { get; private set; } = Array.Empty<PoolDetail>();
+
+        /// <summary>
+        /// TRUE when no single enterprise is selected and more than one is visible — the page then
+        /// shows one summary ROW per enterprise instead of a full chart each.
+        ///
+        /// Ten enterprises rendered at full detail is not a long page, it is a page with no answer to
+        /// "which one should I look at?", which is the only question a reader with ten of them has.
+        /// The dashboard already works this way for budgets ("the two red ones, not a wall of dozens
+        /// of green meters"); this brings the allowance surface into line.
+        ///
+        /// A single-enterprise deployment NEVER sees the overview: a one-row summary you must click
+        /// through would be pure friction.
+        /// </summary>
+        public bool IsOverview { get; private set; }
+
+        /// <summary>Per-enterprise budget counts for the overview strip. Derived from budgets already
+        /// loaded, so the overview costs no extra query.</summary>
+        public sealed record EnterpriseBudgetSummary(
+            long EnterpriseId, string? EnterpriseName, int Over, int Critical, int Warn, int Ok)
+        {
+            public int Total => Over + Critical + Warn + Ok;
+            public int NeedsAttention => Over + Critical;
+        }
+
+        public IReadOnlyList<EnterpriseBudgetSummary> BudgetSummaries { get; private set; }
+            = Array.Empty<EnterpriseBudgetSummary>();
 
         /// <summary>
         /// The selected month is not the current one, so there is no pool to show.
@@ -128,6 +155,10 @@ namespace GhcpCreditVisibility.Pages
                 (Year, Month) = (AvailableMonths[0].Year, AvailableMonths[0].Month);
             }
 
+            // Overview whenever the reader is looking at several enterprises at once. Ent is already
+            // validated against VisibleEnterprises above, so this cannot be forced by a hand-edited URL.
+            IsOverview = Ent is null && VisibleEnterprises.Count > 1;
+
             // ── Allowance pool, above the budgets it precedes ───────────────────────────────────
             CanSeePool = scope.HasEnterpriseRead;
             if (CanSeePool)
@@ -141,15 +172,33 @@ namespace GhcpCreditVisibility.Pages
                     PastMonthBillable = await _query.GetMonthTotalAsync(Year, Month, scope, ct);
                 }
 
+                // ONE query for every enterprise's curve — the overview draws a sparkline per row,
+                // and a reader granted ten enterprises must not cost ten round trips for one screen.
+                var curves = await _query.GetAllowanceBurnDownsAsync(
+                    pools.Select(p => p.EnterpriseId), Year, Month, scope, ct);
+
                 var details = new List<PoolDetail>();
                 foreach (var p in pools)
                 {
+                    // Contributors are a detail-mode concern: a ranked table per enterprise is
+                    // exactly the wall of content the overview exists to avoid.
+                    var contributors = IsOverview
+                        ? Array.Empty<UsageQueryService.PoolContributor>()
+                        : await _query.GetPoolContributorsAsync(p.EnterpriseId, Year, Month, scope, ct: ct);
+
                     details.Add(new PoolDetail(
                         p,
-                        await _query.GetAllowanceBurnDownAsync(p.EnterpriseId, Year, Month, scope, ct),
-                        await _query.GetPoolContributorsAsync(p.EnterpriseId, Year, Month, scope, ct: ct)));
+                        curves.TryGetValue(p.EnterpriseId, out var pts) ? pts : Array.Empty<UsageQueryService.BurnDownPoint>(),
+                        contributors));
                 }
-                Pools = details;
+
+                // Worst first. The reader's question is "which one needs me", so an alphabetical
+                // list would bury the answer among the healthy ones.
+                Pools = details
+                    .OrderBy(d => d.Pool.Level switch { "over" => 0, "critical" => 1, _ => 2 })
+                    .ThenByDescending(d => d.Pool.PctUsed)
+                    .ThenBy(d => d.Pool.EnterpriseName)
+                    .ToList();
             }
 
             AllBudgets = await _budgets.GetStatusesAsync(scope, Year, Month, ct);
@@ -168,6 +217,21 @@ namespace GhcpCreditVisibility.Pages
                     (b.CostCenterName ?? b.CostCenterId).Contains(term, StringComparison.OrdinalIgnoreCase) ||
                     (b.EnterpriseName ?? "").Contains(term, StringComparison.OrdinalIgnoreCase));
             }
+
+            // Per-enterprise counts for the overview strip — derived from budgets already loaded, so
+            // the overview costs nothing extra. Worst first, same reasoning as the pools above.
+            BudgetSummaries = AllBudgets
+                .GroupBy(b => new { b.EnterpriseId, b.EnterpriseName })
+                .Select(g => new EnterpriseBudgetSummary(
+                    g.Key.EnterpriseId, g.Key.EnterpriseName,
+                    g.Count(b => b.Level == "over"),
+                    g.Count(b => b.Level == "critical"),
+                    g.Count(b => b.Level == "warn"),
+                    g.Count(b => b.Level == "ok")))
+                .OrderByDescending(s => s.Over)
+                .ThenByDescending(s => s.Critical)
+                .ThenBy(s => s.EnterpriseName)
+                .ToList();
 
             var rows = filtered.ToList();
             MatchCount = rows.Count;

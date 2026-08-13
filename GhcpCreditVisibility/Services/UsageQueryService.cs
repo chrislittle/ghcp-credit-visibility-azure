@@ -659,20 +659,39 @@ namespace GhcpCreditVisibility.Services
         public async Task<IReadOnlyList<BurnDownPoint>> GetAllowanceBurnDownAsync(
             long enterpriseId, int year, int month, UserScope scope, CancellationToken ct = default)
         {
-            if (!scope.CanReadEnterprise(enterpriseId)) return Array.Empty<BurnDownPoint>();
+            var all = await GetAllowanceBurnDownsAsync(new[] { enterpriseId }, year, month, scope, ct);
+            return all.TryGetValue(enterpriseId, out var pts) ? pts : Array.Empty<BurnDownPoint>();
+        }
+
+        /// <summary>
+        /// The same curve for SEVERAL enterprises in ONE query — what the all-enterprises overview
+        /// needs for its sparklines. A reader granted ten enterprises would otherwise fire ten
+        /// round trips to render one screen.
+        /// </summary>
+        public async Task<IReadOnlyDictionary<long, IReadOnlyList<BurnDownPoint>>> GetAllowanceBurnDownsAsync(
+            IEnumerable<long> enterpriseIds, int year, int month, UserScope scope, CancellationToken ct = default)
+        {
+            var ids = enterpriseIds.Where(scope.CanReadEnterprise).Distinct().ToList();
+            var empty = (IReadOnlyDictionary<long, IReadOnlyList<BurnDownPoint>>)
+                new Dictionary<long, IReadOnlyList<BurnDownPoint>>();
+            if (ids.Count == 0) return empty;
 
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
             var rows = await db.DailyUsageSnapshots
-                .Where(x => x.EnterpriseId == enterpriseId && x.Year == year && x.Month == month)
+                .Where(x => ids.Contains(x.EnterpriseId) && x.Year == year && x.Month == month)
                 .Where(x => x.UnitType == UsageUnitTypes.AiCredits && x.GrossQuantity != null)
-                .Select(x => new { x.Day, Qty = x.GrossQuantity!.Value })
+                .Select(x => new { x.EnterpriseId, x.Day, Qty = x.GrossQuantity!.Value })
                 .ToListAsync(ct);
 
             return rows
-                .GroupBy(r => r.Day)
-                .Select(g => new BurnDownPoint(g.Key, g.Sum(r => r.Qty)))
-                .OrderBy(p => p.Day)
-                .ToList();
+                .GroupBy(r => r.EnterpriseId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => (IReadOnlyList<BurnDownPoint>)g
+                        .GroupBy(r => r.Day)
+                        .Select(d => new BurnDownPoint(d.Key, d.Sum(r => r.Qty)))
+                        .OrderBy(p => p.Day)
+                        .ToList());
         }
 
         /// <summary>A cost center's share of one enterprise's allowance burn.</summary>

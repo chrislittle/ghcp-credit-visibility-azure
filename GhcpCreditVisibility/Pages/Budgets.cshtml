@@ -15,6 +15,27 @@
         </div>
     </div>
     <div class="gh-headtools">
+        @* Way back out of detail mode. Without it the only route to the overview is editing the URL
+           or the browser back button, and neither is a UI. *@
+        @if (Model.Ent is long && Model.VisibleEnterprises.Count > 1)
+        {
+            <a class="gh-scope" href="@Url.Page("Budgets", new { Period = Model.PeriodValue })"
+               style="text-decoration:none;">← All @Model.VisibleEnterprises.Count enterprises</a>
+        }
+        @if (Model.VisibleEnterprises.Count > 1)
+        {
+            <form method="get" class="gh-mpick mb-0">
+                <input type="hidden" name="Period" value="@Model.PeriodValue" />
+                <span class="cal" aria-hidden="true">🏢</span>
+                <select name="Ent" onchange="this.form.submit()" aria-label="Enterprise">
+                    <option value="">All enterprises</option>
+                    @foreach (var e in Model.VisibleEnterprises)
+                    {
+                        <option value="@e.Id" selected="@(Model.Ent == e.Id)">@e.Name</option>
+                    }
+                </select>
+            </form>
+        }
         <form method="get" class="gh-mpick mb-0">
             @if (Model.Ent is long) { <input type="hidden" name="Ent" value="@Model.Ent" /> }
             @if (Model.Status != "all") { <input type="hidden" name="Status" value="@Model.Status" /> }
@@ -65,6 +86,138 @@
             </div>
         </div>
     }
+@if (Model.IsOverview)
+{
+@* ── ALL-ENTERPRISES OVERVIEW ─────────────────────────────────────────────────────────────────
+       One ROW per enterprise, worst first, with a sparkline instead of a chart. Ten enterprises at
+       full detail is not a long page — it is a page with no answer to "which one should I look at?",
+       which is the only question a reader with ten of them has. Pick one to get everything. *@
+    <div class="gh-card">
+        <div class="ch">
+            <h2>Included allowance pool</h2>
+            <span class="hint">@Model.MonthLabel · @Model.Pools.Count enterprises · worst first</span>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Enterprise</th><th>Status</th><th class="num">Used</th>
+                    <th>Burn to date</th><th class="num">Empties</th><th class="num">Remaining</th><th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var d in Model.Pools)
+                {
+                    var p = d.Pool;
+                    <tr>
+                        <td><strong>@p.EnterpriseName</strong></td>
+                        <td>
+                            @if (!p.IsComputable) { <span class="gh-badge">Not available</span> }
+                            else if (p.IsExhausted) { <span class="gh-badge over">Pool exhausted</span> }
+                            else if (p.IsProjectedToExceed) { <span class="gh-badge critical">Projected to exceed</span> }
+                            else { <span class="gh-badge ok">On track</span> }
+                        </td>
+                        <td class="num" style="min-width:130px;">
+                            @if (p.IsComputable)
+                            {
+                                var pct = Math.Min(100, (int)Math.Round(p.PctUsed));
+                                var pace = Math.Min(100, (int)Math.Round(p.PctElapsed));
+                                <div>@p.PctUsed.ToString("N0")%</div>
+                                <div class="meter" style="position:relative;height:6px;">
+                                    <i class="fill-@p.Level" style="width:@(pct)%"></i>
+                                    <i style="position:absolute;top:-2px;bottom:-2px;left:@(pace)%;width:2px;background:#66707d;border-radius:0;"
+                                       title="@pace% of the month has elapsed"></i>
+                                </div>
+                            }
+                            else { <span style="color:#98a2b3">—</span> }
+                        </td>
+                        <td>
+                            @* Sparkline: the SHAPE of the burn without the cost of a chart. Scaled to
+                               whichever is larger of capacity or peak so the dashed capacity line
+                               stays on-canvas when consumption has overshot it. *@
+                            @if (d.BurnDown.Count > 0 && p.IsComputable)
+                            {
+                                var cap = p.Capacity!.Value;
+                                var peak = d.BurnDown.Max(x => x.CumulativeCredits);
+                                var top = Math.Max(cap, peak);
+                                if (top <= 0) { top = 1m; }
+                                var days = p.DaysInMonth;
+                                var sx = new Func<int, int>(day => (int)((double)(day - 1) / Math.Max(1, days - 1) * 118) + 1);
+                                var sy = new Func<decimal, int>(v => 26 - (int)((double)(v / top) * 24));
+                                var pts = string.Join(" ", d.BurnDown.Select(x => $"{sx(x.Day)},{sy(x.CumulativeCredits)}"));
+                                var col = p.Level == "over" ? "#d93025" : p.Level == "critical" ? "#d9822b" : "#2563eb";
+                                <svg width="120" height="28" viewBox="0 0 120 28" role="img"
+                                     aria-label="Burn to date for @p.EnterpriseName: @p.PctUsed.ToString("N0")% of capacity used">
+                                    <line x1="1" y1="@sy(cap)" x2="119" y2="@sy(cap)" stroke="#d93025" stroke-width="1" stroke-dasharray="2 2"></line>
+                                    <polyline fill="none" stroke="@col" stroke-width="2" points="@pts"></polyline>
+                                </svg>
+                            }
+                            else
+                            {
+                                <span class="gh-note mb-0" style="color:#98a2b3">no daily detail yet</span>
+                            }
+                        </td>
+                        <td class="num">
+                            @if (p.IsExhausted) { <span style="color:#d93025">exhausted</span> }
+                            else if (p.ExhaustionDay is int ed) { <text>~@ed @IndexModel.ShortMonth(Model.Year, Model.Month)</text> }
+                            else { <span style="color:#98a2b3">—</span> }
+                        </td>
+                        <td class="num">
+                            @if (p.IsComputable)
+                            {
+                                @(p.Remaining >= 0 ? $"{p.Remaining:N0}" : $"{Math.Abs(p.Remaining ?? 0):N0} over")
+                            }
+                            else { <span style="color:#98a2b3">—</span> }
+                        </td>
+                        <td style="text-align:right;white-space:nowrap;">
+                            <a href="@Url.Page("Budgets", new { Period = Model.PeriodValue, Ent = p.EnterpriseId })">Detail →</a>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
+            <div class="gh-note mb-0">
+                Credits are pooled per enterprise and never combined across them — one enterprise's headroom
+                cannot cover another's overage, which is why there is no total here.
+                Pick an enterprise for its burn-down chart, seat breakdown and contributors.
+            </div>
+        </div>
+    </div>
+
+    @* Budget counts per enterprise — the same summarise-then-drill-in rule as the pool above. *@
+    @if (Model.BudgetSummaries.Count > 0)
+    {
+        <div class="gh-card">
+            <div class="ch">
+                <h2>Budgets by enterprise</h2>
+                <span class="hint">@Model.MonthLabel · @Model.AllBudgets.Count budgets across @Model.BudgetSummaries.Count enterprises</span>
+            </div>
+            <table>
+                <thead><tr><th>Enterprise</th><th>Status</th><th class="num">Budgets</th><th></th></tr></thead>
+                <tbody>
+                    @foreach (var s in Model.BudgetSummaries)
+                    {
+                        <tr>
+                            <td><strong>@s.EnterpriseName</strong></td>
+                            <td>
+                                @if (s.Over > 0) { <span class="gh-badge over">@s.Over over</span> }
+                                @if (s.Critical > 0) { <span class="gh-badge critical">@s.Critical near limit</span> }
+                                @if (s.Warn > 0) { <span class="gh-badge warn">@s.Warn watch</span> }
+                                @if (s.NeedsAttention == 0 && s.Warn == 0) { <span class="gh-badge ok">all on track</span> }
+                            </td>
+                            <td class="num">@s.Total</td>
+                            <td style="text-align:right;white-space:nowrap;">
+                                <a href="@Url.Page("Budgets", new { Period = Model.PeriodValue, Ent = s.EnterpriseId })">Detail →</a>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+    @if (!Model.IsOverview)
+    {
     @foreach (var d in Model.Pools)
     {
         var p = d.Pool;
@@ -277,7 +430,13 @@
         </div>
     }
 }
+}
 
+@* The full, filterable budget list is a DETAIL-mode view. In overview the per-enterprise counts
+   above carry the same signal in a fraction of the height — listing every budget across ten
+   enterprises is the wall of content the two-level split exists to remove. *@
+@if (!Model.IsOverview)
+{
 <!-- FILTERS + STATUS SUMMARY -->
 <div class="gh-card">
     <div class="ch">
@@ -392,4 +551,5 @@ else
             </div>
         </div>
     </div>
+}
 }
