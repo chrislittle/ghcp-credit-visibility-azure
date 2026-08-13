@@ -28,5 +28,13 @@ namespace GhcpCreditVisibility.Services
         /// rather than replacing it.
         /// </summary>
         Task<IReadOnlyList<OrgUsageItem>> GetOrgUsageAsync(string enterprise, int year, int month, CancellationToken ct = default);
+
+        /// <summary>
+        /// Assigned Copilot seats, each carrying its plan. NOT the same population as
+        /// <see cref="GetEnterpriseUsersAsync"/>, which returns GHEC licence holders — a person can
+        /// hold an enterprise licence with no Copilot seat, and a live enterprise showed 8 licences
+        /// against 3 seats. Anything sizing the included-credit allowance must use THIS count.
+        /// </summary>
+        Task<IReadOnlyList<CopilotSeat>> GetCopilotSeatsAsync(string enterprise, CancellationToken ct = default);
     }
 }

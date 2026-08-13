@@ -38,6 +38,18 @@ spec:
     utilization is computed from this table. A cost-center manager unable to see either is correct
     behaviour, not a bug.
 
+    COPILOT SEATS vs LICENCES — do not conflate these. EnterpriseCopilotSeats holds ASSIGNED COPILOT
+    SEATS per plan (from copilot/billing/seats) and is the only correct input to the included-allowance
+    pool. Enterprises.LicensedUserCount holds GHEC LICENCE holders (from consumed-licenses), a larger
+    and different population — a live enterprise had 8 licences against 3 seats. Capacity computed
+    from licences came out 5.5x too high, which makes an enterprise about to exhaust its pool look
+    comfortable. Seats fewer than licences is EXPECTED. Several rows for one enterprise means a mixed
+    plan (Business includes 1,900 credits per seat, Enterprise 3,900) and capacity is a SUM over
+    plans. A PlanType the app does not price is a finding to report, not corruption — those seats are
+    excluded from capacity and the UI says so. No rows for an enabled enterprise means collection
+    failed; look for a CopilotSeatsUnavailable event, since the call is non-fatal and the run still
+    reports success. NEVER suggest deriving pool capacity from LicensedUserCount.
+
     ROLES: visibility comes from the ENTERPRISE READER grant (PrincipalEnterpriseGrants), NOT from
     being an application administrator (AdminPrincipals) — those were one right until 2026-08-13 and
     are now separate. An admin with no reader grant legitimately sees an empty dashboard; the app

@@ -51,8 +51,22 @@ namespace GhcpCreditVisibility.Tests
             public Task<UserCreditUsage?> GetUsageForUserAsync(string e, string u, int y, int m, CancellationToken ct = default) => _inner.GetUsageForUserAsync(e, u, y, m, ct);
             public Task<IReadOnlyList<CostCenter>> GetCostCentersAsync(string e, CancellationToken ct = default) => _inner.GetCostCentersAsync(e, ct);
             public Task<IReadOnlyList<Budget>> GetBudgetsAsync(string e, CancellationToken ct = default) => _inner.GetBudgetsAsync(e, ct);
+            public Task<IReadOnlyList<CopilotSeat>> GetCopilotSeatsAsync(string e, CancellationToken ct = default) => _inner.GetCopilotSeatsAsync(e, ct);
             public Task<IReadOnlyList<OrgUsageItem>> GetOrgUsageAsync(string e, int y, int m, CancellationToken ct = default)
                 => throw new HttpRequestException("404 - endpoint not enabled for this enterprise");
+        }
+
+        /// <summary>Mock whose Copilot-seats call fails; everything else behaves normally.</summary>
+        private sealed class CopilotSeatsBrokenClient : IGitHubBillingClient
+        {
+            private readonly MockGitHubBillingClient _inner = new();
+            public Task<IReadOnlyList<EnterpriseLicenseUser>> GetEnterpriseUsersAsync(string e, CancellationToken ct = default) => _inner.GetEnterpriseUsersAsync(e, ct);
+            public Task<UserCreditUsage?> GetUsageForUserAsync(string e, string u, int y, int m, CancellationToken ct = default) => _inner.GetUsageForUserAsync(e, u, y, m, ct);
+            public Task<IReadOnlyList<CostCenter>> GetCostCentersAsync(string e, CancellationToken ct = default) => _inner.GetCostCentersAsync(e, ct);
+            public Task<IReadOnlyList<Budget>> GetBudgetsAsync(string e, CancellationToken ct = default) => _inner.GetBudgetsAsync(e, ct);
+            public Task<IReadOnlyList<OrgUsageItem>> GetOrgUsageAsync(string e, int y, int m, CancellationToken ct = default) => _inner.GetOrgUsageAsync(e, y, m, ct);
+            public Task<IReadOnlyList<CopilotSeat>> GetCopilotSeatsAsync(string e, CancellationToken ct = default)
+                => throw new HttpRequestException("403 - PAT lacks the scope for Copilot seat management");
         }
 
         private static SnapshotService Service(IDbContextFactory<BillingDbContext> f, EnterpriseRegistryService r, IGitHubBillingClient? client = null)
@@ -62,6 +76,61 @@ namespace GhcpCreditVisibility.Tests
                 ["Retention:Months"] = "6",
             }).Build();
             return new SnapshotService(new MockFactory(client), r, f, config, NullLogger<SnapshotService>.Instance, new GitHubRateLimitRegistry());
+        }
+
+        [Fact]
+        public async Task Snapshot_writes_copilot_seats_per_plan()
+        {
+            var f = NewFactory();
+            await Service(f, Registry(f)).RunAsync();
+
+            await using var db = await f.CreateDbContextAsync();
+            var seats = await db.EnterpriseCopilotSeats.ToListAsync();
+            Assert.NotEmpty(seats);
+            Assert.All(seats, s => Assert.True(s.Seats > 0));
+            Assert.All(seats, s => Assert.False(string.IsNullOrWhiteSpace(s.PlanType)));
+
+            // Seats must be FEWER than licence holders. When every seeded user implicitly held a seat
+            // the two were indistinguishable in demo mode, which is exactly how a 5.5x capacity error
+            // shipped looking plausible.
+            var enterprises = await db.Enterprises.Where(e => e.LicensedUserCount != null).ToListAsync();
+            foreach (var e in enterprises)
+            {
+                var seatTotal = seats.Where(s => s.EnterpriseId == e.Id).Sum(s => s.Seats);
+                if (seatTotal == 0) continue;
+                Assert.True(seatTotal < e.LicensedUserCount,
+                    $"'{e.Slug}': {seatTotal} seats should be fewer than {e.LicensedUserCount} licences");
+            }
+        }
+
+        /// <summary>At least one seeded enterprise must span two plans, or a mixed-plan capacity bug
+        /// is invisible in demo mode — which is how the original one survived review.</summary>
+        [Fact]
+        public async Task Mock_data_includes_a_mixed_plan_enterprise()
+        {
+            var f = NewFactory();
+            await Service(f, Registry(f)).RunAsync();
+
+            await using var db = await f.CreateDbContextAsync();
+            var byEnterprise = (await db.EnterpriseCopilotSeats.ToListAsync()).GroupBy(s => s.EnterpriseId);
+            Assert.Contains(byEnterprise, g => g.Select(s => s.PlanType).Distinct().Count() > 1);
+        }
+
+        /// <summary>
+        /// Seat collection is supplementary: a PAT without the scope must not fail a run whose
+        /// per-user numbers — the app's primary output — are already written.
+        /// </summary>
+        [Fact]
+        public async Task Copilot_seat_failure_does_not_fail_the_run()
+        {
+            var f = NewFactory();
+            await Service(f, Registry(f), new CopilotSeatsBrokenClient()).RunAsync();
+
+            await using var db = await f.CreateDbContextAsync();
+            Assert.NotEmpty(await db.UsageSnapshots.ToListAsync());          // primary output intact
+            Assert.Empty(await db.EnterpriseCopilotSeats.ToListAsync());     // seats absent, not faked
+            var runs = await db.SnapshotRuns.ToListAsync();
+            Assert.All(runs, r => Assert.NotEqual("Failed", r.Status));
         }
 
         [Fact]

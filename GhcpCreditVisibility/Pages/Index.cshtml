@@ -163,6 +163,34 @@ else if (!Model.SeesAll && Model.UserCount == 0)
             <div class="delta">Top: @(Model.TopUser.UserName ?? Model.TopUser.UserLogin) $@Model.TopUser.NetAmount.ToString("N2")</div>
         }
     </div>
+    @if (Model.PrimaryPool is not null)
+    {
+        var p = Model.PrimaryPool;
+        var poolPct = (int)Math.Round(p.PctUsed);
+        <div class="gh-kpi b5">
+            <div class="ic">🎟️</div>
+            <div class="label">Allowance pool <span title="Included AI credits for this enterprise this month, from @p.TotalSeats assigned Copilot seat(s): @string.Join(" + ", p.Plans.Where(x => x.CreditsPerSeat is not null).Select(x => $"{x.Seats} {x.PlanType} × {x.CreditsPerSeat:N0}")) credits. Copilot seats, NOT enterprise licence holders. Credits are POOLED across the enterprise, not per person, and do not carry over.">ⓘ</span></div>
+            <div class="val">@poolPct%</div>
+            @* The headline is the projection, not the raw percentage: 62% used means opposite things
+               on day 3 and day 28, and only the run rate distinguishes them. *@
+            @if (p.IsExhausted)
+            {
+                <div class="delta up" title="The included allowance is gone; further usage is billable.">Pool exhausted — usage now billable</div>
+            }
+            else if (p.ExhaustionDay is int day)
+            {
+                <div class="delta up" title="Projected from this month's run rate to date.">▲ empties ~@day @IndexModel.ShortMonth(Model.Year, Model.Month)</div>
+            }
+            else
+            {
+                <div class="delta down">on track — no overage projected</div>
+            }
+            @if (Model.AllowancePools.Count(x => x.IsComputable) > 1)
+            {
+                <div class="delta">@p.EnterpriseName — closest to its limit of @Model.AllowancePools.Count(x => x.IsComputable)</div>
+            }
+        </div>
+    }
     @if (Model.ShowGrossUsage)
     {
         <div class="gh-kpi b5">
@@ -377,6 +405,123 @@ else if (!Model.SeesAll && Model.UserCount == 0)
         </div>
     </div>
 </div>
+
+@* ALLOWANCE POOL — deliberately directly above Budgets, because the two are cause and effect.
+   A budget can read comfortably green while the pool is days from empty, and the pool emptying is
+   precisely what makes the budget's number start moving. Read top to bottom you get the warning
+   before the symptom. Rendered per enterprise and NEVER summed: each pool has its own ceiling. *@
+@if (Model.AllowancePools.Count > 0)
+{
+    <div class="gh-card">
+        <div class="ch">
+            <h2>Included allowance pool</h2>
+            <span class="hint">@Model.MonthLabel · day @Model.AllowancePools[0].DaysElapsed of @Model.AllowancePools[0].DaysInMonth</span>
+        </div>
+        <div class="gh-budgets">
+            @foreach (var p in Model.AllowancePools)
+            {
+                <div class="gh-budget">
+                    <div class="top">
+                        <span class="name">
+                            🎟️ @p.EnterpriseName
+                            @if (!p.IsComputable)
+                            {
+                                <span class="gh-badge" title="Either no Copilot seat counts have been collected yet, every seat is on a plan this deployment does not price, or this month's rows predate the gross-quantity column. Not zero — unknown.">Not available</span>
+                            }
+                            else if (p.IsExhausted)
+                            {
+                                <span class="gh-badge over">Pool exhausted</span>
+                            }
+                            else if (p.IsProjectedToExceed)
+                            {
+                                <span class="gh-badge critical">Projected to exceed</span>
+                            }
+                            else
+                            {
+                                <span class="gh-badge ok">On track</span>
+                            }
+                            @if (p.HasIncompleteData)
+                            {
+                                <span class="gh-badge warn" title="Some rows this month carry no gross quantity, so consumption is understated. Figures are a lower bound.">Partial data</span>
+                            }
+                        </span>
+                        @if (p.IsComputable)
+                        {
+                            <span style="font-variant-numeric:tabular-nums;font-weight:700;">
+                                @p.Consumed!.Value.ToString("N0") <span style="color:#98a2b3;font-weight:500">/ @p.Capacity!.Value.ToString("N0") credits</span>
+                            </span>
+                        }
+                    </div>
+                    @if (p.IsComputable)
+                    {
+                        var pct = Math.Min(100, (int)Math.Round(p.PctUsed));
+                        var pace = Math.Min(100, (int)Math.Round(p.PctElapsed));
+                        <div class="meter" style="position:relative;">
+                            <i class="fill-@p.Level" style="width:@(pct)%"></i>
+                            @* Pace marker: how far through the month we are. Fill past the marker means
+                               burning faster than the month is passing — the whole point of the card. *@
+                            <i style="position:absolute;top:-2px;bottom:-2px;left:@(pace)%;width:2px;background:#66707d;border-radius:0;"
+                               title="@pace% of the month has elapsed"></i>
+                        </div>
+                        <div class="sub">
+                            <span>@p.PctUsed.ToString("N0")% used · pace marker at @pace%</span>
+                            <span>@(p.Remaining >= 0 ? $"{p.Remaining:N0} credits remaining" : $"{Math.Abs(p.Remaining ?? 0):N0} credits over")</span>
+                        </div>
+                        <div class="gh-note mt-1 mb-0">
+                            @* Shows its working per plan. Business seats include 1,900 credits and
+                               Enterprise 3,900, so one seat count and one rate cannot describe a
+                               mixed enterprise — and these are COPILOT SEATS, not licence holders. *@
+                            @string.Join(" + ", p.Plans.Where(x => x.CreditsPerSeat is not null)
+                                .Select(x => $"{x.Seats} {x.PlanType} × {x.CreditsPerSeat:N0}"))
+                            credits · pooled across the enterprise, not per person
+                            @if (p.RunRatePerDay is decimal rate && rate > 0)
+                            {
+                                <text> · burning @rate.ToString("N0") credits/day</text>
+                                @if (p.ProjectedOverageCredits is decimal over)
+                                {
+                                    <text> · projected @over.ToString("N0") credits over (~$@((over * 0.01m).ToString("N2")) billable)</text>
+                                }
+                            }
+                        </div>
+                        @if (p.HasUnpricedPlans)
+                        {
+                            @* Never silently excluded: dropping unpriced seats understates capacity,
+                               which overstates the percentage used and manufactures false alarms. *@
+                            <div class="gh-note mt-1 mb-0" style="color:#d9822b">
+                                @p.UnknownPlanSeats seat(s) on an unrecognised plan (@string.Join(", ", p.UnknownPlanTypes))
+                                are NOT counted in this capacity — set <code>Allowance:CreditsPerSeat:@p.UnknownPlanTypes.First()</code> to include them.
+                            </div>
+                        }
+                    }
+                    else
+                    {
+                        @* Three genuinely different causes; naming which one avoids a support call. *@
+                        <div class="sub"><span>
+                            @if (p.TotalSeats == 0)
+                            {
+                                <text>No Copilot seats recorded yet — the snapshot job collects them on its next run.</text>
+                            }
+                            else if (p.HasUnpricedPlans && p.Capacity is null)
+                            {
+                                <text>All @p.TotalSeats seat(s) are on an unrecognised plan (@string.Join(", ", p.UnknownPlanTypes)); set <code>Allowance:CreditsPerSeat</code> for it.</text>
+                            }
+                            else
+                            {
+                                <text>This month's usage rows carry no gross quantity, so consumption cannot be computed.</text>
+                            }
+                        </span></div>
+                    }
+                </div>
+            }
+        </div>
+        <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
+            <div class="gh-note mb-0">
+                Included credits reset monthly and do not carry over. Usage beyond the pool is billed at
+                $0.01 per credit — which is what the <strong>Total spend</strong> figure above measures.
+            </div>
+        </div>
+    </div>
+}
 
 <!-- BUDGETS (bottom): exceptions-first at scale, everything at small scale -->
 @if (Model.Budgets.Count > 0)

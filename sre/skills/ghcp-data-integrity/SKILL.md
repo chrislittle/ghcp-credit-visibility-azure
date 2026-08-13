@@ -299,6 +299,38 @@ a CLOSED month is a real finding.
 - Roughly 30x the row count of `UsageSnapshots` — that is the table working as designed. See
   `ghcp-sql-deep-dive` for the storage implications.
 
+## Check 7 — Copilot seats (`EnterpriseCopilotSeats`)
+
+Assigned Copilot seats per plan, refreshed every run from
+`GET /enterprises/{ent}/copilot/billing/seats`. Sole input to the dashboard's included-allowance pool.
+
+> **Seats are NOT licences, and this distinction has already caused a real defect.**
+> `Enterprise.LicensedUserCount` comes from `consumed-licenses` and counts GHEC licence HOLDERS — a
+> larger, different population. A live enterprise showed **8 licences against 3 Copilot seats**.
+> Capacity was briefly computed from licences and came out **5.5x too high**, in the direction that
+> makes an enterprise about to exhaust its pool look comfortable. If you ever find yourself reaching
+> for `LicensedUserCount` to explain a pool figure, stop: that is the bug, not the explanation.
+
+```sql
+SELECT e.Slug, s.PlanType, s.Seats, s.SnapshotUtc, e.LicensedUserCount AS ghec_licences
+FROM EnterpriseCopilotSeats s JOIN Enterprises e ON e.Id = s.EnterpriseId
+ORDER BY e.Slug, s.PlanType;
+```
+
+What is normal, and what is not:
+
+- **Seats < licences** is expected. Seats ≥ licences is worth a look, not necessarily wrong.
+- **Several rows per enterprise** means a mixed-plan enterprise. Business seats include 1,900 credits
+  and Enterprise 3,900, so capacity is a sum over plans — never seats × one rate.
+- **A `PlanType` the app does not price** is a FINDING, not corruption. GitHub introduced a plan;
+  those seats are excluded from capacity and the dashboard says so. Fix by setting
+  `Allowance:CreditsPerSeat:<plan>`, not by editing data.
+- **No rows for an enabled enterprise** means collection failed or has not run. Look for a
+  `CopilotSeatsUnavailable` event — the call is non-fatal by design, so the run still reports
+  success. The pool shows "not available"; it must never fall back to a licence-derived number.
+- **`SnapshotUtc` far behind the last run** means seat collection has been failing while the rest of
+  the run succeeded. Same event to look for.
+
 ## Check 6 — Organization attribution (`OrgUsageSnapshots`)
 
 A third usage table, filled from GitHub's GENERAL usage report — one call covers a whole month and

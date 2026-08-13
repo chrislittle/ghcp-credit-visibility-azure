@@ -50,6 +50,27 @@ namespace GhcpCreditVisibility.Services
             return users;
         }
 
+        public async Task<IReadOnlyList<CopilotSeat>> GetCopilotSeatsAsync(string enterprise, CancellationToken ct = default)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(enterprise);
+            const int perPage = 100;
+            var page = 1;
+            var seats = new List<CopilotSeat>();
+
+            // Same pagination shape as GetEnterpriseUsersAsync above. Cost is one call per enterprise
+            // per run for any enterprise under 100 seats, which is the common case.
+            while (true)
+            {
+                var uri = $"/enterprises/{Uri.EscapeDataString(enterprise)}/copilot/billing/seats?per_page={perPage}&page={page}";
+                var result = await SendAsync<CopilotSeatsResponse>(uri, ct);
+                if (result?.Seats is not { Count: > 0 } pageSeats) break;
+                seats.AddRange(pageSeats);
+                if (pageSeats.Count < perPage) break;
+                page++;
+            }
+            return seats;
+        }
+
         public async Task<UserCreditUsage?> GetUsageForUserAsync(string enterprise, string user, int year, int month, CancellationToken ct = default)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(enterprise);

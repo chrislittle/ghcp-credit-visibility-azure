@@ -468,6 +468,172 @@ namespace GhcpCreditVisibility.Services
             return rows.Sum();
         }
 
+        // ── Included-allowance pool ─────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// One enterprise's included AI-credit allowance and how much of it this month has burned.
+        ///
+        /// Denominated in CREDITS, not dollars — the pool is a credit entitlement, and converting it
+        /// to money would imply a billable amount that does not exist until the pool is exhausted.
+        /// The only dollar figure here is <see cref="ProjectedOverageCredits"/>'s cost, which is
+        /// genuinely billable.
+        /// </summary>
+        /// <summary>Seats on one Copilot plan, and what each is worth. <see cref="CreditsPerSeat"/>
+        /// is null when the plan is not priced in configuration — those seats are real and must be
+        /// reported, but cannot be added to capacity.</summary>
+        public sealed record SeatPlan(string PlanType, int Seats, decimal? CreditsPerSeat)
+        {
+            public decimal? Credits => CreditsPerSeat is decimal c ? Seats * c : null;
+        }
+
+        /// <param name="Capacity">Null when no priced seats are known — collection has not run, failed,
+        /// or every seat is on an unpriced plan. NEVER derived from the GHEC licence count.</param>
+        /// <param name="Consumed">Null when no row carried a GrossQuantity — "not captured", NOT zero.</param>
+        /// <param name="Plans">Per-plan seat breakdown, priced and unpriced alike.</param>
+        public sealed record AllowancePool(
+            long EnterpriseId,
+            string EnterpriseName,
+            IReadOnlyList<SeatPlan> Plans,
+            decimal? Capacity,
+            decimal? Consumed,
+            bool HasIncompleteData,
+            int DaysElapsed,
+            int DaysInMonth,
+            decimal? RunRatePerDay,
+            decimal? ProjectedMonthEnd,
+            int? ExhaustionDay)
+        {
+            /// <summary>Total assigned Copilot seats, priced or not. NOT the enterprise licence count.</summary>
+            public int TotalSeats => Plans.Sum(p => p.Seats);
+
+            /// <summary>Seats on a plan configuration does not price. Surfaced rather than dropped:
+            /// silently excluding them understates capacity, which OVERSTATES the percentage used and
+            /// manufactures false alarms.</summary>
+            public int UnknownPlanSeats => Plans.Where(p => p.CreditsPerSeat is null).Sum(p => p.Seats);
+            public IReadOnlyList<string> UnknownPlanTypes =>
+                Plans.Where(p => p.CreditsPerSeat is null).Select(p => p.PlanType).ToList();
+            public bool HasUnpricedPlans => UnknownPlanSeats > 0;
+
+            public bool IsComputable => Capacity is > 0 && Consumed is not null;
+            public double PctUsed => IsComputable ? (double)(Consumed!.Value / Capacity!.Value) * 100.0 : 0;
+            /// <summary>Where the month is, as a percentage — the pace marker the meter compares against.
+            /// 60% burned on day 3 and on day 28 are opposite situations; the raw figure cannot say which.</summary>
+            public double PctElapsed => DaysInMonth > 0 ? DaysElapsed / (double)DaysInMonth * 100.0 : 0;
+            public decimal? Remaining => IsComputable ? Capacity!.Value - Consumed!.Value : null;
+            public bool IsExhausted => IsComputable && Consumed!.Value >= Capacity!.Value;
+            public bool IsProjectedToExceed => !IsExhausted && IsComputable && ProjectedMonthEnd > Capacity;
+            public decimal? ProjectedOverageCredits =>
+                IsComputable && ProjectedMonthEnd > Capacity ? ProjectedMonthEnd - Capacity : null;
+            /// <summary>Matches the budget meter's level classes so the two read as siblings.</summary>
+            public string Level => !IsComputable ? "ok" : IsExhausted ? "over" : IsProjectedToExceed ? "critical" : "ok";
+        }
+
+        /// <summary>
+        /// The included-allowance pool per enterprise for the CURRENT month.
+        ///
+        /// Current month only, deliberately. A burn-down of a closed month has nothing to project, and
+        /// <see cref="EnterpriseCopilotSeat"/> holds CURRENT seat counts with no history — using
+        /// today's seats to compute a past month's capacity would be quietly wrong. For a closed
+        /// month, any net spend at all already proves the pool was exhausted.
+        ///
+        /// Capacity comes from ASSIGNED COPILOT SEATS, summed per plan. It must never fall back to
+        /// <see cref="Enterprise.LicensedUserCount"/>: that is the GHEC licence count, a larger and
+        /// different population (8 licences against 3 seats on a live enterprise), and sizing the
+        /// allowance from it overstated capacity 5.5x. Overstatement is the dangerous direction — an
+        /// enterprise about to exhaust its pool renders as comfortable — so when seats are unknown
+        /// this reports "not computable" rather than substituting a number that is merely available.
+        ///
+        /// ENTERPRISE-GRAIN ONLY: the pool is a whole-enterprise figure that cannot be narrowed to a
+        /// cost center, exactly like the organization rollup. Cost-center managers get nothing.
+        /// </summary>
+        /// <param name="creditsPerSeatByPlan">Included credits per seat, keyed by GitHub's
+        /// <c>plan_type</c> ("business" 1900, "enterprise" 3900). A plan absent from this map is
+        /// reported as unpriced rather than dropped from the sum.</param>
+        public async Task<IReadOnlyList<AllowancePool>> GetAllowancePoolsAsync(
+            int year, int month, UserScope scope,
+            IReadOnlyDictionary<string, decimal> creditsPerSeatByPlan, DateTime asOfUtc, CancellationToken ct = default)
+        {
+            if (creditsPerSeatByPlan.Count == 0) return Array.Empty<AllowancePool>();
+            if (year != asOfUtc.Year || month != asOfUtc.Month) return Array.Empty<AllowancePool>();
+            if (!scope.HasEnterpriseRead) return Array.Empty<AllowancePool>();
+
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+            var entQuery = db.Enterprises.Where(e => e.Slug != Enterprise.BootstrapPlaceholderSlug);
+            var allowed = scope.EnterpriseReadFilter();
+            if (allowed is not null)
+            {
+                if (allowed.Count == 0) return Array.Empty<AllowancePool>();
+                var allowedIds = allowed.ToList();
+                entQuery = entQuery.Where(e => allowedIds.Contains(e.Id));
+            }
+            var enterprises = await entQuery.ToListAsync(ct);
+            if (enterprises.Count == 0) return Array.Empty<AllowancePool>();
+
+            var entIds = enterprises.Select(e => e.Id).ToList();
+
+            // Whole-enterprise consumption: no cost-center narrowing, because the pool IS the whole
+            // enterprise and a partial sum would understate how close it is to exhaustion. Only rows
+            // metered in AI CREDITS count — mixing unit types is how a credit total silently absorbs
+            // a quantity measured in something else.
+            var rows = await db.UsageSnapshots
+                .Where(x => x.Year == year && x.Month == month && entIds.Contains(x.EnterpriseId))
+                .Where(x => x.UnitType == UsageUnitTypes.AiCredits)
+                .Select(x => new { x.EnterpriseId, x.GrossQuantity })
+                .ToListAsync(ct);
+
+            var seatRows = await db.EnterpriseCopilotSeats
+                .Where(x => entIds.Contains(x.EnterpriseId))
+                .Select(x => new { x.EnterpriseId, x.PlanType, x.Seats })
+                .ToListAsync(ct);
+
+            var daysInMonth = DateTime.DaysInMonth(year, month);
+            var daysElapsed = Math.Clamp(asOfUtc.Day, 1, daysInMonth);
+
+            var pools = new List<AllowancePool>();
+            foreach (var e in enterprises.OrderBy(e => e.DisplayName ?? e.Slug))
+            {
+                var mine = rows.Where(r => r.EnterpriseId == e.Id).ToList();
+
+                // NULL GrossQuantity means "not captured" (rows written before the column existed), and
+                // must never be read as zero — that would render a busy enterprise as an untouched pool.
+                var captured = mine.Where(r => r.GrossQuantity is not null).Select(r => r.GrossQuantity!.Value).ToList();
+                decimal? consumed = mine.Count > 0 && captured.Count == 0 ? null : captured.Sum();
+                var incomplete = mine.Count > 0 && captured.Count > 0 && captured.Count < mine.Count;
+
+                // Capacity from ASSIGNED SEATS, per plan. A plan the map does not price contributes
+                // nothing to the sum but IS carried in the breakdown, so the card can say "N seats on
+                // plan X are not counted" instead of quietly returning a capacity that is too small.
+                var plans = seatRows
+                    .Where(s => s.EnterpriseId == e.Id)
+                    .OrderByDescending(s => s.Seats).ThenBy(s => s.PlanType)
+                    .Select(s => new SeatPlan(
+                        s.PlanType,
+                        s.Seats,
+                        creditsPerSeatByPlan.TryGetValue(s.PlanType, out var rate) ? rate : null))
+                    .ToList();
+
+                var pricedCredits = plans.Where(p => p.Credits is not null).Sum(p => p.Credits!.Value);
+                decimal? capacity = pricedCredits > 0 ? pricedCredits : null;
+
+                decimal? runRate = consumed is decimal c && daysElapsed > 0 ? c / daysElapsed : null;
+                decimal? projected = runRate is decimal r ? r * daysInMonth : null;
+                int? exhaustionDay = null;
+                if (capacity is decimal cap && runRate is decimal rate && rate > 0)
+                {
+                    var day = (int)Math.Ceiling(cap / rate);
+                    // Only meaningful if it lands inside this month; beyond that the pool simply holds.
+                    if (day <= daysInMonth) exhaustionDay = Math.Max(day, daysElapsed);
+                }
+
+                pools.Add(new AllowancePool(
+                    e.Id, string.IsNullOrWhiteSpace(e.DisplayName) ? e.Slug : e.DisplayName!,
+                    plans, capacity, consumed, incomplete,
+                    daysElapsed, daysInMonth, runRate, projected, exhaustionDay));
+            }
+            return pools;
+        }
+
         public async Task<IReadOnlyList<TrendPoint>> GetTrendAsync(int months, UserScope scope, CancellationToken ct = default)
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct);

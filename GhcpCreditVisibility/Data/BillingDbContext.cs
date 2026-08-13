@@ -37,6 +37,11 @@ namespace GhcpCreditVisibility.Data
         /// administering this deployment and seeing every cost center's spend are different rights,
         /// and conflating them forced report consumers to be made administrators.</summary>
         public DbSet<PrincipalEnterpriseGrant> PrincipalEnterpriseGrants => Set<PrincipalEnterpriseGrant>();
+        /// <summary>Assigned Copilot seats per plan, refreshed every snapshot run. The ONLY correct
+        /// input to the included-allowance pool — <see cref="Enterprise.LicensedUserCount"/> counts a
+        /// different population (see <see cref="EnterpriseCopilotSeat"/>).</summary>
+        public DbSet<EnterpriseCopilotSeat> EnterpriseCopilotSeats => Set<EnterpriseCopilotSeat>();
+
         public DbSet<AppSetting> AppSettings => Set<AppSetting>();
         public DbSet<BudgetSnapshot> BudgetSnapshots => Set<BudgetSnapshot>();
         public DbSet<CostCenterDirectoryEntry> CostCenterDirectory => Set<CostCenterDirectoryEntry>();
@@ -168,6 +173,15 @@ namespace GhcpCreditVisibility.Data
                 e.Property(x => x.PrincipalObjectId).HasMaxLength(64).IsRequired();
                 e.Property(x => x.PrincipalDisplayName).HasMaxLength(255);
                 e.Property(x => x.ModifiedBy).HasMaxLength(255);
+            });
+
+            b.Entity<EnterpriseCopilotSeat>(e =>
+            {
+                e.HasKey(x => x.Id);
+                // One row per (enterprise, plan). Both columns are non-nullable, so this needs none
+                // of the nullable-key care the grants table above required.
+                e.HasIndex(x => new { x.EnterpriseId, x.PlanType }).IsUnique();
+                e.Property(x => x.PlanType).HasMaxLength(64).IsRequired();
             });
 
             b.Entity<PrincipalEnterpriseGrant>(e =>
@@ -441,6 +455,39 @@ namespace GhcpCreditVisibility.Data
 
         public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
         public string? ModifiedBy { get; set; }
+    }
+
+    /// <summary>
+    /// How many assigned Copilot seats an enterprise has ON EACH PLAN, as of the last snapshot run.
+    ///
+    /// This exists because <see cref="Enterprise.LicensedUserCount"/> is NOT a Copilot seat count —
+    /// it comes from <c>consumed-licenses</c> and counts GHEC licence holders, a different and larger
+    /// population (a live enterprise showed 8 licences against 3 Copilot seats). Sizing the included
+    /// allowance from licences overstated capacity 5.5x, and overstatement is the dangerous direction:
+    /// an enterprise about to exhaust its credit pool renders as comfortable.
+    ///
+    /// Split BY PLAN because the included allowance differs — Copilot Business includes 1,900 credits
+    /// per seat, Copilot Enterprise 3,900 — so a mixed enterprise's capacity is a sum over plans, not
+    /// one multiplication.
+    ///
+    /// CURRENT STATE ONLY, no history: the pool is a current-month figure, and a historical seat
+    /// series would be a second thing to keep correct with no reader for it. Rows are replaced
+    /// wholesale per enterprise per run rather than upserted, matching how
+    /// <see cref="OrgUsageSnapshot"/> replaces a month.
+    /// </summary>
+    public sealed class EnterpriseCopilotSeat
+    {
+        public long Id { get; set; }
+        public long EnterpriseId { get; set; }
+
+        /// <summary>GitHub's own <c>plan_type</c>, stored verbatim (lower-cased): "business",
+        /// "enterprise", or whatever GitHub introduces next. NOT mapped to an enum — an unrecognised
+        /// plan must be RECORDED so it can be surfaced, never silently dropped from the capacity sum.
+        /// Same reasoning as <see cref="BudgetScopes.Unknown"/>.</summary>
+        public string PlanType { get; set; } = "";
+
+        public int Seats { get; set; }
+        public DateTime SnapshotUtc { get; set; } = DateTime.UtcNow;
     }
 
     /// <summary>Simple admin-editable key/value app settings (e.g. organization display name).</summary>

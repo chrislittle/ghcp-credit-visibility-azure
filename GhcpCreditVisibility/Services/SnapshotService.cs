@@ -272,7 +272,73 @@ namespace GhcpCreditVisibility.Services
 
                 // Remembered so the admin console can estimate backfill cost (users x months) without
                 // calling GitHub — pages in this app never do.
+                //
+                // NOTE what this is NOT: a Copilot seat count. These are GHEC LICENCE holders, and a
+                // person can hold a licence with no Copilot seat (a live enterprise showed 8 licences
+                // against 3 seats). Anything sizing the included-credit allowance must use the seat
+                // counts collected below instead — see EnterpriseCopilotSeat.
                 await _registry.SetLicensedUserCountAsync(enterprise.Id, users.Count, ct);
+
+                // ── Copilot seats, per plan ──────────────────────────────────────────────────────
+                // One call per enterprise per run (paginated past 100 seats). Grouped by plan because
+                // included credits differ — Business 1,900 per seat, Enterprise 3,900 — so a mixed
+                // enterprise's capacity is a sum over plans.
+                //
+                // Non-fatal, exactly like the organization block further down: an enterprise not on
+                // the endpoint, or a PAT without the scope, must not fail a run whose per-user
+                // numbers are the app's primary output. On failure the PREVIOUS seat rows are left
+                // untouched (the delete lives inside the try), so the pool keeps rendering from the
+                // last known good counts rather than blanking on one bad call.
+                try
+                {
+                    var seats = await client.GetCopilotSeatsAsync(enterprise.Slug, ct);
+                    var byPlan = seats
+                        .GroupBy(s => string.IsNullOrWhiteSpace(s.PlanType)
+                            ? "unknown"
+                            : s.PlanType!.Trim().ToLowerInvariant())
+                        .Select(g => new { Plan = g.Key, Count = g.Count() })
+                        .ToList();
+
+                    // Replace-per-enterprise rather than upsert: one response IS the whole seat list,
+                    // so a plan that disappears must vanish from the table rather than linger.
+                    var existingSeatRows = db.EnterpriseCopilotSeats.Where(x => x.EnterpriseId == enterprise.Id);
+                    if (db.Database.IsRelational())
+                    {
+                        await existingSeatRows.ExecuteDeleteAsync(ct);
+                    }
+                    else
+                    {
+                        db.EnterpriseCopilotSeats.RemoveRange(await existingSeatRows.ToListAsync(ct));
+                        await db.SaveChangesAsync(ct);
+                    }
+
+                    foreach (var p in byPlan)
+                    {
+                        db.EnterpriseCopilotSeats.Add(new EnterpriseCopilotSeat
+                        {
+                            EnterpriseId = enterprise.Id,
+                            PlanType = p.Plan,
+                            Seats = p.Count,
+                            SnapshotUtc = now
+                        });
+                    }
+                    await db.SaveChangesAsync(ct);
+                    _logger.LogInformation("Copilot seats for '{Slug}': {Total} across {Plans} plan(s).",
+                        enterprise.Slug, seats.Count, byPlan.Count);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Non-fatal must not mean invisible — same event shape as OrgUsageUnavailable so
+                    // one alert rule can cover both.
+                    _logger.LogWarning(ex, "Copilot seat counts unavailable for '{Slug}'; usage data is unaffected.", enterprise.Slug);
+                    _telemetry?.TrackEvent("CopilotSeatsUnavailable",
+                        new Dictionary<string, string>
+                        {
+                            ["error"] = ex.Message,
+                            ["instanceId"] = InstanceId,
+                            ["enterprise"] = enterprise.Slug,
+                        });
+                }
 
                 var written = 0;
                 foreach (var u in users)
