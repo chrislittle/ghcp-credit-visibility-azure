@@ -1,17 +1,13 @@
 # GitHub Copilot AI Credit Visibility
 
 **See exactly where your organization's GitHub Copilot AI-credit spend is going** — per user, per
-cost center, per AI model — with multi-month trends, budget tracking, and self-service
-Entra-group-based access, deployed privately in **your own** Azure subscription.
+cost center, per AI model — with multi-month trends, an included-allowance burn-down that projects
+when billing starts, budget tracking, and self-service Entra-group-based access, deployed privately
+in **your own** Azure subscription.
 
 <p align="left">
   <img src="docs/images/dashboard.png" alt="Usage dashboard screenshot" width="800" />
 </p>
-
-> Built for platform/IT teams who've rolled out GitHub Copilot and now need to answer "who's
-> using it, how much is it costing, and is any team about to blow through budget?" — without
-> re-pivoting a CSV export every month, and without making every manager an enterprise billing
-> admin just to see their own team's number.
 
 ---
 
