@@ -12,13 +12,15 @@ namespace GhcpCreditVisibility.Pages
         private readonly IUserScopeResolver _scopeResolver;
         private readonly BudgetService _budgets;
         private readonly IConfiguration _config;
+        private readonly IAppAdminChecker _admin;
 
-        public IndexModel(UsageQueryService query, IUserScopeResolver scopeResolver, BudgetService budgets, IConfiguration config)
+        public IndexModel(UsageQueryService query, IUserScopeResolver scopeResolver, BudgetService budgets, IConfiguration config, IAppAdminChecker admin)
         {
             _query = query;
             _scopeResolver = scopeResolver;
             _budgets = budgets;
             _config = config;
+            _admin = admin;
         }
 
         // Query-string driven controls (all optional; sensible defaults).
@@ -61,6 +63,56 @@ namespace GhcpCreditVisibility.Pages
         public int Year { get; private set; }
         public int Month { get; private set; }
         public bool SeesAll { get; private set; }
+
+        /// <summary>
+        /// The caller administers this deployment but has been granted no Enterprise Reader access,
+        /// so they legitimately see nothing. Distinguished from "no data yet" because the two look
+        /// identical on screen and lead to opposite conclusions — one is a grant to make, the other
+        /// is a job that has not run. Since Admin stopped implying see-all, this is the most likely
+        /// reason for an otherwise-inexplicable empty dashboard.
+        /// </summary>
+        public bool IsAdminWithoutReadAccess { get; private set; }
+
+        /// <summary>
+        /// Included AI credits per seat per month, keyed by GitHub's <c>plan_type</c>. Overridable via
+        /// <c>Allowance:CreditsPerSeat:&lt;plan&gt;</c>; an empty section hides the pool entirely.
+        ///
+        /// A map rather than one number because the two plans differ and an enterprise may hold both,
+        /// which is precisely what a single constant got wrong. GitHub's own
+        /// <c>total_monthly_quota</c> (ai_credit CSV export) would eventually supersede this, but the
+        /// per-seat <c>plan_type</c> makes that no longer urgent.
+        /// </summary>
+        public static readonly IReadOnlyDictionary<string, decimal> DefaultCreditsPerSeatByPlan =
+            new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["business"] = 1900m,
+                ["enterprise"] = 3900m,
+            };
+
+        /// <summary>Config-bound rates, falling back to <see cref="DefaultCreditsPerSeatByPlan"/> when
+        /// the section is absent — so an existing deployment needs no configuration change. Comparison
+        /// is case-insensitive: GitHub returns lowercase plan names, but nobody should have to know
+        /// that when writing appsettings.</summary>
+        private IReadOnlyDictionary<string, decimal> CreditsPerSeatByPlan()
+        {
+            var section = _config.GetSection("Allowance:CreditsPerSeat");
+            if (!section.Exists()) return DefaultCreditsPerSeatByPlan;
+            var map = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            foreach (var child in section.GetChildren())
+                if (decimal.TryParse(child.Value, out var v) && v > 0) map[child.Key] = v;
+            return map;
+        }
+
+        /// <summary>One included-allowance pool per visible enterprise; empty when not applicable.</summary>
+        public IReadOnlyList<UsageQueryService.AllowancePool> AllowancePools { get; private set; }
+            = Array.Empty<UsageQueryService.AllowancePool>();
+
+        /// <summary>The pool the KPI tile speaks for: the one closest to exhaustion. Pools are never
+        /// summed across enterprises — each has its own ceiling and its own overage, and a total would
+        /// let one enterprise's headroom mask another's breach.</summary>
+        public UsageQueryService.AllowancePool? PrimaryPool =>
+            AllowancePools.Where(p => p.IsComputable).OrderByDescending(p => p.PctUsed).FirstOrDefault();
+
         public string ScopeLabel { get; private set; } = "";
         /// <summary>Full resolved cost-center list for the pill's tooltip when the label is summarized (null otherwise).</summary>
         public string? ScopeDetail { get; private set; }
@@ -139,6 +191,11 @@ namespace GhcpCreditVisibility.Pages
 
             var scope = await _scopeResolver.ResolveAsync(User, ct);
             SeesAll = scope.SeesAll;
+            // Only worth asking when the scope is genuinely empty — an admin who also holds a grant
+            // sees data and needs no explanation, and this costs a DB round trip.
+            IsAdminWithoutReadAccess =
+                !scope.SeesAll && scope.ReadAllEnterpriseIds.Count == 0 && scope.CostCenters.Count == 0
+                && await _admin.IsAdminAsync(User, ct);
             var scopeDesc = await _query.GetScopeDescriptionAsync(scope, ct);
             ScopeLabel = scopeDesc.Label;
             ScopeDetail = scopeDesc.Detail;
@@ -170,6 +227,12 @@ namespace GhcpCreditVisibility.Pages
 
             CostCenters = await _query.GetCostCenterTotalsAsync(Year, Month, scope, ct);
             Models = await _query.GetModelTotalsAsync(Year, Month, scope, ct);
+
+            // Included-allowance pool. Returns empty for a past month, for cost-center-scoped viewers,
+            // and when the per-seat allowance is configured to 0 — each is a deliberate "not
+            // applicable" rather than an error, so the card simply does not render.
+            AllowancePools = await _query.GetAllowancePoolsAsync(
+                Year, Month, scope, CreditsPerSeatByPlan(), DateTime.UtcNow, ct);
 
             // Search + pagination happen entirely in the database (GROUP BY / WHERE / ORDER BY /
             // OFFSET-FETCH) — only the current page of rows is ever materialized here, regardless of

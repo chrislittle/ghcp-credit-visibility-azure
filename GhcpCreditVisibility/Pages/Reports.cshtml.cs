@@ -133,10 +133,14 @@ namespace GhcpCreditVisibility.Pages
 
             if (View != "table") View = "chart";
 
-            // Organization is admin-only (see ShowOrganizationDim). Validating here — not just
-            // hiding the dropdown option — is what actually enforces it: a hidden <option> stops
-            // nobody from requesting ?Dim=organization by hand.
-            ShowOrganizationDim = scope.SeesAll;
+            // Organization needs ENTERPRISE-GRAIN read (see ShowOrganizationDim). Validating here —
+            // not just hiding the dropdown option — is what actually enforces it: a hidden <option>
+            // stops nobody from requesting ?Dim=organization by hand.
+            //
+            // This only decides whether the dimension is OFFERED. Which enterprises' organizations
+            // appear is enforced inside UsageQueryService.BuildOrgSeriesAsync, because the scope here
+            // may cover several enterprises and this flag cannot express "these but not those".
+            ShowOrganizationDim = scope.HasEnterpriseRead;
             if (string.Equals(Dim, "organization", StringComparison.OrdinalIgnoreCase) && !ShowOrganizationDim)
                 Dim = "costcenter";
 

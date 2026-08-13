@@ -75,21 +75,22 @@ This app closes that gap:
 
 | Usage dashboard — consumption vs. billable spend | Reports — cost centers across enterprises |
 |---|---|
-| ![Usage dashboard: total spend annotated with how much the included allowance covered, a gross-usage KPI, and per-user net and gross columns](docs/images/dashboard.png) | ![Reports page breaking spend down by cost center across enterprises, with the enterprise filter](docs/images/reports.png) |
+| ![Usage dashboard: total spend annotated with how much the included allowance covered, an allowance-pool KPI naming the enterprise closest to its ceiling, and a per-enterprise pool meter above the budgets](docs/images/dashboard.png) | ![Reports page breaking spend down by cost center across enterprises, with the enterprise filter](docs/images/reports.png) |
 
-| Budgets — enterprise, cost-center and organization scopes | Reports — spend by GitHub organization |
+| Budgets &amp; allowance — the pool burn-down above every budget | Reports — spend by GitHub organization |
 |---|---|
-| ![Budgets page grouped by enterprise, showing enterprise-wide, cost-center and organization budgets, with hard-stop budgets flagged](docs/images/budgets.png) | ![Reports broken down by GitHub organization, including an Unattributed row for enterprise-level charges that belong to no organization](docs/images/reports-organization.png) |
+| ![Budgets and allowance page: the included-allowance pool first, with a burn-down chart of consumed credits against an even-burn reference, a projection to the day the pool empties and the capacity ceiling, then the budgets grouped by enterprise with hard-stop budgets flagged](docs/images/budgets.png) | ![Reports broken down by GitHub organization, including an Unattributed row for enterprise-level charges that belong to no organization](docs/images/reports-organization.png) |
 
-| Admin console — enterprise registry + access mappings | |
+| Admin console — enterprise registry + the three access roles | |
 |---|---|
-| ![Admin console with the GitHub enterprises registry — per-enterprise snapshot and history controls — the two-level access model, and principal-to-cost-center mappings](docs/images/admin-mappings.png) | |
+| ![Admin console with the GitHub enterprises registry — per-enterprise snapshot and history controls — the three-role access guide, and the cost center, Enterprise reader and administrator grants](docs/images/admin-mappings.png) | |
 
 *(Screenshots above were captured from a local run against the built-in synthetic demo data — two
 mock enterprises, **Contoso** and **Fabrikam**, seeded automatically; note the enterprise dropdown,
 the `Engineering · Contoso` vs `Engineering · Fabrikam` disambiguation, the same users appearing
 once per enterprise, and the admin console's enterprise registry. Worth spotting: the dashboard's
-`covered by allowance` annotation under Total spend, the `⛔ HARD STOP` badges on budgets that
+`covered by allowance` annotation under Total spend, the allowance pool's **pace marker** — fill past
+it means burning faster than the month is passing — the `⛔ HARD STOP` badges on budgets that
 **block** usage rather than alerting, and the `Unattributed` row in the organization report —
 enterprise-level charges that belong to no organization, surfaced rather than dropped so the
 breakdown still reconciles. Every screenshot is the **default configuration** — nothing here needs a
@@ -112,7 +113,8 @@ your organization's actual enterprises, users, cost centers, and spend.)*
   organization, so this pulls the general usage report as well (one call per enterprise per month)
   to break spend down by organization and repository, with real per-day dates. Past months
   backfill themselves automatically, a few per snapshot cycle, as far back as your retention
-  window allows. Admin-only: that report has no cost center, so it cannot be scoped to a team.
+  window allows. Needs the **Enterprise reader** role: that report has no cost center, so it cannot
+  be scoped to a team.
 - **Opt-in per-user history backfill** — per-user data is normally collected forward from the day
   you deploy, because GitHub's AI-credit report costs *one request per user per month*. When you
   want the history anyway, **Admin → GitHub enterprises → History** prices the job first (users ×
@@ -140,8 +142,17 @@ your organization's actual enterprises, users, cost centers, and spend.)*
   reaches a helpdesk as "Copilot is broken" rather than as a billing question. The dashboard
   surfaces only budgets **needing attention** (over / near limit, worst first) once more than a
   handful are visible — an exec spanning several enterprises sees the two red ones, not a wall of
-  dozens of green meters — while a dedicated **Budgets** page lists every budget, grouped by
+  dozens of green meters — while the **Budgets &amp; allowance** page lists every budget, grouped by
   enterprise and filterable by status. GitHub still sends the actual alert emails.
+- **Included-allowance pool — the one leading indicator.** Every other view reports spend already
+  incurred; this one says when billing *starts*. Each Copilot seat includes a monthly credit
+  allowance (Business 1,900, Enterprise 3,900) that is **pooled across the enterprise**, and nothing
+  is billable until the pool is empty. **Budgets &amp; allowance** shows a per-enterprise burn-down —
+  consumed to date against an even-burn reference, projected forward to the day the pool runs dry,
+  with the capacity ceiling drawn on — plus the seat breakdown and which cost centers are driving
+  the burn. Capacity comes from **assigned Copilot seats**, not licence holders: they are different
+  populations, and confusing them overstates headroom in the direction that makes an enterprise
+  about to overspend look comfortable.
 - **Microsoft Entra ID authentication** (Azure App Service Easy Auth) — no anonymous access, ever.
 - **Group- and user-based access scoping, many-to-many** — an in-app Admin console maps Entra
   security groups *and/or* individual users to **one or more** GitHub cost centers each. An
@@ -281,14 +292,30 @@ stays in Entra (so your existing group lifecycle/governance keeps working); the 
 in this app's database and is editable with no redeploy, taking effect on the mapped user's next
 page load.
 
+There are **three independent roles**. Administering this deployment and seeing spend are separate
+grants — so finance and reporting people never have to be made administrators to read their numbers,
+and whoever wires up the mappings need not be handed visibility of the whole company's spend.
+
+| Role | Can | Granted by |
+|---|---|---|
+| **Cost center manager** | see only the cost centers mapped to them | a principal→cost-center mapping |
+| **Enterprise reader** | see *everything* within granted enterprises — all cost centers, the organization breakdown, enterprise-wide budgets, the allowance pool | an Enterprise Reader grant (one enterprise, or all) |
+| **Administrator** | manage this console: mappings, the enterprise registry, roles, backfills. **No data access of its own.** | the Entra `Admin` app role, or an admin principal in the console |
+
 - **Many-to-many by design** — a group or user can be mapped to **any number** of cost centers.
-  This is exactly the mechanism for an executive who needs a single, top-down view across several
-  cost centers: map their group (or just their user object ID) to all of the relevant cost
-  centers, and they'll see a combined view — no separate "rollup" feature needed.
+  This is the mechanism for a manager who spans several teams: map their group (or just their user
+  object ID) to all the relevant cost centers and they see a combined view.
+- **Enterprise reader is the role for finance and reporting.** Some data — the organization
+  breakdown, the allowance pool — comes from sources with no cost center at all and therefore cannot
+  be narrowed below an enterprise. This role is that grain. Grant it per enterprise, or for all of
+  them (including any registered later).
 - **Group *or* individual user** — covers the common "lone manager with no dedicated group"
   case, in addition to normal group-based access.
-- **Admins see everything** — granted via the Entra `Admin` app role (bootstrap) or by being
-  designated an admin principal in the console itself.
+- **The Entra `Admin` app role is the bootstrap** and grants BOTH, so a fresh deployment with an
+  empty database is never locked out. Admin principals designated *in the console* grant
+  administration only; give them an Enterprise Reader grant as well if they should also see data.
+  An administrator with no reader grant sees an empty dashboard, and the dashboard says exactly that
+  rather than looking broken.
 - **Organization display name** and other light settings are also managed here.
 
 See it in the [screenshot above](#screenshots), or read the full walkthrough in

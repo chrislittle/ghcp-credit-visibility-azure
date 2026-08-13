@@ -32,12 +32,32 @@ spec:
     backfill automatically a few per cycle, tracked by a watermark on the Enterprises row
     (OrgBackfillOldestYear/Month); a watermark resting at the retention floor means backfill is
     FINISHED, not stalled, and backfill never goes deeper than retention because the purge would
-    delete those rows anyway. This table is ADMIN-ONLY in the UI — it carries no cost centre, so it
-    cannot be scoped below the enterprise. TWO surfaces depend on it and are both admin-gated: the
-    Reports Organization breakdown AND organization-scoped budgets, whose utilization is computed
-    from this table. A manager unable to see either is correct behaviour, not a bug.
+    delete those rows anyway. This table needs ENTERPRISE-GRAIN read in the UI — it carries no cost
+    center, so it cannot be scoped below the enterprise. TWO surfaces depend on it and are both
+    gated the same way: the Reports Organization breakdown AND organization-scoped budgets, whose
+    utilization is computed from this table. A cost-center manager unable to see either is correct
+    behaviour, not a bug.
 
-    ORGANIZATION BUDGETS: displayed (to admins) and joined to usage on organization NAME —
+    COPILOT SEATS vs LICENCES — do not conflate these. EnterpriseCopilotSeats holds ASSIGNED COPILOT
+    SEATS per plan (from copilot/billing/seats) and is the only correct input to the included-allowance
+    pool. Enterprises.LicensedUserCount holds GHEC LICENCE holders (from consumed-licenses), a larger
+    and different population — a live enterprise had 8 licences against 3 seats. Capacity computed
+    from licences came out 5.5x too high, which makes an enterprise about to exhaust its pool look
+    comfortable. Seats fewer than licences is EXPECTED. Several rows for one enterprise means a mixed
+    plan (Business includes 1,900 credits per seat, Enterprise 3,900) and capacity is a SUM over
+    plans. A PlanType the app does not price is a finding to report, not corruption — those seats are
+    excluded from capacity and the UI says so. No rows for an enabled enterprise means collection
+    failed; look for a CopilotSeatsUnavailable event, since the call is non-fatal and the run still
+    reports success. NEVER suggest deriving pool capacity from LicensedUserCount.
+
+    ROLES: visibility comes from the ENTERPRISE READER grant (PrincipalEnterpriseGrants), NOT from
+    being an application administrator (AdminPrincipals) — those were one right until 2026-08-13 and
+    are now separate. An admin with no reader grant legitimately sees an empty dashboard; the app
+    says so explicitly rather than looking broken. A grant row with EnterpriseId NULL means ALL
+    enterprises including future ones; a row naming an enterprise means that one only. Do NOT
+    recommend granting admin to fix a visibility complaint — grant Enterprise Reader.
+
+    ORGANIZATION BUDGETS: displayed (to enterprise readers) and joined to usage on organization NAME —
     BudgetSnapshots.EntityName against OrgUsageSnapshots.OrganizationName, an EXACT match on the
     live API, unlike cost-centre budgets which need name-to-id resolution. An organization budget
     reading 0% while that organization clearly has usage means THE JOIN BROKE (the two names

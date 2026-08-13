@@ -1,16 +1,41 @@
 @page
 @model BudgetsModel
 @{
-    ViewData["Title"] = "Budgets";
+    ViewData["Title"] = "Budgets & allowance";
     string LevelLabel(string level) => level switch { "over" => "Over budget", "critical" => "Near limit", "warn" => "Watch", _ => "On track" };
 }
 
 <div class="gh-pagehead">
     <div>
-        <h1>Budgets</h1>
-        <div class="sub">Every budget in your scope. The Usage dashboard surfaces only the ones needing attention — this is the complete, filterable list.</div>
+        <h1>Budgets &amp; allowance</h1>
+        <div class="sub">
+            Both ceilings, in the order they bite. GitHub's <strong>included allowance</strong> is spent first and costs
+            nothing; only once it is exhausted does usage become billable and start consuming your <strong>budgets</strong>.
+            A green budget beside an almost-empty pool is not a contradiction — it is the warning arriving before the bill.
+        </div>
     </div>
     <div class="gh-headtools">
+        @* Way back out of detail mode. Without it the only route to the overview is editing the URL
+           or the browser back button, and neither is a UI. *@
+        @if (Model.Ent is long && Model.VisibleEnterprises.Count > 1)
+        {
+            <a class="gh-scope" href="@Url.Page("Budgets", new { Period = Model.PeriodValue })"
+               style="text-decoration:none;">← All @Model.VisibleEnterprises.Count enterprises</a>
+        }
+        @if (Model.VisibleEnterprises.Count > 1)
+        {
+            <form method="get" class="gh-mpick mb-0">
+                <input type="hidden" name="Period" value="@Model.PeriodValue" />
+                <span class="cal" aria-hidden="true">🏢</span>
+                <select name="Ent" onchange="this.form.submit()" aria-label="Enterprise">
+                    <option value="">All enterprises</option>
+                    @foreach (var e in Model.VisibleEnterprises)
+                    {
+                        <option value="@e.Id" selected="@(Model.Ent == e.Id)">@e.Name</option>
+                    }
+                </select>
+            </form>
+        }
         <form method="get" class="gh-mpick mb-0">
             @if (Model.Ent is long) { <input type="hidden" name="Ent" value="@Model.Ent" /> }
             @if (Model.Status != "all") { <input type="hidden" name="Status" value="@Model.Status" /> }
@@ -30,6 +55,387 @@
     </div>
 </div>
 
+@* ── INCLUDED ALLOWANCE POOL ─────────────────────────────────────────────────────────────────
+   Deliberately above budgets: the pool emptying is what makes budget spend begin, so cause reads
+   before effect. Absent entirely (not empty) without enterprise-grain read — the pool is a
+   whole-enterprise figure that cannot be narrowed to a cost center, exactly like the organization
+   rollup, so showing a manager an empty shell would only invite a support call. *@
+@if (Model.CanSeePool)
+{
+    @if (Model.PoolIsPastMonth)
+    {
+        <div class="gh-card">
+            <div class="ch"><h2>Included allowance pool</h2><span class="hint">@Model.MonthLabel</span></div>
+            <div class="gh-cardbody">
+                <p class="gh-note mb-0">
+                    The allowance pool is shown for the <strong>current month only</strong>. Seat counts are recorded per
+                    month but a closed month has nothing left to project, so there is no burn-down to draw.
+                </p>
+                <p class="gh-note mb-0" style="margin-top:8px;">
+                    What the pool question reduces to once a month is closed:
+                    <strong>@Model.MonthLabel became billable to the tune of $@Model.PastMonthBillable.ToString("N2")</strong>.
+                    @if (Model.PastMonthBillable <= 0m)
+                    {
+                        <text>Nothing was billable, so the included allowance covered the whole month.</text>
+                    }
+                    else
+                    {
+                        <text>Anything above zero means the allowance ran out before month end.</text>
+                    }
+                </p>
+            </div>
+        </div>
+    }
+@if (Model.IsOverview)
+{
+@* ── ALL-ENTERPRISES OVERVIEW ─────────────────────────────────────────────────────────────────
+       One ROW per enterprise, worst first. Ten enterprises at full detail is not a long page — it is
+       a page with no answer to "which one should I look at?", which is the only question a reader
+       with ten of them has. Pick one to get everything.
+
+       No sparkline here. A 120px chart of a part-month is a squiggle occupying the left third of its
+       box: too small to read a trend from, and the capacity line dominates it. The meter with its
+       pace marker says the same thing more precisely in less space, and the burn rate says the rest
+       as a number. The full curve is one click away, where it has room to mean something. *@
+    <div class="gh-card">
+        <div class="ch">
+            <h2>Included allowance pool</h2>
+            <span class="hint">@Model.MonthLabel · @Model.Pools.Count enterprises · worst first</span>
+        </div>
+        <table>
+            <thead>
+                <tr>
+                    <th>Enterprise</th><th>Status</th><th style="min-width:190px;">Used of capacity</th>
+                    <th class="num">Burn rate</th><th class="num">Empties</th><th class="num">Remaining</th><th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var d in Model.Pools)
+                {
+                    var p = d.Pool;
+                    <tr>
+                        <td><strong>@p.EnterpriseName</strong></td>
+                        <td>
+                            @if (!p.IsComputable) { <span class="gh-badge">Not available</span> }
+                            else if (p.IsExhausted) { <span class="gh-badge over">Pool exhausted</span> }
+                            else if (p.IsProjectedToExceed) { <span class="gh-badge critical">Projected to exceed</span> }
+                            else { <span class="gh-badge ok">On track</span> }
+                        </td>
+                        <td>
+                            @if (p.IsComputable)
+                            {
+                                var pct = Math.Min(100, (int)Math.Round(p.PctUsed));
+                                var pace = Math.Min(100, (int)Math.Round(p.PctElapsed));
+                                <div style="display:flex;justify-content:space-between;font-size:12px;">
+                                    <span style="font-weight:600;">@p.PctUsed.ToString("N0")%</span>
+                                    <span style="color:#66707d;font-variant-numeric:tabular-nums;">@p.Consumed!.Value.ToString("N0") / @p.Capacity!.Value.ToString("N0")</span>
+                                </div>
+                                @* gh-meter, not the budget card's `meter`: that one is scoped to
+                                   .gh-budget and renders as an unstyled empty div anywhere else. *@
+                                <div class="gh-meter" style="margin-top:4px;">
+                                    <i class="fill fill-@p.Level" style="width:@(pct)%"></i>
+                                    <i class="pace" style="left:@(pace)%" title="@pace% of the month has elapsed"></i>
+                                </div>
+                            }
+                            else { <span style="color:#98a2b3">—</span> }
+                        </td>
+                        <td class="num">
+                            @if (p.RunRatePerDay is decimal rate && rate > 0) { <text>@rate.ToString("N0")/day</text> }
+                            else { <span style="color:#98a2b3">—</span> }
+                        </td>
+                        <td class="num">
+                            @if (p.IsExhausted) { <span style="color:#b42318;font-weight:600;">exhausted</span> }
+                            else if (p.ExhaustionDay is int ed) { <text>~@ed @IndexModel.ShortMonth(Model.Year, Model.Month)</text> }
+                            else { <span style="color:#98a2b3">—</span> }
+                        </td>
+                        <td class="num">
+                            @if (p.IsComputable)
+                            {
+                                @(p.Remaining >= 0 ? $"{p.Remaining:N0}" : $"{Math.Abs(p.Remaining ?? 0):N0} over")
+                            }
+                            else { <span style="color:#98a2b3">—</span> }
+                        </td>
+                        <td style="text-align:right;white-space:nowrap;">
+                            <a href="@Url.Page("Budgets", new { Period = Model.PeriodValue, Ent = p.EnterpriseId })">Detail →</a>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+        <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
+            <div class="gh-note mb-0">
+                Credits are pooled per enterprise and never combined across them — one enterprise's headroom
+                cannot cover another's overage, which is why there is no total here.
+                Pick an enterprise for its burn-down chart, seat breakdown and contributors.
+            </div>
+        </div>
+    </div>
+
+    @* Budget counts per enterprise — the same summarise-then-drill-in rule as the pool above. *@
+    @if (Model.BudgetSummaries.Count > 0)
+    {
+        <div class="gh-card">
+            <div class="ch">
+                <h2>Budgets by enterprise</h2>
+                <span class="hint">@Model.MonthLabel · @Model.AllBudgets.Count budgets across @Model.BudgetSummaries.Count enterprises</span>
+            </div>
+            <table>
+                <thead><tr><th>Enterprise</th><th>Status</th><th class="num">Budgets</th><th></th></tr></thead>
+                <tbody>
+                    @foreach (var s in Model.BudgetSummaries)
+                    {
+                        <tr>
+                            <td><strong>@s.EnterpriseName</strong></td>
+                            <td>
+                                @if (s.Over > 0) { <span class="gh-badge over">@s.Over over</span> }
+                                @if (s.Critical > 0) { <span class="gh-badge critical">@s.Critical near limit</span> }
+                                @if (s.Warn > 0) { <span class="gh-badge warn">@s.Warn watch</span> }
+                                @if (s.NeedsAttention == 0 && s.Warn == 0) { <span class="gh-badge ok">all on track</span> }
+                            </td>
+                            <td class="num">@s.Total</td>
+                            <td style="text-align:right;white-space:nowrap;">
+                                <a href="@Url.Page("Budgets", new { Period = Model.PeriodValue, Ent = s.EnterpriseId })">Detail →</a>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+    @if (!Model.IsOverview)
+    {
+    @foreach (var d in Model.Pools)
+    {
+        var p = d.Pool;
+        <div class="gh-card">
+            <div class="ch">
+                <h2>🔋 @p.EnterpriseName — allowance pool</h2>
+                <span class="hint">@Model.MonthLabel · day @p.DaysElapsed of @p.DaysInMonth</span>
+            </div>
+
+            @if (!p.IsComputable)
+            {
+                <div class="gh-cardbody">
+                    <span class="gh-badge">Not available</span>
+                    <p class="gh-note mb-0" style="margin-top:8px;">
+                        @if (p.TotalSeats == 0)
+                        {
+                            <text>No Copilot seats have been collected for this enterprise yet — the snapshot job records them on its next run.</text>
+                        }
+                        else if (p.HasUnpricedPlans)
+                        {
+                            <text>All @p.TotalSeats seat(s) are on an unrecognised plan (@string.Join(", ", p.UnknownPlanTypes)). Set <code>Allowance:CreditsPerSeat</code> for it to price them.</text>
+                        }
+                        else
+                        {
+                            <text>This month's usage rows carry no gross quantity, so consumption cannot be computed. Not zero usage — unknown usage.</text>
+                        }
+                    </p>
+                </div>
+            }
+            else
+            {
+                // ── Burn-down chart ───────────────────────────────────────────────────────────
+                // Four elements, and each earns its place: the actual curve, a straight-line
+                // even-burn reference (curve above it = burning faster than the month is passing),
+                // a dashed projection at the current rate, and the capacity ceiling. Same inline
+                // SVG approach as the Reports trend chart — no chart library, no JS.
+                    var pts = d.BurnDown;
+                    const int W = 940, H = 260, padL = 70, padR = 24, padT = 18, padB = 34;
+                    int plotW = W - padL - padR, plotH = H - padT - padB;
+                    int days = p.DaysInMonth;
+                    decimal cap = p.Capacity!.Value;
+                    // The ceiling must stay visible even when consumption dwarfs it, and the curve
+                    // must stay visible when it dwarfs the ceiling — so the axis tracks whichever is larger.
+                    decimal peak = pts.Count > 0 ? pts.Max(x => x.CumulativeCredits) : 0m;
+                    decimal axisMax = Math.Max(cap, Math.Max(peak, p.ProjectedMonthEnd ?? 0m));
+                    if (axisMax <= 0) axisMax = 1m;
+                    int X(int day) => padL + (int)((double)(day - 1) / Math.Max(1, days - 1) * plotW);
+                    int Y(decimal v) => padT + (int)((1 - (double)(v / axisMax)) * plotH);
+
+                    var g = new System.Text.StringBuilder();
+                    for (int i = 0; i <= 4; i++)
+                    {
+                        int yy = padT + (int)((double)i / 4 * plotH);
+                        decimal val = axisMax * (4 - i) / 4;
+                        g.Append($"<line x1='{padL}' y1='{yy}' x2='{padL + plotW}' y2='{yy}' stroke='#eef1f6' stroke-width='1'></line>");
+                        g.Append($"<text x='{padL - 8}' y='{yy + 4}' text-anchor='end' font-size='11' fill='#98a2b3'>{val.ToString("N0")}</text>");
+                    }
+                    for (int day = 1; day <= days; day += Math.Max(1, days / 10))
+                        g.Append($"<text x='{X(day)}' y='{H - 12}' text-anchor='middle' font-size='10' fill='#98a2b3'>{day}</text>");
+
+                    // Capacity ceiling.
+                    g.Append($"<line x1='{padL}' y1='{Y(cap)}' x2='{padL + plotW}' y2='{Y(cap)}' stroke='#d93025' stroke-width='2'></line>");
+                    g.Append($"<text x='{padL + plotW}' y='{Y(cap) - 6}' text-anchor='end' font-size='11' fill='#d93025'>capacity {cap.ToString("N0")}</text>");
+
+                    // Even-burn reference: where you would be if the month were spent uniformly.
+                    g.Append($"<line x1='{X(1)}' y1='{Y(cap / days)}' x2='{X(days)}' y2='{Y(cap)}' stroke='#98a2b3' stroke-width='1.5' stroke-dasharray='2 3'></line>");
+
+                    if (pts.Count > 0)
+                    {
+                        var line = string.Join(" ", pts.Select(x => $"{X(x.Day)},{Y(x.CumulativeCredits)}"));
+                        if (pts.Count > 1)
+                            g.Append($"<polyline fill='none' stroke='#2563eb' stroke-width='2.5' points='{line}'></polyline>");
+                        foreach (var x in pts)
+                            g.Append($"<circle cx='{X(x.Day)}' cy='{Y(x.CumulativeCredits)}' r='{(pts.Count == 1 ? 5 : 2)}' fill='#2563eb'></circle>");
+
+                        // Projection from the last observed point at the current run rate.
+                        var last = pts[^1];
+                        if (p.ProjectedMonthEnd is decimal proj && last.Day < days)
+                            g.Append($"<line x1='{X(last.Day)}' y1='{Y(last.CumulativeCredits)}' x2='{X(days)}' y2='{Y(proj)}' stroke='#d9822b' stroke-width='2' stroke-dasharray='5 4'></line>");
+                    }
+                @* With no points there is no burn-down, so DON'T draw the frame. Rendering an empty
+                   chart directly beneath a note saying the chart cannot be drawn contradicts itself,
+                   and the lone dotted even-burn diagonal reads as a projection that does not exist. *@
+                @if (pts.Count == 0)
+                {
+                    <div class="gh-cardbody">
+                        <div class="gh-note mb-0" style="color:#d9822b">
+                            <strong>No burn-down yet for @Model.MonthLabel.</strong> The curve is drawn from daily credit
+                            consumption, which is recorded from the first snapshot run each day — so it appears once this
+                            month has usage and at least one run has captured it. The figures below are exact regardless.
+                        </div>
+                    </div>
+                }
+                else
+                {
+                    <div class="gh-cardbody" style="padding-bottom:4px;">
+                        <svg viewBox="0 0 @W @H" width="100%" height="@H" role="img"
+                             aria-label="Allowance burn-down for @p.EnterpriseName: cumulative credits per day against a capacity of @cap.ToString("N0")"
+                             style="max-width:100%;">
+                            @Html.Raw(g.ToString())
+                        </svg>
+                    </div>
+                    @* gh-serieslegend, not gh-legend: the latter is flex-direction:COLUMN and sizes its
+                       swatches only inside a `.row`, so this rendered as a vertical list with invisible
+                       swatches. This is the same horizontal legend the Reports trend chart uses. *@
+                    <div class="gh-serieslegend">
+                        <span class="row"><span class="sw" style="background:#2563eb"></span> consumed to date</span>
+                        <span class="row"><span class="sw" style="background:#d9822b"></span> projected at current rate</span>
+                        <span class="row"><span class="sw" style="background:#98a2b3"></span> even burn</span>
+                        <span class="row"><span class="sw" style="background:#d93025"></span> capacity</span>
+                    </div>
+                }
+
+                <div class="gh-budgets">
+                    <div class="gh-budget">
+                        <div class="top">
+                            <span class="name">
+                                @if (p.IsExhausted)
+                                {
+                                    <span class="gh-badge over">Pool exhausted</span>
+                                }
+                                else if (p.IsProjectedToExceed)
+                                {
+                                    <span class="gh-badge critical">Projected to exceed</span>
+                                }
+                                else
+                                {
+                                    <span class="gh-badge ok">On track</span>
+                                }
+                                @if (p.HasIncompleteData)
+                                {
+                                    <span class="gh-badge warn" title="Some rows this month carry no gross quantity, so consumption is understated. Figures are a lower bound.">Partial data</span>
+                                }
+                            </span>
+                            <span style="font-variant-numeric:tabular-nums;font-weight:700;">
+                                @p.Consumed!.Value.ToString("N0") <span style="color:#98a2b3;font-weight:500">/ @cap.ToString("N0") credits</span>
+                            </span>
+                        </div>
+                        @{
+                            var pct = Math.Min(100, (int)Math.Round(p.PctUsed));
+                            var pace = Math.Min(100, (int)Math.Round(p.PctElapsed));
+                        }
+                        <div class="meter" style="position:relative;">
+                            <i class="fill-@p.Level" style="width:@(pct)%"></i>
+                            <i style="position:absolute;top:-2px;bottom:-2px;left:@(pace)%;width:2px;background:#66707d;border-radius:0;" title="@pace% of the month has elapsed"></i>
+                        </div>
+                        <div class="sub">
+                            <span>@p.PctUsed.ToString("N0")% used · pace marker at @pace%</span>
+                            <span>@(p.Remaining >= 0 ? $"{p.Remaining:N0} credits remaining" : $"{Math.Abs(p.Remaining ?? 0):N0} credits over")</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);display:flex;gap:26px;flex-wrap:wrap;">
+                    <div>
+                        <div class="gh-note mb-0">Seats</div>
+                        <div style="font-weight:600;">
+                            @string.Join(" + ", p.Plans.Where(x => x.CreditsPerSeat is not null).Select(x => $"{x.Seats} {x.PlanType} × {x.CreditsPerSeat:N0}"))
+                        </div>
+                        <div class="gh-note mb-0">Copilot seats, not licence holders</div>
+                    </div>
+                    <div>
+                        <div class="gh-note mb-0">Burn rate</div>
+                        <div style="font-weight:600;">@(p.RunRatePerDay is decimal r ? $"{r:N0} credits/day" : "—")</div>
+                        <div class="gh-note mb-0">month-to-date ÷ days elapsed</div>
+                    </div>
+                    <div>
+                        <div class="gh-note mb-0">Pool empties</div>
+                        <div style="font-weight:600;">
+                            @if (p.IsExhausted) { <text>already exhausted</text> }
+                            else if (p.ExhaustionDay is int ed) { <text>~@ed @BudgetsModel.FormatMonth(Model.Year, Model.Month).Split(' ')[0]</text> }
+                            else { <text>not this month</text> }
+                        </div>
+                        <div class="gh-note mb-0">at the current rate</div>
+                    </div>
+                    <div>
+                        <div class="gh-note mb-0">Projected billable</div>
+                        <div style="font-weight:600;">
+                            @(p.ProjectedOverageCredits is decimal ov ? $"${(ov * 0.01m):N2}" : "$0.00")
+                        </div>
+                        <div class="gh-note mb-0">@(p.ProjectedOverageCredits is decimal ov2 ? $"{ov2:N0} credits over at $0.01" : "no overage projected")</div>
+                    </div>
+                </div>
+
+                @if (p.HasUnpricedPlans)
+                {
+                    <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
+                        <div class="gh-note mb-0" style="color:#d9822b">
+                            @p.UnknownPlanSeats seat(s) on an unrecognised plan (@string.Join(", ", p.UnknownPlanTypes)) are
+                            <strong>not counted</strong> in this capacity — set <code>Allowance:CreditsPerSeat:@p.UnknownPlanTypes.First()</code> to include them.
+                        </div>
+                    </div>
+                }
+
+                @if (d.Contributors.Count > 0)
+                {
+                    <table>
+                        <thead><tr><th>Cost center</th><th class="num">Credits</th><th class="num">Share of pool</th></tr></thead>
+                        <tbody>
+                            @foreach (var c in d.Contributors)
+                            {
+                                <tr>
+                                    <td>@(c.CostCenterName ?? c.CostCenterId ?? "Unattributed")</td>
+                                    <td class="num">@c.Credits.ToString("N0")</td>
+                                    <td class="num">@((cap > 0 ? (double)(c.Credits / cap) * 100 : 0).ToString("N1"))%</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                    <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
+                        @* Labelling this is not optional. Pooled credits mean a cost center above its
+                           notional share costs NOTHING while the pool holds — reading this as a bill
+                           would have teams chased for spend that never existed. *@
+                        <div class="gh-note mb-0">
+                            <strong>Who is driving the burn — not who owes what.</strong> Credits are pooled across the
+                            enterprise, so a cost center above its notional share costs nothing at all while the pool holds.
+                            This ranks consumption, and is not a chargeback.
+                        </div>
+                    </div>
+                }
+            }
+        </div>
+    }
+}
+}
+
+@* The full, filterable budget list is a DETAIL-mode view. In overview the per-enterprise counts
+   above carry the same signal in a fraction of the height — listing every budget across ten
+   enterprises is the wall of content the two-level split exists to remove. *@
+@if (!Model.IsOverview)
+{
 <!-- FILTERS + STATUS SUMMARY -->
 <div class="gh-card">
     <div class="ch">
@@ -144,4 +550,5 @@ else
             </div>
         </div>
     </div>
+}
 }

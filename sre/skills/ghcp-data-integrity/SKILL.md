@@ -186,13 +186,19 @@ How to read it:
 | `Org` | Enterprise-wide budget. **At most ONE per enterprise** — more than one is a real defect | yes |
 | `CostCenter` | One per cost center that has a budget in GitHub | yes |
 | `User` | Personal spending limits. Any number, including hundreds | **no** — stored only; computable, but the access policy for personal limits is undecided |
-| `Organization` | One per org with a budget | **yes — ADMINS ONLY** (see below) |
+| `Organization` | One per org with a budget | **yes — ENTERPRISE READERS ONLY** (see below) |
 | `MultiUserCustomer` | Rare | **no** — semantics unestablished |
 | `Unknown` | **A real signal — investigate** | **no** |
 
-**Organization budgets are shown to administrators only.** Their actuals come from
+**Organization budgets need the Enterprise Reader role.** Their actuals come from
 `OrgUsageSnapshots` (Check 6), which carries no cost center — so the viewer's access scope cannot
 narrow them, and showing one to a cost-center-scoped manager would expose another team's spend.
+
+> **This check changed.** It previously said "administrators only". Administering the console and
+> seeing data are now separate grants (`PrincipalEnterpriseGrants`), so an application administrator
+> with no reader grant sees NO budgets at all — that is correct behaviour, not a fault. A reader
+> granted one enterprise sees that enterprise's organization budgets and no others; a reader with a
+> NULL `EnterpriseId` row sees every enterprise, including any registered later.
 Utilization is a join on organization NAME: the budget's `budget_entity_name` against usage's
 `organizationName`, verified against the live API as an EXACT match (unlike cost-center budgets,
 which need name-to-id resolution). **A budget stuck at 0% with usage clearly present means that join
@@ -292,6 +298,65 @@ a CLOSED month is a real finding.
 - Months predating this table having no rows. They render from their monthly total instead.
 - Roughly 30x the row count of `UsageSnapshots` — that is the table working as designed. See
   `ghcp-sql-deep-dive` for the storage implications.
+
+## Check 7 — Copilot seats (`EnterpriseCopilotSeats`)
+
+Assigned Copilot seats per plan, refreshed every run from
+`GET /enterprises/{ent}/copilot/billing/seats`. Sole input to the dashboard's included-allowance pool.
+
+> **Seats are NOT licences, and this distinction has already caused a real defect.**
+> `Enterprise.LicensedUserCount` comes from `consumed-licenses` and counts GHEC licence HOLDERS — a
+> larger, different population. A live enterprise showed **8 licences against 3 Copilot seats**.
+> Capacity was briefly computed from licences and came out **5.5x too high**, in the direction that
+> makes an enterprise about to exhaust its pool look comfortable. If you ever find yourself reaching
+> for `LicensedUserCount` to explain a pool figure, stop: that is the bug, not the explanation.
+
+Rows are kept **per month**, replaced wholesale for the current month on every run. GitHub reports
+only the seats assigned *right now* — there is no historical seat API — so a month that goes
+uncaptured is unrecoverable, which is why history is retained rather than overwritten.
+
+```sql
+-- Current month, against the licence count it must never be confused with
+SELECT e.Slug, s.PlanType, s.Seats, s.Year, s.Month, s.SnapshotUtc, e.LicensedUserCount AS ghec_licences
+FROM EnterpriseCopilotSeats s JOIN Enterprises e ON e.Id = s.EnterpriseId
+WHERE s.Year = YEAR(SYSUTCDATETIME()) AND s.Month = MONTH(SYSUTCDATETIME())
+ORDER BY e.Slug, s.PlanType;
+```
+
+What is normal, and what is not:
+
+- **Seats < licences** is expected. Seats ≥ licences is worth a look, not necessarily wrong.
+- **Several rows per enterprise per month** means a mixed-plan enterprise. Business seats include
+  1,900 credits and Enterprise 3,900, so capacity is a sum over plans — never seats × one rate.
+- **Rows for earlier months are history, not staleness.** Capacity is computed from the CURRENT
+  month's rows only. A query that omits the month filter will sum every retained month into a wildly
+  inflated ceiling — the same shape of error as summing cumulative daily rows.
+- **A `PlanType` the app does not price** is a FINDING, not corruption. GitHub introduced a plan;
+  those seats are excluded from capacity and the UI says so. Fix by setting
+  `Allowance:CreditsPerSeat:<plan>`, not by editing data.
+- **No rows for the CURRENT month on an enabled enterprise** means collection failed or has not yet
+  run this month. Look for a `CopilotSeatsUnavailable` event — the call is non-fatal by design, so
+  the run still reports success. The pool shows "not available"; it must never fall back to a
+  licence-derived number.
+- **`Seats` is the LAST OBSERVED count for that month, not an average.** A month in which seats were
+  added late reports the end state. It is a capacity ceiling, not a seat-months figure.
+
+## Check 8 — Daily gross credits (`DailyUsageSnapshots.GrossQuantity`)
+
+Feeds the allowance burn-down chart. `NetQuantity` is post-discount and sits at ZERO for any month
+the allowance covered, so it cannot draw the curve — only `GrossQuantity` can.
+
+```sql
+SELECT e.Slug, d.Year, d.Month, COUNT(*) AS rows_,
+       SUM(CASE WHEN d.GrossQuantity IS NULL THEN 1 ELSE 0 END) AS uncaptured
+FROM DailyUsageSnapshots d JOIN Enterprises e ON e.Id = d.EnterpriseId
+GROUP BY e.Slug, d.Year, d.Month ORDER BY d.Year DESC, d.Month DESC, e.Slug;
+```
+
+- **NULL means "not captured"**, never zero — rows written before this column existed. Those months
+  render with no curve and say so, which is correct; they must not be charted as a flat zero line.
+- **These rows are CUMULATIVE month-to-date.** The burn-down sums across USERS within a day and
+  never across days. Summing across days is the ~30x inflation this table's own comment warns about.
 
 ## Check 6 — Organization attribution (`OrgUsageSnapshots`)
 

@@ -50,7 +50,8 @@
         </a>
         <nav class="gh-nav">
             <a class="@Active("/Index")" asp-area="" asp-page="/Index">Usage</a>
-            <a class="@Active("/Budgets")" asp-area="" asp-page="/Budgets">Budgets</a>
+            @* Route stays /Budgets so existing links and bookmarks keep working; only the label changes. *@
+            <a class="@Active("/Budgets")" asp-area="" asp-page="/Budgets">Budgets &amp; allowance</a>
             <a class="@Active("/Reports")" asp-area="" asp-page="/Reports">Reports</a>
             @if (isAdmin)
             {

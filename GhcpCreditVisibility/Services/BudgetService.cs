@@ -78,11 +78,24 @@ namespace GhcpCreditVisibility.Services
             // a deliberate act, not a side effect of storing a scope.
             budgetsQuery = budgetsQuery.Where(b => BudgetScopes.Displayable.Contains(b.Scope));
 
-            // Scopes that cannot be narrowed by the viewer's scope are admin-only — organization
-            // actuals come from a table with no cost-centre column, so there is nothing to filter
-            // on and a manager would otherwise see organizations they have no grant for.
-            if (!scope.SeesAll)
-                budgetsQuery = budgetsQuery.Where(b => !BudgetScopes.AdminOnly.Contains(b.Scope));
+            // Scopes that cannot be narrowed by the viewer's scope need ENTERPRISE-GRAIN read —
+            // organization actuals come from a table with no cost center column, so there is nothing
+            // to filter on and a manager would otherwise see organizations they have no grant for.
+            //
+            // An Enterprise Reader has that grain, but only for the enterprises granted: the second
+            // branch lets those budgets through for granted enterprises while still excluding them
+            // everywhere else. Without the enterprise test a reader for one enterprise would see
+            // every other enterprise's organization budgets.
+            if (!scope.HasEnterpriseRead)
+            {
+                budgetsQuery = budgetsQuery.Where(b => !BudgetScopes.EnterpriseGrainOnly.Contains(b.Scope));
+            }
+            else if (!scope.SeesAll)
+            {
+                var readIds = scope.ReadAllEnterpriseIds.ToList();
+                budgetsQuery = budgetsQuery.Where(b =>
+                    !BudgetScopes.EnterpriseGrainOnly.Contains(b.Scope) || readIds.Contains(b.EnterpriseId));
+            }
 
             var budgets = await budgetsQuery.ToListAsync(ct);
             if (budgets.Count == 0) return Array.Empty<BudgetStatus>();
@@ -111,8 +124,21 @@ namespace GhcpCreditVisibility.Services
             if (budgets.Any(b => b.Scope == BudgetScopes.Organization))
             {
                 var orgQuery = db.OrgUsageSnapshots.Where(o => o.Year == year && o.Month == month);
-                if (scope.EnterpriseFilter is long orgEntFilter)
-                    orgQuery = orgQuery.Where(o => o.EnterpriseId == orgEntFilter);
+
+                // Same restriction as UsageQueryService.BuildOrgSeriesAsync, and for the same reason:
+                // this table has no cost center column, so the ONLY thing standing between an
+                // Enterprise Reader and another enterprise's organization spend is this filter.
+                // Null = no restriction (global reader); empty = show nothing.
+                var allowedEnterprises = scope.EnterpriseReadFilter();
+                if (allowedEnterprises is not null)
+                {
+                    if (allowedEnterprises.Count == 0) orgQuery = orgQuery.Where(_ => false);
+                    else
+                    {
+                        var allowedIds = allowedEnterprises.ToList();
+                        orgQuery = orgQuery.Where(o => allowedIds.Contains(o.EnterpriseId));
+                    }
+                }
 
                 byOrg = (await orgQuery
                         .Where(o => o.OrganizationName != null)
@@ -131,16 +157,17 @@ namespace GhcpCreditVisibility.Services
                 var entName = entNames.GetValueOrDefault(b.EnterpriseId);
                 if (b.Scope == BudgetScopes.Org)
                 {
-                    if (!scope.SeesAll) continue; // managers don't see enterprise-wide budgets
+                    if (!scope.CanReadEnterprise(b.EnterpriseId)) continue; // managers don't see enterprise-wide budgets
                     var actualOrg = orgTotals.GetValueOrDefault(b.EnterpriseId, 0m);
                     result.Add(new BudgetStatus(b.Scope, b.CostCenterId, b.CostCenterName, b.Amount, actualOrg,
                         b.EnterpriseId, entName, b.EntityName, b.PreventFurtherUsage));
                 }
                 else if (b.Scope == BudgetScopes.Organization)
                 {
-                    // Already filtered to admins in SQL above; belt-and-braces so a future caller
-                    // reaching this loop by another route cannot leak organization spend.
-                    if (!scope.SeesAll) continue;
+                    // Already filtered in SQL above; belt-and-braces so a future caller reaching this
+                    // loop by another route cannot leak organization spend. Checked PER ENTERPRISE —
+                    // an Enterprise Reader is entitled to their own enterprises' org budgets only.
+                    if (!scope.CanReadEnterprise(b.EnterpriseId)) continue;
                     var orgKey = (b.EnterpriseId, (b.EntityName ?? "").ToLowerInvariant());
                     var actualByOrg = byOrg.TryGetValue(orgKey, out var ov) ? ov : 0m;
                     result.Add(new BudgetStatus(b.Scope, b.CostCenterId, b.CostCenterName, b.Amount, actualByOrg,

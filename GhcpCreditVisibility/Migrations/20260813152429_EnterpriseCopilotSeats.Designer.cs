@@ -4,6 +4,7 @@ using GhcpCreditVisibility.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace GhcpCreditVisibility.Migrations
 {
     [DbContext(typeof(BillingDbContext))]
-    partial class BillingDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260813152429_EnterpriseCopilotSeats")]
+    partial class EnterpriseCopilotSeats
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -183,10 +186,6 @@ namespace GhcpCreditVisibility.Migrations
                         .HasPrecision(18, 4)
                         .HasColumnType("decimal(18,4)");
 
-                    b.Property<decimal?>("GrossQuantity")
-                        .HasPrecision(18, 4)
-                        .HasColumnType("decimal(18,4)");
-
                     b.Property<string>("Model")
                         .IsRequired()
                         .HasMaxLength(128)
@@ -317,9 +316,6 @@ namespace GhcpCreditVisibility.Migrations
                     b.Property<long>("EnterpriseId")
                         .HasColumnType("bigint");
 
-                    b.Property<int>("Month")
-                        .HasColumnType("int");
-
                     b.Property<string>("PlanType")
                         .IsRequired()
                         .HasMaxLength(64)
@@ -331,14 +327,9 @@ namespace GhcpCreditVisibility.Migrations
                     b.Property<DateTime>("SnapshotUtc")
                         .HasColumnType("datetime2");
 
-                    b.Property<int>("Year")
-                        .HasColumnType("int");
-
                     b.HasKey("Id");
 
-                    b.HasIndex("EnterpriseId", "Year", "Month");
-
-                    b.HasIndex("EnterpriseId", "PlanType", "Year", "Month")
+                    b.HasIndex("EnterpriseId", "PlanType")
                         .IsUnique();
 
                     b.ToTable("EnterpriseCopilotSeats");

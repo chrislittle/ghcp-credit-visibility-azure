@@ -32,6 +32,16 @@ namespace GhcpCreditVisibility.Data
         // covers cases with no suitable group (e.g. a single manager who should see one cost center).
         public DbSet<PrincipalCostCenterMapping> PrincipalCostCenterMappings => Set<PrincipalCostCenterMapping>();
         public DbSet<AdminPrincipal> AdminPrincipals => Set<AdminPrincipal>();
+
+        /// <summary>Enterprise Reader grants. SEPARATE from <see cref="AdminPrincipals"/> on purpose:
+        /// administering this deployment and seeing every cost center's spend are different rights,
+        /// and conflating them forced report consumers to be made administrators.</summary>
+        public DbSet<PrincipalEnterpriseGrant> PrincipalEnterpriseGrants => Set<PrincipalEnterpriseGrant>();
+        /// <summary>Assigned Copilot seats per plan, refreshed every snapshot run. The ONLY correct
+        /// input to the included-allowance pool — <see cref="Enterprise.LicensedUserCount"/> counts a
+        /// different population (see <see cref="EnterpriseCopilotSeat"/>).</summary>
+        public DbSet<EnterpriseCopilotSeat> EnterpriseCopilotSeats => Set<EnterpriseCopilotSeat>();
+
         public DbSet<AppSetting> AppSettings => Set<AppSetting>();
         public DbSet<BudgetSnapshot> BudgetSnapshots => Set<BudgetSnapshot>();
         public DbSet<CostCenterDirectoryEntry> CostCenterDirectory => Set<CostCenterDirectoryEntry>();
@@ -103,6 +113,7 @@ namespace GhcpCreditVisibility.Data
                 e.Property(x => x.NetAmount).HasPrecision(18, 4);
                 e.Property(x => x.GrossAmount).HasPrecision(18, 4);
                 e.Property(x => x.NetQuantity).HasPrecision(18, 4);
+                e.Property(x => x.GrossQuantity).HasPrecision(18, 4);
             });
 
             b.Entity<OrgUsageSnapshot>(e =>
@@ -159,6 +170,39 @@ namespace GhcpCreditVisibility.Data
             {
                 e.HasKey(x => x.Id);
                 e.HasIndex(x => new { x.PrincipalType, x.PrincipalObjectId }).IsUnique();
+                e.Property(x => x.PrincipalType).HasMaxLength(16).IsRequired();
+                e.Property(x => x.PrincipalObjectId).HasMaxLength(64).IsRequired();
+                e.Property(x => x.PrincipalDisplayName).HasMaxLength(255);
+                e.Property(x => x.ModifiedBy).HasMaxLength(255);
+            });
+
+            b.Entity<EnterpriseCopilotSeat>(e =>
+            {
+                e.HasKey(x => x.Id);
+                // One row per (enterprise, plan, month). All four columns are non-nullable, so this
+                // needs none of the nullable-key care the grants table above required.
+                e.HasIndex(x => new { x.EnterpriseId, x.PlanType, x.Year, x.Month }).IsUnique();
+                // The read path asks for one enterprise's current month; this covers it.
+                e.HasIndex(x => new { x.EnterpriseId, x.Year, x.Month });
+                e.Property(x => x.PlanType).HasMaxLength(64).IsRequired();
+            });
+
+            b.Entity<PrincipalEnterpriseGrant>(e =>
+            {
+                e.HasKey(x => x.Id);
+                // One grant per (principal-type, principal, enterprise). SQL Server treats NULLs as
+                // EQUAL in a unique index — a liability for OrgUsageSnapshot above, but exactly what
+                // is wanted here: it makes a second "all enterprises" row for the same principal
+                // impossible, so the all-grant can never be duplicated.
+                //
+                // HasFilter(null) is LOAD-BEARING. EF Core's SQL Server default for a nullable column
+                // in a unique index is a filtered index ("WHERE [EnterpriseId] IS NOT NULL"), which
+                // excludes exactly the rows this constraint exists to police — duplicate all-grants
+                // would then be permitted. Removing the filter restores the intended behaviour.
+                e.HasIndex(x => new { x.PrincipalType, x.PrincipalObjectId, x.EnterpriseId })
+                    .IsUnique()
+                    .HasFilter(null);
+                e.HasIndex(x => x.PrincipalObjectId);
                 e.Property(x => x.PrincipalType).HasMaxLength(16).IsRequired();
                 e.Property(x => x.PrincipalObjectId).HasMaxLength(64).IsRequired();
                 e.Property(x => x.PrincipalDisplayName).HasMaxLength(255);
@@ -254,13 +298,28 @@ namespace GhcpCreditVisibility.Data
         public static readonly string[] Displayable = { Org, CostCenter, Organization };
 
         /// <summary>
-        /// Scopes that cannot be narrowed by the viewer's access scope and are therefore ADMIN-ONLY.
-        /// <see cref="Organization"/> qualifies because its actuals come from OrgUsageSnapshots,
-        /// which carries no cost centre — there is nothing to filter on, so a cost-centre-scoped
-        /// manager would otherwise see spend for organizations they have no grant for.
+        /// Scopes that cannot be narrowed BELOW AN ENTERPRISE, and so require enterprise-grain read
+        /// (Enterprise Reader) rather than a cost center grant. <see cref="Organization"/> qualifies
+        /// because its actuals come from OrgUsageSnapshots, which carries no cost center — there is
+        /// nothing to filter on, so a cost-center-scoped manager would otherwise see spend for
+        /// organizations they have no grant for.
+        ///
+        /// Named AdminOnly until Enterprise Reader existed, when "admin" was the only way to see
+        /// anything enterprise-wide. It never meant administration — it meant this grain.
         /// </summary>
         /// <remarks>Array for the same EF-translation reason as <see cref="Displayable"/>.</remarks>
-        public static readonly string[] AdminOnly = { Organization };
+        public static readonly string[] EnterpriseGrainOnly = { Organization };
+    }
+
+    /// <summary>
+    /// GitHub's units of measure, as they arrive on usage line items. Quantities are only comparable
+    /// WITHIN a unit type, so anything that sums quantities must filter on one — a constant rather
+    /// than a repeated literal because a typo would not fail, it would silently sum nothing.
+    /// </summary>
+    public static class UsageUnitTypes
+    {
+        /// <summary>Confirmed live. The unit the included-allowance pool is denominated in.</summary>
+        public const string AiCredits = "ai-credits";
     }
 
     /// <summary>Principal kinds an admin can map / designate.</summary>
@@ -355,8 +414,13 @@ namespace GhcpCreditVisibility.Data
     }
 
     /// <summary>
-    /// An Entra principal (group OR user) whose members/self are application administrators
-    /// (see-all + manage the console). The Entra "Admin" app role also grants admin as a bootstrap.
+    /// An Entra principal (group OR user) whose members/self may MANAGE THE CONSOLE — mappings, the
+    /// enterprise registry, admin principals, reader grants and backfill triggers.
+    ///
+    /// This grants NO data visibility. It used to grant see-all as well, which meant anyone who
+    /// needed enterprise-wide reporting had to be made an administrator; that visibility now comes
+    /// from <see cref="PrincipalEnterpriseGrant"/> and is granted independently. The Entra "Admin"
+    /// app role remains a bootstrap that grants BOTH, so a fresh deployment is never locked out.
     /// </summary>
     public sealed class AdminPrincipal
     {
@@ -366,6 +430,87 @@ namespace GhcpCreditVisibility.Data
         public string? PrincipalDisplayName { get; set; }
         public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
         public string? ModifiedBy { get; set; }
+    }
+
+    /// <summary>
+    /// An Entra principal (group OR user) granted ENTERPRISE READER: everything within an enterprise
+    /// — every cost center's per-user spend, the organization dimension, enterprise-wide budgets —
+    /// with no configuration rights.
+    ///
+    /// Enterprise grain is not an arbitrary choice: <see cref="OrgUsageSnapshot"/> carries no cost
+    /// center and no user, so an organization rollup cannot be narrowed below the enterprise. This
+    /// role is the level those features always needed.
+    /// </summary>
+    public sealed class PrincipalEnterpriseGrant
+    {
+        public long Id { get; set; }
+        public string PrincipalType { get; set; } = PrincipalTypes.Group; // "Group" | "User"
+        public string PrincipalObjectId { get; set; } = "";
+        public string? PrincipalDisplayName { get; set; }
+
+        /// <summary>
+        /// The enterprise this grant covers, or NULL for ALL enterprises — including ones registered
+        /// LATER. That distinction is the point: enterprises are added at runtime, and a grant
+        /// enumerated over today's list would silently fail to cover tomorrow's. NULL is used rather
+        /// than a "*" sentinel so the column stays a real foreign key.
+        /// </summary>
+        public long? EnterpriseId { get; set; }
+
+        public DateTime CreatedUtc { get; set; } = DateTime.UtcNow;
+        public string? ModifiedBy { get; set; }
+    }
+
+    /// <summary>
+    /// How many assigned Copilot seats an enterprise has ON EACH PLAN, as of the last snapshot run.
+    ///
+    /// This exists because <see cref="Enterprise.LicensedUserCount"/> is NOT a Copilot seat count —
+    /// it comes from <c>consumed-licenses</c> and counts GHEC licence holders, a different and larger
+    /// population (a live enterprise showed 8 licences against 3 Copilot seats). Sizing the included
+    /// allowance from licences overstated capacity 5.5x, and overstatement is the dangerous direction:
+    /// an enterprise about to exhaust its credit pool renders as comfortable.
+    ///
+    /// Split BY PLAN because the included allowance differs — Copilot Business includes 1,900 credits
+    /// per seat, Copilot Enterprise 3,900 — so a mixed enterprise's capacity is a sum over plans, not
+    /// one multiplication.
+    ///
+    /// KEPT PER MONTH. GitHub reports only the seats assigned RIGHT NOW — there is no historical
+    /// seat API — so a month that goes uncaptured can never be reconstructed, while the cost of
+    /// keeping it is a handful of rows. That asymmetry is the whole argument: it makes "were we
+    /// close to the ceiling before we tipped over?" and "did adding seats fix the overage, or did
+    /// usage simply grow?" answerable later, and neither is answerable from spend alone.
+    ///
+    /// Rows are replaced wholesale per enterprise PER MONTH rather than upserted, matching how
+    /// <see cref="OrgUsageSnapshot"/> replaces a month.
+    /// </summary>
+    public sealed class EnterpriseCopilotSeat
+    {
+        public long Id { get; set; }
+        public long EnterpriseId { get; set; }
+
+        // The month this count describes. The pool reads the CURRENT month; earlier rows exist so a
+        // capacity trend can be drawn once a few months have accrued.
+        public int Year { get; set; }
+        public int Month { get; set; }
+
+        /// <summary>GitHub's own <c>plan_type</c>, stored verbatim (lower-cased): "business",
+        /// "enterprise", or whatever GitHub introduces next. NOT mapped to an enum — an unrecognised
+        /// plan must be RECORDED so it can be surfaced, never silently dropped from the capacity sum.
+        /// Same reasoning as <see cref="BudgetScopes.Unknown"/>.</summary>
+        public string PlanType { get; set; } = "";
+
+        /// <summary>
+        /// Seats on this plan, as of <see cref="SnapshotUtc"/>.
+        ///
+        /// LAST OBSERVED, not an average. Seats change mid-month, and every run overwrites the
+        /// month's row — so a month in which ten seats were added on the 28th reports the END STATE
+        /// for the whole month. That is the right basis for a capacity ceiling (what you are
+        /// entitled to now), but it is NOT a seat-months figure and must never be read as one.
+        /// Saying so here rather than leaving it to be discovered: an unlabelled seat number is
+        /// exactly the trap that made the licence count look usable.
+        /// </summary>
+        public int Seats { get; set; }
+
+        public DateTime SnapshotUtc { get; set; } = DateTime.UtcNow;
     }
 
     /// <summary>Simple admin-editable key/value app settings (e.g. organization display name).</summary>
@@ -545,6 +690,19 @@ namespace GhcpCreditVisibility.Data
         public string? UnitType { get; set; }
         /// <summary>CUMULATIVE month-to-date quantity as of <see cref="Day"/>.</summary>
         public decimal NetQuantity { get; set; }
+
+        /// <summary>
+        /// CUMULATIVE month-to-date quantity BEFORE the included-allowance discount, as of
+        /// <see cref="Day"/> — i.e. credits actually consumed, which is what the allowance pool is
+        /// denominated in. <see cref="NetQuantity"/> is post-discount and is therefore ZERO for any
+        /// month the allowance fully covered, so it cannot draw a burn-down curve.
+        ///
+        /// NULLABLE ON PURPOSE, same convention as <see cref="UsageSnapshot.GrossQuantity"/>: NULL
+        /// means "not captured" (rows written before this column existed), 0 means GitHub reported
+        /// zero. A month of NULLs must render as "no curve available", never as a flat zero line —
+        /// the latter would assert that nothing was consumed.
+        /// </summary>
+        public decimal? GrossQuantity { get; set; }
         /// <summary>CUMULATIVE month-to-date net amount as of <see cref="Day"/>.</summary>
         public decimal NetAmount { get; set; }
         /// <summary>CUMULATIVE month-to-date gross amount as of <see cref="Day"/>.</summary>

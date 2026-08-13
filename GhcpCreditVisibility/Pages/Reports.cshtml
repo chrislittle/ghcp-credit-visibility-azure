@@ -89,7 +89,8 @@
         <div class="sub">GitHub Copilot AI-credit reporting — break spend down by cost center, user, model@(Model.ShowOrganizationDim ? ", organization" : "") or enterprise, by day, week or month</div>
     </div>
     <div class="gh-headtools">
-        <span class="gh-scope" title="@Model.ScopeDetail"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
+        @* Names what the viewer can SEE — see the matching note on Index.cshtml. *@
+        <span class="gh-scope" title="@Model.ScopeDetail"><span class="dot"></span> Scope: @Model.ScopeLabel</span>
     </div>
 </div>
 

@@ -8,11 +8,12 @@
     <div>
         <h1>Admin — Access &amp; Settings</h1>
         <div class="sub">
-            Entra owns <strong>who is in a group</strong> (membership). This console owns <strong>what a group or user can see</strong>
-            — the mapping to one or more GitHub Copilot cost centers. A principal can be an Entra <strong>security group</strong> or an
-            individual <strong>user</strong> (e.g. a lone manager with no dedicated group), and can be mapped to <strong>any number of
-            cost centers</strong> — e.g. an executive group that needs a single top-down view spanning several cost centers.
-            Changes take effect on next page load — no re-login.
+            Entra owns <strong>who is in a group</strong> (membership). This console owns <strong>what that group or user can
+            do here</strong>, across three independent roles: <strong>cost center access</strong> (see specific teams),
+            <strong>Enterprise reader</strong> (see everything in an enterprise), and <strong>administrator</strong> (manage this
+            console, no data access). A principal can be an Entra <strong>security group</strong> or an individual
+            <strong>user</strong> — the latter covers the lone manager with no dedicated group. Roles combine: a principal may
+            hold any number of cost centers and a reader grant at the same time. Changes take effect on next page load — no re-login.
         </div>
     </div>
 </div>
@@ -289,25 +290,78 @@
     </div>
 </div>
 
+@* ── HOW ACCESS WORKS ────────────────────────────────────────────────────────────────────────
+   The overview lives in its own card rather than inside one role's section. It used to sit in the
+   cost-center card purely because that card came first, which meant the answer to "what are the
+   roles?" was buried inside one of them, and that card described the other two while they said
+   nothing about themselves. Each role card below now explains only ITSELF. *@
+<div class="gh-card">
+    <div class="ch">
+        <h2>How access works</h2>
+        <span class="hint">three roles, granted independently</span>
+    </div>
+    <div class="gh-cardbody">
+        <p class="gh-note mb-0">
+            Entra owns <strong>membership</strong>; this console owns <strong>what that group or user can do here</strong>.
+            The three roles below are independent and <strong>combine</strong> — a principal may hold cost centers in one
+            enterprise and a reader grant in another. Changes take effect on next page load, with no re-login.
+        </p>
+    </div>
+    <table>
+        <thead><tr><th>Role</th><th>Can see</th><th>Can configure</th><th>Granted by</th></tr></thead>
+        <tbody>
+            <tr>
+                <td><strong>Cost center access</strong></td>
+                <td>only the cost centers mapped to it</td>
+                <td>nothing</td>
+                <td>a mapping below</td>
+            </tr>
+            <tr>
+                <td><strong>Enterprise reader</strong></td>
+                <td><strong>everything</strong> within the enterprises granted — every cost center, the organization breakdown, enterprise-wide budgets, the allowance pool</td>
+                <td>nothing</td>
+                <td>a reader grant below (one enterprise, or all)</td>
+            </tr>
+            <tr>
+                <td><strong>Administrator</strong></td>
+                <td><strong>nothing by itself</strong></td>
+                <td>this console — mappings, enterprises, roles, backfills</td>
+                <td>the Entra <code>Admin</code> app role, or an admin principal below</td>
+            </tr>
+        </tbody>
+    </table>
+    <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);">
+        <p class="gh-note mb-0">
+            ⚠️ <strong>Some views cannot be delegated to a cost center at all.</strong> The Reports
+            <em>Organization</em> breakdown, <em>organization-scoped budgets</em> and the <em>allowance pool</em> come from
+            sources carrying no cost center, so there is nothing to narrow them by — showing them to a cost-center
+            principal would expose every other team's spend in that enterprise. That is the grain
+            <strong>Enterprise reader</strong> exists for, and the reason it is a separate role rather than a wider mapping.
+        </p>
+        <p class="gh-note mb-0" style="margin-top:8px;">
+            So if someone reports they cannot see an organization breakdown, that is working as intended: grant them
+            Enterprise reader for that enterprise. <strong>Do not make them an administrator</strong> — that hands over
+            console access while granting none of the visibility they asked for.
+        </p>
+        <p class="gh-note mb-0" style="margin-top:8px;">
+            The Entra <code>Admin</code> app role is the <strong>bootstrap</strong> and grants both, so a fresh deployment
+            with an empty database is never locked out. An administrator holding no reader grant sees an empty dashboard,
+            and the dashboard says exactly that rather than looking broken.
+        </p>
+    </div>
+</div>
+
 <!-- Principal -> Cost Center mappings -->
 <div class="gh-card">
     <div class="ch">
-        <h2>Access mappings</h2>
-        <span class="hint">principal → one or more cost centers</span>
+        <h2>Cost center access</h2>
+        <span class="hint">group or user — see only the cost centers mapped here</span>
     </div>
     <div class="gh-cardbody" style="border-bottom:1px solid var(--gh-line);">
         <p class="gh-note mb-0">
-            There are exactly <strong>two levels of access</strong>: an <strong>administrator</strong> (see everything, plus this
-            console) and a <strong>cost-center mapping</strong> below. Cost centers are the <em>only</em> unit that can be
-            delegated — a principal sees usage, budgets and reports for the cost centers mapped to it, and nothing else.
-        </p>
-        <p class="gh-note mb-0" style="margin-top:8px;">
-            ⚠️ <strong>GitHub organization views cannot be delegated.</strong> The Reports
-            <em>Organization</em> breakdown and any <em>organization-scoped budgets</em> are visible to
-            <strong>administrators only</strong>. GitHub's organization usage report carries no cost center, so there is nothing
-            to narrow it by — granting it to a cost-center principal would expose every other team's spend in that
-            enterprise. If a manager reports they cannot see an organization breakdown, that is working as intended;
-            the only way to grant it is to make them an administrator, which grants everything.
+            <strong>Many-to-many.</strong> A group or user can be mapped to any number of cost centers, across any
+            number of enterprises — that is how a manager spanning several teams gets one combined view without a
+            separate rollup feature. Remove one cost center at a time with the <strong>&times;</strong> on its badge.
         </p>
     </div>
     <table>
@@ -371,19 +425,20 @@
                 <label class="form-label mb-0 gh-note">Name (label)</label>
                 <input name="principalName" class="form-control form-control-sm" placeholder="SG-Finance / Dana Manager" />
             </div>
-            <div class="col-md-2">
+            <div class="col-md-3">
                 <label class="form-label mb-0 gh-note">Cost center(s)</label>
-                <select name="costCenterKeys" class="form-select form-select-sm" multiple size="4" required>
+                @* Checkboxes rather than <select multiple> — see the note on the reader form below.
+                   Grouped by enterprise, since the same cost-center NAME legitimately exists in two. *@
+                <div class="gh-checklist">
                     @foreach (var entGroup in Model.CostCenters.GroupBy(c => new { c.EnterpriseId, c.EnterpriseName }))
                     {
-                        <optgroup label="@(entGroup.Key.EnterpriseName ?? $"enterprise {entGroup.Key.EnterpriseId}")">
-                            @foreach (var c in entGroup)
-                            {
-                                <option value="@c.Key">@(c.Name ?? c.Id)</option>
-                            }
-                        </optgroup>
+                        <div class="grp">@(entGroup.Key.EnterpriseName ?? $"enterprise {entGroup.Key.EnterpriseId}")</div>
+                        @foreach (var c in entGroup)
+                        {
+                            <label><input type="checkbox" name="costCenterKeys" value="@c.Key" /><span>@(c.Name ?? c.Id)</span></label>
+                        }
                     }
-                </select>
+                </div>
             </div>
             <div class="col-md-2">
                 <button class="btn btn-sm btn-primary w-100" type="submit">Add mapping</button>
@@ -395,16 +450,106 @@
         }
         <div class="gh-note mt-2">
             Use <strong>User</strong> for an individual (e.g. a single manager who should see one cost center and has no dedicated group).
-            <strong>Ctrl/Cmd-click</strong> (or shift-click for a range) to select several cost centers at once — a group or user
-            can be granted <strong>any number</strong> of cost centers, so an exec can get a single top-down view across the whole org.
+            Tick <strong>any number</strong> of cost centers, across any number of enterprises — that is how an exec gets a single
+            top-down view spanning the whole org.
             Remove one cost center at a time with the <strong>&times;</strong> on its badge above.
+        </div>
+    </div>
+</div>
+
+<!-- Enterprise readers -->
+<div class="gh-card">
+    <div class="ch"><h2>Enterprise readers</h2><span class="hint">group or user — see everything in an enterprise (no console access)</span></div>
+    <table>
+        <thead><tr><th>Type</th><th>Principal</th><th>Object ID</th><th>Enterprise</th><th></th></tr></thead>
+        <tbody>
+            @foreach (var g in Model.ReaderGrants)
+            {
+                <tr>
+                    <td>@(g.PrincipalType == "User" ? "👤 User" : "👥 Group")</td>
+                    <td>@(g.PrincipalDisplayName ?? "—")</td>
+                    <td style="color:#66707d"><code>@g.PrincipalObjectId</code></td>
+                    <td>
+                        @if (g.EnterpriseId is long gid)
+                        {
+                            <text>🏢 @Model.EnterpriseNames.GetValueOrDefault(gid, $"enterprise {gid}")</text>
+                        }
+                        else
+                        {
+                            @* Deliberately distinct styling: an all-enterprises grant automatically
+                               covers enterprises registered in future, which a reader of this table
+                               must not have to infer. *@
+                            <span class="gh-badge ok" title="Covers every enterprise, including any registered later.">All enterprises</span>
+                        }
+                    </td>
+                    <td style="text-align:right">
+                        <form method="post" asp-page-handler="DeleteReader" class="js-confirm" data-confirm="Remove this reader grant?">
+                            <input type="hidden" name="id" value="@g.Id" />
+                            <button class="btn btn-sm btn-outline-danger" type="submit">Remove</button>
+                        </form>
+                    </td>
+                </tr>
+            }
+            @if (Model.ReaderGrants.Count == 0)
+            {
+                <tr><td colspan="5" style="text-align:center;color:#66707d;padding:22px 0;">No Enterprise Reader grants. (The Entra "Admin" app role still sees all data as a bootstrap.)</td></tr>
+            }
+        </tbody>
+    </table>
+    <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);background:#fafbff;">
+        <form method="post" asp-page-handler="AddReader" class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label mb-0 gh-note">Type</label>
+                <select name="principalType" class="form-select form-select-sm">
+                    <option value="Group">👥 Group</option>
+                    <option value="User">👤 User</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-0 gh-note">Object ID</label>
+                <input name="principalObjectId" class="form-control form-control-sm" placeholder="00000000-0000-0000-0000-000000000000" required />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label mb-0 gh-note">Name (label)</label>
+                <input name="principalName" class="form-control form-control-sm" placeholder="SG-GHCP-Finance" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-0 gh-note">Enterprise(s)</label>
+                @* Checkboxes, not <select multiple>: ctrl/cmd-click is a convention nobody discovers,
+                   and one stray click clears every selection made so far. Fixed height so the form
+                   does not grow as enterprises are registered.
+                   "All enterprises" stays a separate choice rather than "tick them all", because it
+                   is a different promise — it covers enterprises that do not exist yet. *@
+                <div class="gh-checklist">
+                    <label style="font-weight:600;">
+                        <input type="checkbox" name="enterpriseIds" value="all" />
+                        <span>★ All enterprises <span style="color:#66707d;font-weight:400;">(incl. future)</span></span>
+                    </label>
+                    <div class="grp">or pick specific ones</div>
+                    @foreach (var kv in Model.EnterpriseNames.OrderBy(k => k.Value))
+                    {
+                        <label><input type="checkbox" name="enterpriseIds" value="@kv.Key" /><span>@kv.Value</span></label>
+                    }
+                </div>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-sm btn-primary w-100" type="submit">Grant reader</button>
+            </div>
+        </form>
+        <div class="gh-note mt-2">
+            Tick several to grant them in one action. <strong>All enterprises</strong> is not the same as ticking every
+            box: it covers any enterprise registered <em>later</em> too, and granting it replaces the per-enterprise
+            grants it supersedes. This is the role for finance and reporting people.
         </div>
     </div>
 </div>
 
 <!-- Admin principals -->
 <div class="gh-card">
-    <div class="ch"><h2>Administrators</h2><span class="hint">group or user — see all data + manage this console</span></div>
+    @* Administrators manage this console and NOTHING ELSE. Seeing data is a separate grant — see
+       the Enterprise readers card below. The hint used to say "see all data + manage this console",
+       which is what forced report consumers to be made administrators. *@
+    <div class="ch"><h2>Administrators</h2><span class="hint">group or user — manage this console (no data access)</span></div>
     <table>
         <thead><tr><th>Type</th><th>Principal</th><th>Object ID</th><th></th></tr></thead>
         <tbody>
@@ -449,6 +594,11 @@
                 <button class="btn btn-sm btn-primary w-100" type="submit">Add administrator</button>
             </div>
         </form>
+        <div class="gh-note mt-2">
+            Administrators added here get <strong>no data access</strong> — grant Enterprise reader as well if they should
+            also see spend. Only the Entra <code>Admin</code> app role grants both, and it exists so a fresh deployment
+            cannot lock itself out.
+        </div>
     </div>
 </div>
 

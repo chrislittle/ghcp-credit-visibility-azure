@@ -53,3 +53,41 @@ az role assignment list --assignee <app-principal-id> -o table
 
 For SQL specifically, the grant is T-SQL not RBAC — if the app logs `Login failed for user`, run
 `./deploy.ps1 -Task grant-sql` (system_assigned mode). See `ghcp-snapshot-pipeline` step 3.
+
+## 4. "I can sign in but the dashboard is empty"
+
+**Since 2026-08-13, administering the console and seeing data are SEPARATE grants.** This is the most
+likely cause of an empty dashboard from an otherwise healthy deployment, and it is not a fault.
+
+| Role | Table | Grants |
+|---|---|---|
+| Administrator | `AdminPrincipals` | manage the console. **No data access.** |
+| Enterprise Reader | `PrincipalEnterpriseGrants` | all cost centers, org breakdown, enterprise budgets — for the enterprises granted |
+| Cost center manager | `PrincipalCostCenterMappings` | only the mapped (enterprise, cost center) pairs |
+
+The Entra `Admin` **app role** still grants see-all, as a bootstrap so a fresh deployment is never
+locked out. A DB-designated admin principal does not.
+
+`EnterpriseId IS NULL` on a grant means ALL enterprises, including any registered later — that is why
+the resolver collapses it to see-all rather than expanding it into today's enterprise ids.
+
+```sql
+-- Who can see what? (admins with no reader grant are the ones who will complain)
+SELECT a.PrincipalObjectId, a.PrincipalDisplayName, 'admin, NO read access' AS problem
+FROM AdminPrincipals a
+WHERE NOT EXISTS (SELECT 1 FROM PrincipalEnterpriseGrants g
+                  WHERE g.PrincipalType = a.PrincipalType AND g.PrincipalObjectId = a.PrincipalObjectId);
+
+SELECT g.PrincipalDisplayName, g.PrincipalType, g.PrincipalObjectId,
+       COALESCE(e.Slug, '** ALL ENTERPRISES **') AS grant_covers
+FROM PrincipalEnterpriseGrants g
+LEFT JOIN Enterprises e ON e.Id = g.EnterpriseId
+ORDER BY g.PrincipalDisplayName;
+```
+
+The app states this case explicitly on the dashboard ("you administer this deployment but hold no
+Enterprise Reader grant"), so a user reporting a *blank* screen with no such message has a different
+problem — check their group claims reached the token (section 2) before looking at grants.
+
+**Fix by granting Enterprise Reader on the admin console, never by adding an administrator.** Making
+someone an admin to fix a reporting complaint rebuilds exactly the conflation this split removed.

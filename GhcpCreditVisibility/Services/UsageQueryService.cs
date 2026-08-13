@@ -135,10 +135,29 @@ namespace GhcpCreditVisibility.Services
         public async Task<ScopeDescription> GetScopeDescriptionAsync(UserScope scope, CancellationToken ct = default)
         {
             if (scope.SeesAll) return new ScopeDescription("All cost centers");
-            if (scope.CostCenters.Count == 0) return new ScopeDescription("No assigned scope");
+            if (scope.ReadAllEnterpriseIds.Count == 0 && scope.CostCenters.Count == 0)
+                return new ScopeDescription("No assigned scope");
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
             var currentNames = await LoadCurrentNamesAsync(db, ct);
             var entNames = await LoadEnterpriseNamesAsync(db, ct);
+
+            // An Enterprise Reader grant is wider than any cost-center pair, so it leads the label.
+            // Additional pair grants (a reader for one enterprise who also manages a cost center in
+            // another) move to the tooltip rather than being dropped from the description entirely.
+            if (scope.ReadAllEnterpriseIds.Count > 0)
+            {
+                var readNames = scope.ReadAllEnterpriseIds
+                    .Select(id => entNames.GetValueOrDefault(id, $"enterprise {id}"))
+                    .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var readLabel = readNames.Count <= 2
+                    ? $"All cost centers · {string.Join(", ", readNames)}"
+                    : $"All cost centers · {readNames.Count} enterprises";
+                var readDetail = scope.CostCenters.Count > 0
+                    ? $"{string.Join(", ", readNames)} — plus {scope.CostCenters.Count} additional cost center grant(s)"
+                    : readNames.Count > 2 ? string.Join(", ", readNames) : null;
+                return new ScopeDescription(readLabel, readDetail);
+            }
             var enterpriseCount = scope.EnterpriseIds.Count;
             var multiEnterprise = enterpriseCount > 1;
             var labels = scope.CostCenters
@@ -188,13 +207,16 @@ namespace GhcpCreditVisibility.Services
         /// </summary>
         private static IQueryable<T> ApplyScope<T>(IQueryable<T> q, UserScope scope) where T : class
         {
-            // The enterprise filter narrows ANY scope (including admins' SeesAll) to one enterprise.
+            // The enterprise filter narrows ANY scope (including a global reader's SeesAll) to one enterprise.
             if (scope.EnterpriseFilter is long entFilter) q = q.Where(EqualsLong<T>("EnterpriseId", entFilter));
             if (scope.SeesAll) return q;
+            var hasRead = scope.ReadAllEnterpriseIds.Count > 0;
             var hasPairs = scope.CostCenters.Count > 0;
             var hasUsers = scope.UserLogins.Count > 0;
-            if (!hasPairs && !hasUsers) return q.Where(_ => false); // no access
-            if (hasPairs) q = q.Where(BuildPairPredicate<T>(scope.CostCenters));
+            // An Enterprise Reader commonly holds NO cost-center pairs, so reader grants must be part
+            // of this test — otherwise a perfectly valid reader falls through to "no access".
+            if (!hasRead && !hasPairs && !hasUsers) return q.Where(_ => false); // no access
+            if (hasRead || hasPairs) q = q.Where(BuildVisibilityPredicate<T>(scope.ReadAllEnterpriseIds, scope.CostCenters));
             if (hasUsers) q = q.Where(ContainsString<T>("UserLogin", scope.UserLogins));
             return q;
         }
@@ -218,14 +240,31 @@ namespace GhcpCreditVisibility.Services
         }
 
         /// <summary>
-        /// Builds the exact (enterprise, cost-center) pair filter as an OR of per-enterprise
-        /// id-list Contains clauses, so it translates to SQL. A flat Contains over bare cost-center
-        /// ids would be wider than the grant whenever an id existed in two enterprises.
+        /// Builds the viewer's visibility filter: enterprise-wide READER grants ORed with the exact
+        /// (enterprise, cost-center) pair grants.
+        ///
+        /// Everything is an OR of per-enterprise id-list Contains clauses so it translates to SQL. A
+        /// flat Contains over bare cost-center ids would be wider than the grant whenever an id
+        /// existed in two enterprises — and the reader branch is deliberately a whole-enterprise
+        /// clause, since an Enterprise Reader is defined as seeing every cost center within it,
+        /// including rows whose CostCenterId is NULL (unattributed spend a pair grant can never match).
         /// </summary>
-        private static Expression<Func<T, bool>> BuildPairPredicate<T>(IReadOnlyCollection<EnterpriseCostCenter> pairs)
+        private static Expression<Func<T, bool>> BuildVisibilityPredicate<T>(
+            IReadOnlyCollection<long> readAllEnterpriseIds,
+            IReadOnlyCollection<EnterpriseCostCenter> pairs)
         {
             var p = Expression.Parameter(typeof(T), "x");
             Expression? body = null;
+
+            if (readAllEnterpriseIds.Count > 0)
+            {
+                var entIds = readAllEnterpriseIds.Distinct().ToList();
+                body = Expression.Call(
+                    typeof(Enumerable), nameof(Enumerable.Contains), new[] { typeof(long) },
+                    Expression.Constant(entIds),
+                    Expression.Property(p, nameof(UsageSnapshot.EnterpriseId)));
+            }
+
             foreach (var g in pairs.GroupBy(x => x.EnterpriseId))
             {
                 var ids = g.Select(x => x.CostCenterId).ToList();
@@ -429,6 +468,273 @@ namespace GhcpCreditVisibility.Services
             return rows.Sum();
         }
 
+        // ── Included-allowance pool ─────────────────────────────────────────────────────────────
+
+        /// <summary>
+        /// One enterprise's included AI-credit allowance and how much of it this month has burned.
+        ///
+        /// Denominated in CREDITS, not dollars — the pool is a credit entitlement, and converting it
+        /// to money would imply a billable amount that does not exist until the pool is exhausted.
+        /// The only dollar figure here is <see cref="ProjectedOverageCredits"/>'s cost, which is
+        /// genuinely billable.
+        /// </summary>
+        /// <summary>Seats on one Copilot plan, and what each is worth. <see cref="CreditsPerSeat"/>
+        /// is null when the plan is not priced in configuration — those seats are real and must be
+        /// reported, but cannot be added to capacity.</summary>
+        public sealed record SeatPlan(string PlanType, int Seats, decimal? CreditsPerSeat)
+        {
+            public decimal? Credits => CreditsPerSeat is decimal c ? Seats * c : null;
+        }
+
+        /// <param name="Capacity">Null when no priced seats are known — collection has not run, failed,
+        /// or every seat is on an unpriced plan. NEVER derived from the GHEC licence count.</param>
+        /// <param name="Consumed">Null when no row carried a GrossQuantity — "not captured", NOT zero.</param>
+        /// <param name="Plans">Per-plan seat breakdown, priced and unpriced alike.</param>
+        public sealed record AllowancePool(
+            long EnterpriseId,
+            string EnterpriseName,
+            IReadOnlyList<SeatPlan> Plans,
+            decimal? Capacity,
+            decimal? Consumed,
+            bool HasIncompleteData,
+            int DaysElapsed,
+            int DaysInMonth,
+            decimal? RunRatePerDay,
+            decimal? ProjectedMonthEnd,
+            int? ExhaustionDay)
+        {
+            /// <summary>Total assigned Copilot seats, priced or not. NOT the enterprise licence count.</summary>
+            public int TotalSeats => Plans.Sum(p => p.Seats);
+
+            /// <summary>Seats on a plan configuration does not price. Surfaced rather than dropped:
+            /// silently excluding them understates capacity, which OVERSTATES the percentage used and
+            /// manufactures false alarms.</summary>
+            public int UnknownPlanSeats => Plans.Where(p => p.CreditsPerSeat is null).Sum(p => p.Seats);
+            public IReadOnlyList<string> UnknownPlanTypes =>
+                Plans.Where(p => p.CreditsPerSeat is null).Select(p => p.PlanType).ToList();
+            public bool HasUnpricedPlans => UnknownPlanSeats > 0;
+
+            public bool IsComputable => Capacity is > 0 && Consumed is not null;
+            public double PctUsed => IsComputable ? (double)(Consumed!.Value / Capacity!.Value) * 100.0 : 0;
+            /// <summary>Where the month is, as a percentage — the pace marker the meter compares against.
+            /// 60% burned on day 3 and on day 28 are opposite situations; the raw figure cannot say which.</summary>
+            public double PctElapsed => DaysInMonth > 0 ? DaysElapsed / (double)DaysInMonth * 100.0 : 0;
+            public decimal? Remaining => IsComputable ? Capacity!.Value - Consumed!.Value : null;
+            public bool IsExhausted => IsComputable && Consumed!.Value >= Capacity!.Value;
+            public bool IsProjectedToExceed => !IsExhausted && IsComputable && ProjectedMonthEnd > Capacity;
+            public decimal? ProjectedOverageCredits =>
+                IsComputable && ProjectedMonthEnd > Capacity ? ProjectedMonthEnd - Capacity : null;
+            /// <summary>Matches the budget meter's level classes so the two read as siblings.</summary>
+            public string Level => !IsComputable ? "ok" : IsExhausted ? "over" : IsProjectedToExceed ? "critical" : "ok";
+        }
+
+        /// <summary>
+        /// The included-allowance pool per enterprise for the CURRENT month.
+        ///
+        /// Current month only, deliberately. A burn-down of a closed month has nothing to project, and
+        /// <see cref="EnterpriseCopilotSeat"/> holds CURRENT seat counts with no history — using
+        /// today's seats to compute a past month's capacity would be quietly wrong. For a closed
+        /// month, any net spend at all already proves the pool was exhausted.
+        ///
+        /// Capacity comes from ASSIGNED COPILOT SEATS, summed per plan. It must never fall back to
+        /// <see cref="Enterprise.LicensedUserCount"/>: that is the GHEC licence count, a larger and
+        /// different population (8 licences against 3 seats on a live enterprise), and sizing the
+        /// allowance from it overstated capacity 5.5x. Overstatement is the dangerous direction — an
+        /// enterprise about to exhaust its pool renders as comfortable — so when seats are unknown
+        /// this reports "not computable" rather than substituting a number that is merely available.
+        ///
+        /// ENTERPRISE-GRAIN ONLY: the pool is a whole-enterprise figure that cannot be narrowed to a
+        /// cost center, exactly like the organization rollup. Cost-center managers get nothing.
+        /// </summary>
+        /// <param name="creditsPerSeatByPlan">Included credits per seat, keyed by GitHub's
+        /// <c>plan_type</c> ("business" 1900, "enterprise" 3900). A plan absent from this map is
+        /// reported as unpriced rather than dropped from the sum.</param>
+        public async Task<IReadOnlyList<AllowancePool>> GetAllowancePoolsAsync(
+            int year, int month, UserScope scope,
+            IReadOnlyDictionary<string, decimal> creditsPerSeatByPlan, DateTime asOfUtc, CancellationToken ct = default)
+        {
+            if (creditsPerSeatByPlan.Count == 0) return Array.Empty<AllowancePool>();
+            if (year != asOfUtc.Year || month != asOfUtc.Month) return Array.Empty<AllowancePool>();
+            if (!scope.HasEnterpriseRead) return Array.Empty<AllowancePool>();
+
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+            var entQuery = db.Enterprises.Where(e => e.Slug != Enterprise.BootstrapPlaceholderSlug);
+            var allowed = scope.EnterpriseReadFilter();
+            if (allowed is not null)
+            {
+                if (allowed.Count == 0) return Array.Empty<AllowancePool>();
+                var allowedIds = allowed.ToList();
+                entQuery = entQuery.Where(e => allowedIds.Contains(e.Id));
+            }
+            var enterprises = await entQuery.ToListAsync(ct);
+            if (enterprises.Count == 0) return Array.Empty<AllowancePool>();
+
+            var entIds = enterprises.Select(e => e.Id).ToList();
+
+            // Whole-enterprise consumption: no cost-center narrowing, because the pool IS the whole
+            // enterprise and a partial sum would understate how close it is to exhaustion. Only rows
+            // metered in AI CREDITS count — mixing unit types is how a credit total silently absorbs
+            // a quantity measured in something else.
+            var rows = await db.UsageSnapshots
+                .Where(x => x.Year == year && x.Month == month && entIds.Contains(x.EnterpriseId))
+                .Where(x => x.UnitType == UsageUnitTypes.AiCredits)
+                .Select(x => new { x.EnterpriseId, x.GrossQuantity })
+                .ToListAsync(ct);
+
+            // CURRENT month's seat rows only. Earlier months are retained as history for a capacity
+            // trend, but capacity today is today's seats — reading the whole table would sum a
+            // year's worth of monthly counts into a wildly inflated ceiling.
+            var seatRows = await db.EnterpriseCopilotSeats
+                .Where(x => entIds.Contains(x.EnterpriseId) && x.Year == year && x.Month == month)
+                .Select(x => new { x.EnterpriseId, x.PlanType, x.Seats })
+                .ToListAsync(ct);
+
+            var daysInMonth = DateTime.DaysInMonth(year, month);
+            var daysElapsed = Math.Clamp(asOfUtc.Day, 1, daysInMonth);
+
+            var pools = new List<AllowancePool>();
+            foreach (var e in enterprises.OrderBy(e => e.DisplayName ?? e.Slug))
+            {
+                var mine = rows.Where(r => r.EnterpriseId == e.Id).ToList();
+
+                // NULL GrossQuantity means "not captured" (rows written before the column existed), and
+                // must never be read as zero — that would render a busy enterprise as an untouched pool.
+                var captured = mine.Where(r => r.GrossQuantity is not null).Select(r => r.GrossQuantity!.Value).ToList();
+                decimal? consumed = mine.Count > 0 && captured.Count == 0 ? null : captured.Sum();
+                var incomplete = mine.Count > 0 && captured.Count > 0 && captured.Count < mine.Count;
+
+                // Capacity from ASSIGNED SEATS, per plan. A plan the map does not price contributes
+                // nothing to the sum but IS carried in the breakdown, so the card can say "N seats on
+                // plan X are not counted" instead of quietly returning a capacity that is too small.
+                var plans = seatRows
+                    .Where(s => s.EnterpriseId == e.Id)
+                    .OrderByDescending(s => s.Seats).ThenBy(s => s.PlanType)
+                    .Select(s => new SeatPlan(
+                        s.PlanType,
+                        s.Seats,
+                        creditsPerSeatByPlan.TryGetValue(s.PlanType, out var rate) ? rate : null))
+                    .ToList();
+
+                var pricedCredits = plans.Where(p => p.Credits is not null).Sum(p => p.Credits!.Value);
+                decimal? capacity = pricedCredits > 0 ? pricedCredits : null;
+
+                decimal? runRate = consumed is decimal c && daysElapsed > 0 ? c / daysElapsed : null;
+                decimal? projected = runRate is decimal r ? r * daysInMonth : null;
+                int? exhaustionDay = null;
+                if (capacity is decimal cap && runRate is decimal rate && rate > 0)
+                {
+                    var day = (int)Math.Ceiling(cap / rate);
+                    // Only meaningful if it lands inside this month; beyond that the pool simply holds.
+                    if (day <= daysInMonth) exhaustionDay = Math.Max(day, daysElapsed);
+                }
+
+                pools.Add(new AllowancePool(
+                    e.Id, string.IsNullOrWhiteSpace(e.DisplayName) ? e.Slug : e.DisplayName!,
+                    plans, capacity, consumed, incomplete,
+                    daysElapsed, daysInMonth, runRate, projected, exhaustionDay));
+            }
+            return pools;
+        }
+
+        /// <summary>One day of the month-to-date burn, in credits. <see cref="CumulativeCredits"/> is
+        /// the running total AS OF that day, not that day's own consumption.</summary>
+        public sealed record BurnDownPoint(int Day, decimal CumulativeCredits);
+
+        /// <summary>
+        /// The allowance burn-down for one enterprise's current month: cumulative credits consumed,
+        /// per day.
+        ///
+        /// <see cref="DailyUsageSnapshot"/> rows are ALREADY CUMULATIVE month-to-date, so this is a
+        /// per-day SUM ACROSS USERS of a value that is itself a running total — there is no
+        /// differencing to do, and none must be introduced. Summing across DAYS, by contrast, is the
+        /// ~30x inflation the table's own comment warns about, and is exactly what a naive
+        /// GROUP BY-less aggregation would produce.
+        ///
+        /// Reads <c>GrossQuantity</c>, not <c>NetQuantity</c>: net is post-discount and sits at zero
+        /// for any month the allowance fully covers, which is precisely the month a burn-down is
+        /// wanted for. Days whose rows predate that column are skipped rather than counted as zero,
+        /// so a partially-captured month shows a shorter curve instead of a false dip to nothing.
+        /// </summary>
+        public async Task<IReadOnlyList<BurnDownPoint>> GetAllowanceBurnDownAsync(
+            long enterpriseId, int year, int month, UserScope scope, CancellationToken ct = default)
+        {
+            var all = await GetAllowanceBurnDownsAsync(new[] { enterpriseId }, year, month, scope, ct);
+            return all.TryGetValue(enterpriseId, out var pts) ? pts : Array.Empty<BurnDownPoint>();
+        }
+
+        /// <summary>
+        /// The same curve for SEVERAL enterprises in ONE query — what the all-enterprises overview
+        /// needs for its sparklines. A reader granted ten enterprises would otherwise fire ten
+        /// round trips to render one screen.
+        /// </summary>
+        public async Task<IReadOnlyDictionary<long, IReadOnlyList<BurnDownPoint>>> GetAllowanceBurnDownsAsync(
+            IEnumerable<long> enterpriseIds, int year, int month, UserScope scope, CancellationToken ct = default)
+        {
+            var ids = enterpriseIds.Where(scope.CanReadEnterprise).Distinct().ToList();
+            var empty = (IReadOnlyDictionary<long, IReadOnlyList<BurnDownPoint>>)
+                new Dictionary<long, IReadOnlyList<BurnDownPoint>>();
+            if (ids.Count == 0) return empty;
+
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var rows = await db.DailyUsageSnapshots
+                .Where(x => ids.Contains(x.EnterpriseId) && x.Year == year && x.Month == month)
+                .Where(x => x.UnitType == UsageUnitTypes.AiCredits && x.GrossQuantity != null)
+                .Select(x => new { x.EnterpriseId, x.Day, Qty = x.GrossQuantity!.Value })
+                .ToListAsync(ct);
+
+            return rows
+                .GroupBy(r => r.EnterpriseId)
+                .ToDictionary(
+                    g => g.Key,
+                    g => (IReadOnlyList<BurnDownPoint>)g
+                        .GroupBy(r => r.Day)
+                        .Select(d => new BurnDownPoint(d.Key, d.Sum(r => r.Qty)))
+                        .OrderBy(p => p.Day)
+                        .ToList());
+        }
+
+        /// <summary>A cost center's share of one enterprise's allowance burn.</summary>
+        public sealed record PoolContributor(string? CostCenterId, string? CostCenterName, decimal Credits);
+
+        /// <summary>
+        /// Cost centers ranked by credits consumed against one enterprise's pool this month.
+        ///
+        /// An OUTLIER view, not a bill. Credits are pooled across the enterprise, so a cost center
+        /// above its notional share costs nothing at all while the pool holds — this answers "who is
+        /// driving the burn", never "who owes what". The UI must say so.
+        ///
+        /// Enterprise-grain gated like the rest of the pool: a cost-center manager gets nothing,
+        /// because seeing the ranking means seeing every other team's consumption.
+        /// </summary>
+        public async Task<IReadOnlyList<PoolContributor>> GetPoolContributorsAsync(
+            long enterpriseId, int year, int month, UserScope scope, int top = 8, CancellationToken ct = default)
+        {
+            if (!scope.CanReadEnterprise(enterpriseId)) return Array.Empty<PoolContributor>();
+
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var rows = await db.UsageSnapshots
+                .Where(x => x.EnterpriseId == enterpriseId && x.Year == year && x.Month == month)
+                .Where(x => x.UnitType == UsageUnitTypes.AiCredits && x.GrossQuantity != null)
+                .Select(x => new { x.CostCenterId, x.CostCenterName, Qty = x.GrossQuantity!.Value })
+                .ToListAsync(ct);
+
+            var ranked = rows
+                .GroupBy(r => new { r.CostCenterId, r.CostCenterName })
+                .Select(g => new PoolContributor(g.Key.CostCenterId, g.Key.CostCenterName, g.Sum(r => r.Qty)))
+                .OrderByDescending(c => c.Credits)
+                .ToList();
+
+            // Rows with no cost center are enterprise-level consumption, not an error. Folding them
+            // into an "Unattributed" row keeps the ranking reconciling against the pool total;
+            // dropping them would make the parts silently fail to sum to the whole.
+            if (ranked.Count <= top) return ranked;
+            var head = ranked.Take(top).ToList();
+            var rest = ranked.Skip(top).Sum(c => c.Credits);
+            if (rest > 0) head.Add(new PoolContributor(null, "Other cost centers", rest));
+            return head;
+        }
+
         public async Task<IReadOnlyList<TrendPoint>> GetTrendAsync(int months, UserScope scope, CancellationToken ct = default)
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
@@ -569,16 +875,19 @@ namespace GhcpCreditVisibility.Services
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-            // ── Organization: different table, and ADMIN-ONLY ──
-            // OrgUsageSnapshot carries EnterpriseId but NO cost centre and NO user, so the scope
-            // filter cannot narrow it below the enterprise. Showing it to a cost-centre-scoped
+            // ── Organization: different table, and ENTERPRISE-GRAIN ONLY ──
+            // OrgUsageSnapshot carries EnterpriseId but NO cost center and NO user, so the scope
+            // filter cannot narrow it below the enterprise. Showing it to a cost-center-scoped
             // manager would therefore expose every OTHER team's spend in that enterprise — the exact
             // leak the access model exists to prevent. There is no partial version of this: without
-            // a cost-centre column there is nothing to filter on, so it is restricted to viewers who
-            // can already see everything. Revisit if org→cost-centre mapping ever becomes available.
+            // a cost-center column there is nothing to filter on.
+            //
+            // Enterprise Reader is exactly that grain, so it qualifies where a manager does not — but
+            // a reader for one enterprise must not see another's organizations, which is why
+            // BuildOrgSeriesAsync restricts the table rather than relying on this gate alone.
             if (dim == SeriesDimension.Organization)
             {
-                if (!scope.SeesAll) return Array.Empty<Series>();
+                if (!scope.HasEnterpriseRead) return Array.Empty<Series>();
                 return await BuildOrgSeriesAsync(db, gran, count, scope, topN, ct);
             }
 
@@ -719,7 +1028,19 @@ namespace GhcpCreditVisibility.Services
             const string Unattributed = "Unattributed";
 
             var oq = db.OrgUsageSnapshots.AsQueryable();
-            if (scope.EnterpriseFilter is long entFilter) oq = oq.Where(x => x.EnterpriseId == entFilter);
+
+            // Restrict to the enterprises this viewer may read AT ALL, intersected with the UI's
+            // enterprise filter. Null means "no restriction" (a global reader with no filter); an
+            // EMPTY list means nothing may be shown — the two must not be conflated, or an
+            // Enterprise Reader whose filter selects an enterprise they lack would see everything.
+            var allowedEnterprises = scope.EnterpriseReadFilter();
+            if (allowedEnterprises is not null)
+            {
+                if (allowedEnterprises.Count == 0) return Array.Empty<Series>();
+                var allowedIds = allowedEnterprises.ToList();
+                oq = oq.Where(x => allowedIds.Contains(x.EnterpriseId));
+            }
+
             var orgRows = await oq.ToListAsync(ct);
             if (orgRows.Count == 0) return Array.Empty<Series>();
 

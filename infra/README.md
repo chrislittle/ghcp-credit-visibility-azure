@@ -181,13 +181,24 @@ This is the app's built-in access model. The **Entra group → GitHub cost cente
 
 Why this exists: Entra owns group **membership**, GitHub owns **cost centers**, but nothing connects the two. The admin console is that glue — and because scope is resolved **per request**, mapping changes take effect on the user's next page load (no re-login, no redeploy).
 
+There are **three independent roles**, all managed here. Administering the console and seeing spend are **separate grants** — so reporting users never have to be made administrators, and whoever wires up the mappings need not be handed visibility of the whole company's spend.
+
+| Role | Sees | Can configure | Granted by |
+|---|---|---|---|
+| **Cost center access** | only the cost centers mapped to it | nothing | a principal → cost center mapping |
+| **Enterprise reader** | *everything* within granted enterprises — every cost center, the organization breakdown, enterprise-wide budgets, the allowance pool | nothing | a reader grant (one enterprise, or all) |
+| **Administrator** | **nothing by itself** | the console — mappings, enterprises, roles, backfills | the Entra `Admin` app role, or an admin principal |
+
 What an admin does at `/Admin/Mappings`:
-- **Map a principal → a GitHub cost center** — a principal is an Entra security **group** (a team) or an individual **user** object ID (for a lone manager with no group). Cost centers are picked from those discovered in the snapshot data.
-- **Designate administrators** — a group or user who sees all data and can manage the console (self-service).
+- **Map a principal → GitHub cost centers** — a principal is an Entra security **group** (a team) or an individual **user** object ID (for a lone manager with no group). Cost centers are picked from those discovered in the snapshot data; tick any number, across any number of enterprises.
+- **Grant Enterprise reader** — per enterprise, or **all enterprises** (a standing grant that also covers any registered *later*). This is the role for finance and reporting people.
+- **Designate administrators** — console access only. Grants **no** data visibility on its own.
 - **Set the organization display name** (header/title) — an admin setting, not Terraform.
 - View **their own user + group object IDs** (from the token) to make mapping/testing easy.
 
-Access (admin) is granted by **either** the Entra **`Admin`** app role (bootstrap — assign yourself once so you can sign in and configure) **or** a principal (group or user) you add as an administrator in the console. Tables `PrincipalCostCenterMapping`, `AdminPrincipal`, and `AppSetting` are created/updated via **EF Core migrations** on startup.
+The Entra **`Admin` app role** is the **bootstrap** and grants *both* console access and see-all, so a fresh deployment with an empty database is never locked out — assign it to yourself once. An administrator holding no reader grant sees an empty dashboard, and the dashboard says exactly that rather than looking broken. Tables `PrincipalCostCenterMapping`, `PrincipalEnterpriseGrant`, `AdminPrincipal`, and `AppSetting` are created/updated via **EF Core migrations** on startup.
+
+> **Some views cannot be delegated to a cost center at all.** The Reports *Organization* breakdown, organization-scoped budgets and the allowance pool come from sources carrying no cost center, so there is nothing to narrow them by. That grain is exactly what **Enterprise reader** exists for. If someone cannot see an organization breakdown, grant them that role — **not** administrator, which would hand over console access while granting none of the visibility they actually asked for.
 
 Test flow with a peer:
 ```
@@ -195,7 +206,10 @@ Test flow with a peer:
 2. Assign yourself the Entra "Admin" app role -> sign in -> open /Admin/Mappings.
 3. Create an Entra security group (e.g. SG-Finance), add your peer.
 4. In the console: map SG-Finance -> Cost Center A.
-5. Peer signs in -> sees only Cost Center A. You (admin) -> see all. Change the mapping any time; no re-login.
+5. Peer signs in -> sees only Cost Center A. Change the mapping any time; no re-login.
+6. Now grant SG-Finance "Enterprise reader" for one enterprise -> the peer additionally sees every
+   cost center in it, the organization breakdown and the allowance pool. Roles COMBINE rather than
+   replacing one another.
 ```
 
 

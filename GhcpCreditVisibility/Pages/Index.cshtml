@@ -52,7 +52,10 @@
         <div class="sub">GitHub Copilot AI-credit spend across your organization</div>
     </div>
     <div class="gh-headtools">
-        <span class="gh-scope" title="@Model.ScopeDetail"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
+        @* The pill names what the viewer can SEE. It used to append "(Admin)", which conflated
+           administering the deployment with having visibility — the two are now separate grants,
+           and the label must not imply one from the other. *@
+        <span class="gh-scope" title="@Model.ScopeDetail"><span class="dot"></span> Scope: @Model.ScopeLabel</span>
         @if (Model.MultiEnterprise)
         {
             <form method="get" class="gh-mpick mb-0">
@@ -88,7 +91,18 @@
     </div>
 </div>
 
-@if (!Model.SeesAll && Model.UserCount == 0)
+@* An empty dashboard has THREE causes that look identical and mean different things. Administering
+   this deployment no longer grants visibility, so "you have no grant" is now the likeliest of them
+   — and the only one the viewer can act on themselves. *@
+@if (Model.IsAdminWithoutReadAccess)
+{
+    <div class="alert alert-warning py-2">
+        You administer this deployment but hold no <strong>Enterprise Reader</strong> grant, so there is no usage data in your scope.
+        Administration and data visibility are separate: grant yourself (or your Entra group) reader access on the
+        <a href="@Url.Page("/Admin/Mappings")">admin console</a>. Nothing is wrong with the data.
+    </div>
+}
+else if (!Model.SeesAll && Model.UserCount == 0)
 {
     <div class="alert alert-info py-2">No usage in your assigned scope yet — the snapshot job populates data on its next run.</div>
 }
@@ -149,6 +163,43 @@
             <div class="delta">Top: @(Model.TopUser.UserName ?? Model.TopUser.UserLogin) $@Model.TopUser.NetAmount.ToString("N2")</div>
         }
     </div>
+    @if (Model.PrimaryPool is not null)
+    {
+        var p = Model.PrimaryPool;
+        var poolPct = (int)Math.Round(p.PctUsed);
+        var poolCount = Model.AllowancePools.Count(x => x.IsComputable);
+        <div class="gh-kpi b5">
+            @* 🔋 rather than a ticket: a pool that depletes IS a battery, and the glyph stays legible
+               at 20px where a ticket rendered as an unreadable red blob. *@
+            <div class="ic">🔋</div>
+            @* The enterprise is named in the LABEL, not left to a footnote below the number. With
+               several enterprises in scope, "145%" on its own is a statistic about nobody — the
+               reader cannot act on it without knowing whose it is. *@
+            <div class="label">
+                Allowance pool@(poolCount > 1 ? " · " + p.EnterpriseName : "")
+                <span title="Included AI credits for @p.EnterpriseName this month, from @p.TotalSeats assigned Copilot seat(s): @string.Join(" + ", p.Plans.Where(x => x.CreditsPerSeat is not null).Select(x => $"{x.Seats} {x.PlanType} × {x.CreditsPerSeat:N0}")) credits. Copilot seats, NOT enterprise licence holders. Credits are POOLED across the enterprise, not per person, and do not carry over.">ⓘ</span>
+            </div>
+            <div class="val">@poolPct%</div>
+            @* The headline is the projection, not the raw percentage: 62% used means opposite things
+               on day 3 and day 28, and only the run rate distinguishes them. *@
+            @if (p.IsExhausted)
+            {
+                <div class="delta up" title="The included allowance is gone; further usage is billable.">Pool exhausted — usage now billable</div>
+            }
+            else if (p.ExhaustionDay is int day)
+            {
+                <div class="delta up" title="Projected from this month's run rate to date.">▲ empties ~@day @IndexModel.ShortMonth(Model.Year, Model.Month)</div>
+            }
+            else
+            {
+                <div class="delta down">on track — no overage projected</div>
+            }
+            @if (poolCount > 1)
+            {
+                <div class="delta" title="Pools are never combined across enterprises — this is the one closest to its own ceiling.">worst of @poolCount enterprises</div>
+            }
+        </div>
+    }
     @if (Model.ShowGrossUsage)
     {
         <div class="gh-kpi b5">
@@ -363,6 +414,92 @@
         </div>
     </div>
 </div>
+
+@* ALLOWANCE POOL — SUMMARY ONLY. The burn-down curve, seat breakdown and contributor ranking live
+   on Budgets & allowance; the dashboard's job is to say whether this needs attention and then get
+   out of the way. Still placed directly above Budgets, because the two are cause and effect: a
+   budget can read comfortably green while the pool is days from empty, and the pool emptying is
+   precisely what makes the budget's number start moving. Rendered per enterprise and NEVER summed —
+   each pool has its own ceiling, and a combined figure would let one enterprise's headroom mask
+   another's breach. *@
+@if (Model.AllowancePools.Count > 0)
+{
+    <div class="gh-card">
+        <div class="ch">
+            <h2>Included allowance pool</h2>
+            <span class="hint">@Model.MonthLabel · day @Model.AllowancePools[0].DaysElapsed of @Model.AllowancePools[0].DaysInMonth</span>
+        </div>
+        <div class="gh-budgets">
+            @foreach (var p in Model.AllowancePools)
+            {
+                <div class="gh-budget">
+                    <div class="top">
+                        <span class="name">
+                            🔋 @p.EnterpriseName
+                            @if (!p.IsComputable)
+                            {
+                                <span class="gh-badge" title="No Copilot seats collected yet, every seat is on a plan this deployment does not price, or this month's rows carry no gross quantity. Not zero — unknown.">Not available</span>
+                            }
+                            else if (p.IsExhausted)
+                            {
+                                <span class="gh-badge over">Pool exhausted</span>
+                            }
+                            else if (p.IsProjectedToExceed)
+                            {
+                                <span class="gh-badge critical">Projected to exceed</span>
+                            }
+                            else
+                            {
+                                <span class="gh-badge ok">On track</span>
+                            }
+                        </span>
+                        @if (p.IsComputable)
+                        {
+                            <span style="font-variant-numeric:tabular-nums;font-weight:700;">
+                                @p.Consumed!.Value.ToString("N0") <span style="color:#98a2b3;font-weight:500">/ @p.Capacity!.Value.ToString("N0") credits</span>
+                            </span>
+                        }
+                    </div>
+                    @if (p.IsComputable)
+                    {
+                        var pct = Math.Min(100, (int)Math.Round(p.PctUsed));
+                        var pace = Math.Min(100, (int)Math.Round(p.PctElapsed));
+                        <div class="meter" style="position:relative;">
+                            <i class="fill-@p.Level" style="width:@(pct)%"></i>
+                            @* Pace marker: how far through the month we are. Fill past the marker means
+                               burning faster than the month is passing. *@
+                            <i style="position:absolute;top:-2px;bottom:-2px;left:@(pace)%;width:2px;background:#66707d;border-radius:0;"
+                               title="@pace% of the month has elapsed"></i>
+                        </div>
+                        <div class="sub">
+                            <span>@p.PctUsed.ToString("N0")% used · pace marker at @pace%</span>
+                            <span>
+                                @if (p.IsExhausted)
+                                {
+                                    <text>@Math.Abs(p.Remaining ?? 0).ToString("N0") credits over</text>
+                                }
+                                else if (p.ExhaustionDay is int day)
+                                {
+                                    <text>empties ~@day @IndexModel.ShortMonth(Model.Year, Model.Month)</text>
+                                }
+                                else
+                                {
+                                    <text>@p.Remaining?.ToString("N0") credits remaining</text>
+                                }
+                            </span>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+        <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+            <div class="gh-note mb-0">
+                Included credits reset monthly and do not carry over. Usage beyond the pool is billed at $0.01 per credit.
+            </div>
+            <a href="@Url.Page("Budgets", new { Period = Model.PeriodValue, Ent = Model.Ent })" style="font-weight:600;font-size:13px;white-space:nowrap;">Burn-down &amp; contributors →</a>
+        </div>
+    </div>
+}
 
 <!-- BUDGETS (bottom): exceptions-first at scale, everything at small scale -->
 @if (Model.Budgets.Count > 0)

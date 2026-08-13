@@ -170,5 +170,66 @@ namespace GhcpCreditVisibility.Services
             var row = await db.AdminPrincipals.FindAsync(new object[] { id }, ct);
             if (row is not null) { db.AdminPrincipals.Remove(row); await db.SaveChangesAsync(ct); }
         }
+
+        // ── Enterprise Reader grants ────────────────────────────────────────────────────────────
+        // Deliberately a SEPARATE surface from admin principals above: administering the console and
+        // seeing spend are separate rights, and one screen that granted both would rebuild exactly
+        // the conflation this table exists to undo.
+
+        public async Task<IReadOnlyList<PrincipalEnterpriseGrant>> GetEnterpriseGrantsAsync(CancellationToken ct = default)
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            return await db.PrincipalEnterpriseGrants
+                .OrderBy(g => g.PrincipalDisplayName ?? g.PrincipalObjectId)
+                .ThenBy(g => g.EnterpriseId)
+                .ToListAsync(ct);
+        }
+
+        /// <param name="enterpriseId">NULL grants ALL enterprises, including ones registered later.</param>
+        public async Task AddEnterpriseGrantAsync(string principalType, string principalObjectId, string? principalName,
+            long? enterpriseId, string? modifiedBy, CancellationToken ct = default)
+        {
+            var type = NormalizeType(principalType);
+            principalObjectId = principalObjectId?.Trim() ?? "";
+            if (principalObjectId.Length == 0) throw new ArgumentException("Principal object ID is required.");
+
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+            if (enterpriseId is long entId && !await db.Enterprises.AnyAsync(e => e.Id == entId, ct))
+                throw new ArgumentException("That enterprise is not registered.");
+
+            // Idempotent, matching AddAdminPrincipalAsync: re-granting is a no-op rather than an error.
+            if (await db.PrincipalEnterpriseGrants.AnyAsync(g =>
+                    g.PrincipalType == type && g.PrincipalObjectId == principalObjectId && g.EnterpriseId == enterpriseId, ct))
+                return;
+
+            // An all-enterprises grant SUPERSEDES per-enterprise ones for the same principal. Leaving
+            // both would be harmless to read (the resolver collapses to SeesAll) but the console would
+            // then show narrower grants that no longer do anything — a misleading audit trail.
+            if (enterpriseId is null)
+            {
+                var superseded = await db.PrincipalEnterpriseGrants
+                    .Where(g => g.PrincipalType == type && g.PrincipalObjectId == principalObjectId && g.EnterpriseId != null)
+                    .ToListAsync(ct);
+                if (superseded.Count > 0) db.PrincipalEnterpriseGrants.RemoveRange(superseded);
+            }
+
+            db.PrincipalEnterpriseGrants.Add(new PrincipalEnterpriseGrant
+            {
+                PrincipalType = type,
+                PrincipalObjectId = principalObjectId,
+                PrincipalDisplayName = string.IsNullOrWhiteSpace(principalName) ? null : principalName.Trim(),
+                EnterpriseId = enterpriseId,
+                ModifiedBy = modifiedBy
+            });
+            await db.SaveChangesAsync(ct);
+        }
+
+        public async Task DeleteEnterpriseGrantAsync(long id, CancellationToken ct = default)
+        {
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var row = await db.PrincipalEnterpriseGrants.FindAsync(new object[] { id }, ct);
+            if (row is not null) { db.PrincipalEnterpriseGrants.Remove(row); await db.SaveChangesAsync(ct); }
+        }
     }
 }

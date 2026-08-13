@@ -162,6 +162,40 @@ namespace GhcpCreditVisibility.Services
             return Task.FromResult(users);
         }
 
+        /// <summary>
+        /// Assigned Copilot seats. Two properties of this fixture are DELIBERATE, because the real
+        /// bug they guard against already shipped once in demo form:
+        ///
+        ///   1. FEWER SEATS THAN LICENCES. Every seeded user used to get a Copilot seat implicitly,
+        ///      which made "licence count" and "seat count" indistinguishable in demo mode and hid a
+        ///      capacity calculation that was 5.5x wrong against the live API. Here roughly three
+        ///      quarters of users hold a seat, so the two numbers visibly differ.
+        ///
+        ///   2. ONE MIXED-PLAN ENTERPRISE. Contoso spans business AND enterprise seats; Fabrikam is
+        ///      business-only. Included credits differ per plan (1,900 vs 3,900), so a capacity sum
+        ///      that ignores the mix is only detectable against an enterprise that HAS a mix.
+        ///
+        /// Deterministic (seeded by login) like the rest of this client.
+        /// </summary>
+        public Task<IReadOnlyList<CopilotSeat>> GetCopilotSeatsAsync(string enterprise, CancellationToken ct = default)
+        {
+            ThrowIfBroken(enterprise);
+            var seed = SeedFor(enterprise);
+            var mixed = string.Equals(enterprise, "contoso", StringComparison.OrdinalIgnoreCase);
+
+            var seats = new List<CopilotSeat>();
+            foreach (var s in seed.Users)
+            {
+                // Stable "does this user hold a seat" decision — no Random, so demo figures do not
+                // move between restarts in a client documented as deterministic.
+                if (StableSeed(s.Login) % 4 == 0) continue;   // ~1 in 4 licensed users has no seat
+                var plan = mixed && StableSeed(enterprise + "|" + s.Login) % 3 == 0 ? "enterprise" : "business";
+                seats.Add(new CopilotSeat { PlanType = plan });
+            }
+            IReadOnlyList<CopilotSeat> result = seats;
+            return Task.FromResult(result);
+        }
+
         public Task<IReadOnlyList<CostCenter>> GetCostCentersAsync(string enterprise, CancellationToken ct = default)
         {
             ThrowIfBroken(enterprise);
@@ -348,7 +382,11 @@ namespace GhcpCreditVisibility.Services
                     Product = "copilot",
                     Sku = "ai_credits",
                     Model = model,
-                    UnitType = "credit",
+                    // "ai-credits" is what the live API returns (confirmed against a real enterprise)
+                    // and what the OrgUsageItem path above already used. This said "credit", so demo
+                    // data did not match production for anything that FILTERS on unit type — such as
+                    // the allowance pool, which would have summed nothing and read 0%.
+                    UnitType = Data.UsageUnitTypes.AiCredits,
                     PricePerUnit = price,
                     GrossQuantity = qty,
                     GrossAmount = gross,
@@ -441,7 +479,13 @@ namespace GhcpCreditVisibility.Services
                             Product = "copilot",
                             Sku = "ai_credits",
                             Model = model,
+                            // Both are needed by anything measuring CONSUMPTION rather than spend —
+                            // the allowance pool filters on UnitType and sums GrossQuantity. Omitting
+                            // them made fabricated history invisible to those features, which then
+                            // rendered as "no usage" beside a dashboard full of it.
+                            UnitType = Data.UsageUnitTypes.AiCredits,
                             NetQuantity = qty,
+                            GrossQuantity = qty,
                             NetAmount = net,
                             GrossAmount = net
                         });
