@@ -394,19 +394,56 @@ namespace GhcpCreditVisibility.Pages.Admin
             return RedirectToPage();
         }
 
+        /// <summary>
+        /// Grants Enterprise Reader over SEVERAL enterprises in one action, mirroring the
+        /// multi-select on cost-center mappings — a finance group typically needs a set of them, and
+        /// repeating the form once per enterprise is the same friction that multi-select removed there.
+        /// </summary>
+        /// <param name="enterpriseIds">Selected enterprise ids. The literal "all" is the
+        /// all-enterprises grant and is deliberately DISTINCT from selecting every current
+        /// enterprise: it also covers any registered later.</param>
         public async Task<IActionResult> OnPostAddReaderAsync(string principalType, string principalObjectId,
-            string? principalName, string? enterpriseId, CancellationToken ct)
+            string? principalName, string[] enterpriseIds, CancellationToken ct)
         {
             if (!await _admin.IsAdminAsync(User, ct)) return Forbid();
             try
             {
-                // Empty string from the "All enterprises" <option> means NULL, not zero.
-                long? entId = string.IsNullOrWhiteSpace(enterpriseId) ? null : long.Parse(enterpriseId);
-                await _svc.AddEnterpriseGrantAsync(principalType, principalObjectId, principalName, entId, Actor, ct);
-                var where = entId is long id
-                    ? EnterpriseNames.GetValueOrDefault(id, $"enterprise {id}")
-                    : "all enterprises";
-                Message = $"Enterprise Reader granted to {principalType.ToLowerInvariant()} '{principalName ?? principalObjectId}' for {where}.";
+                var chosen = (enterpriseIds ?? Array.Empty<string>())
+                    .Select(v => v?.Trim())
+                    .Where(v => !string.IsNullOrEmpty(v))
+                    .Distinct()
+                    .ToList();
+                if (chosen.Count == 0) throw new ArgumentException("Select at least one enterprise, or All enterprises.");
+
+                // "All" wins outright — a standing grant covering future enterprises makes any
+                // per-enterprise selection alongside it meaningless, and AddEnterpriseGrantAsync
+                // already clears the narrower rows it supersedes.
+                if (chosen.Contains("all", StringComparer.OrdinalIgnoreCase))
+                {
+                    await _svc.AddEnterpriseGrantAsync(principalType, principalObjectId, principalName, null, Actor, ct);
+                    Message = $"Enterprise Reader granted to {principalType.ToLowerInvariant()} '{principalName ?? principalObjectId}' for ALL enterprises, including any registered later.";
+                    return RedirectToPage();
+                }
+
+                // Only registered enterprises may be granted. The form is a select built from the
+                // registry, so a value outside it did not come from the UI — the same reasoning that
+                // guards cost-center keys above.
+                //
+                // Read the registry HERE rather than using the EnterpriseNames property: that is
+                // populated by LoadAsync on GET and is empty during a POST, so validating against it
+                // rejected every enterprise. The single-select version used it only to label the
+                // success message, where an empty dictionary degraded quietly to "enterprise 1" —
+                // which is why this surfaced only once the value was actually validated.
+                var registered = await _registry.GetDisplayNamesAsync(ct);
+                var names = new List<string>();
+                foreach (var raw in chosen)
+                {
+                    if (!long.TryParse(raw, out var id) || !registered.ContainsKey(id))
+                        throw new ArgumentException($"Unknown enterprise: {raw}. Pick from the registered enterprises.");
+                    await _svc.AddEnterpriseGrantAsync(principalType, principalObjectId, principalName, id, Actor, ct);
+                    names.Add(registered.GetValueOrDefault(id, $"enterprise {id}"));
+                }
+                Message = $"Enterprise Reader granted to {principalType.ToLowerInvariant()} '{principalName ?? principalObjectId}' for {names.Count} enterprise(s): {string.Join(", ", names)}.";
             }
             catch (Exception ex) { Error = ex.Message; }
             return RedirectToPage();

@@ -513,9 +513,13 @@
                 <input name="principalName" class="form-control form-control-sm" placeholder="SG-GHCP-Finance" />
             </div>
             <div class="col-md-3">
-                <label class="form-label mb-0 gh-note">Enterprise</label>
-                <select name="enterpriseId" class="form-select form-select-sm">
-                    <option value="">All enterprises</option>
+                <label class="form-label mb-0 gh-note">Enterprise(s)</label>
+                @* Multi-select, matching cost-center mappings: a finance group usually needs a SET of
+                   enterprises, and one form submission each is the friction multi-select removed there.
+                   "All enterprises" is a separate option rather than "select them all", because it is a
+                   different promise — it covers enterprises that do not exist yet. *@
+                <select name="enterpriseIds" class="form-select form-select-sm" multiple size="4" required>
+                    <option value="all">★ All enterprises (incl. future)</option>
                     @foreach (var kv in Model.EnterpriseNames.OrderBy(k => k.Value))
                     {
                         <option value="@kv.Key">@kv.Value</option>
@@ -527,8 +531,9 @@
             </div>
         </form>
         <div class="gh-note mt-2">
-            <strong>All enterprises</strong> covers any enterprise registered <em>later</em> too — it is a standing grant,
-            not a snapshot of today's list — and granting it replaces any per-enterprise grants that principal already had.
+            <strong>Ctrl/Cmd-click</strong> (or shift-click for a range) to grant several enterprises at once.
+            <strong>All enterprises</strong> is not the same as selecting every one: it covers any enterprise registered
+            <em>later</em> too, and granting it replaces the per-enterprise grants it supersedes.
             This is the role for finance and reporting people.
         </div>
     </div>
