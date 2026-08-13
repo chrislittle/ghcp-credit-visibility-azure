@@ -9,11 +9,18 @@
     <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
     <DockerfileContext>.</DockerfileContext>
     <!-- App version — surfaced in the UI footer via AppInfo. Bump on release. -->
+    <!-- 1.5.0: Enterprise Reader role (data visibility split from console administration) and the
+         included-allowance pool (burn-down, projected exhaustion, contributors), sized from
+         ASSIGNED COPILOT SEATS per plan rather than enterprise licence holders. Backward
+         compatible: the EnterpriseReaderGrants migration grandfathers every existing admin with an
+         all-enterprises reader grant, so no deployment loses visibility on upgrade. Note for
+         operators: admins added AFTER upgrading get no data access until granted Enterprise
+         Reader — the dashboard says so explicitly rather than appearing broken. -->
     <!-- 1.4.0: multi-enterprise (registry, per-enterprise snapshots/PATs/alerting, enterprise-
          scoped access + reporting, per-user month-over-month deltas). Backward compatible:
          single-enterprise deployments upgrade losslessly via the MultiEnterprise migration. -->
-    <Version>1.4.0</Version>
-    <InformationalVersion>1.4.0</InformationalVersion>
+    <Version>1.5.0</Version>
+    <InformationalVersion>1.5.0</InformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>
