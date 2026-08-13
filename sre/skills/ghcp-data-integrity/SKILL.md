@@ -186,13 +186,19 @@ How to read it:
 | `Org` | Enterprise-wide budget. **At most ONE per enterprise** — more than one is a real defect | yes |
 | `CostCenter` | One per cost center that has a budget in GitHub | yes |
 | `User` | Personal spending limits. Any number, including hundreds | **no** — stored only; computable, but the access policy for personal limits is undecided |
-| `Organization` | One per org with a budget | **yes — ADMINS ONLY** (see below) |
+| `Organization` | One per org with a budget | **yes — ENTERPRISE READERS ONLY** (see below) |
 | `MultiUserCustomer` | Rare | **no** — semantics unestablished |
 | `Unknown` | **A real signal — investigate** | **no** |
 
-**Organization budgets are shown to administrators only.** Their actuals come from
+**Organization budgets need the Enterprise Reader role.** Their actuals come from
 `OrgUsageSnapshots` (Check 6), which carries no cost center — so the viewer's access scope cannot
 narrow them, and showing one to a cost-center-scoped manager would expose another team's spend.
+
+> **This check changed.** It previously said "administrators only". Administering the console and
+> seeing data are now separate grants (`PrincipalEnterpriseGrants`), so an application administrator
+> with no reader grant sees NO budgets at all — that is correct behaviour, not a fault. A reader
+> granted one enterprise sees that enterprise's organization budgets and no others; a reader with a
+> NULL `EnterpriseId` row sees every enterprise, including any registered later.
 Utilization is a join on organization NAME: the budget's `budget_entity_name` against usage's
 `organizationName`, verified against the live API as an EXACT match (unlike cost-center budgets,
 which need name-to-id resolution). **A budget stuck at 0% with usage clearly present means that join

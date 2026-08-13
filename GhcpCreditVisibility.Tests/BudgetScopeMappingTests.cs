@@ -166,20 +166,21 @@ namespace GhcpCreditVisibility.Tests
         }
 
         /// <summary>
-        /// A displayed scope that cannot be narrowed by the viewer's access scope MUST be admin-only.
-        /// Organization actuals come from a table with no cost-centre column, so there is nothing to
-        /// filter on — displaying it to a manager would expose organizations they have no grant for.
+        /// A displayed scope that cannot be narrowed by the viewer's access scope MUST require
+        /// enterprise-grain read. Organization actuals come from a table with no cost center column,
+        /// so there is nothing to filter on — displaying it to a manager would expose organizations
+        /// they have no grant for.
         /// </summary>
         [Fact]
-        public void Scopes_that_cannot_be_scope_filtered_are_admin_only()
+        public void Scopes_that_cannot_be_scope_filtered_need_enterprise_grain_read()
         {
-            Assert.Contains(BudgetScopes.Organization, BudgetScopes.AdminOnly);
+            Assert.Contains(BudgetScopes.Organization, BudgetScopes.EnterpriseGrainOnly);
 
-            // Everything admin-only must actually be displayable, or the flag is meaningless.
-            Assert.All(BudgetScopes.AdminOnly, s => Assert.Contains(s, BudgetScopes.Displayable));
+            // Everything gated must actually be displayable, or the flag is meaningless.
+            Assert.All(BudgetScopes.EnterpriseGrainOnly, s => Assert.Contains(s, BudgetScopes.Displayable));
 
-            // Cost-centre budgets ARE scope-filterable, so they must not be admin-gated.
-            Assert.DoesNotContain(BudgetScopes.CostCenter, BudgetScopes.AdminOnly);
+            // Cost center budgets ARE scope-filterable, so they must not be gated.
+            Assert.DoesNotContain(BudgetScopes.CostCenter, BudgetScopes.EnterpriseGrainOnly);
         }
 
         /// <summary>"MultiUserCustomer" is 17 chars — the Scope column was nvarchar(16).</summary>

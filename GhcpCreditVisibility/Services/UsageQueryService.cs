@@ -135,10 +135,29 @@ namespace GhcpCreditVisibility.Services
         public async Task<ScopeDescription> GetScopeDescriptionAsync(UserScope scope, CancellationToken ct = default)
         {
             if (scope.SeesAll) return new ScopeDescription("All cost centers");
-            if (scope.CostCenters.Count == 0) return new ScopeDescription("No assigned scope");
+            if (scope.ReadAllEnterpriseIds.Count == 0 && scope.CostCenters.Count == 0)
+                return new ScopeDescription("No assigned scope");
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
             var currentNames = await LoadCurrentNamesAsync(db, ct);
             var entNames = await LoadEnterpriseNamesAsync(db, ct);
+
+            // An Enterprise Reader grant is wider than any cost-center pair, so it leads the label.
+            // Additional pair grants (a reader for one enterprise who also manages a cost center in
+            // another) move to the tooltip rather than being dropped from the description entirely.
+            if (scope.ReadAllEnterpriseIds.Count > 0)
+            {
+                var readNames = scope.ReadAllEnterpriseIds
+                    .Select(id => entNames.GetValueOrDefault(id, $"enterprise {id}"))
+                    .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                var readLabel = readNames.Count <= 2
+                    ? $"All cost centers · {string.Join(", ", readNames)}"
+                    : $"All cost centers · {readNames.Count} enterprises";
+                var readDetail = scope.CostCenters.Count > 0
+                    ? $"{string.Join(", ", readNames)} — plus {scope.CostCenters.Count} additional cost center grant(s)"
+                    : readNames.Count > 2 ? string.Join(", ", readNames) : null;
+                return new ScopeDescription(readLabel, readDetail);
+            }
             var enterpriseCount = scope.EnterpriseIds.Count;
             var multiEnterprise = enterpriseCount > 1;
             var labels = scope.CostCenters
@@ -188,13 +207,16 @@ namespace GhcpCreditVisibility.Services
         /// </summary>
         private static IQueryable<T> ApplyScope<T>(IQueryable<T> q, UserScope scope) where T : class
         {
-            // The enterprise filter narrows ANY scope (including admins' SeesAll) to one enterprise.
+            // The enterprise filter narrows ANY scope (including a global reader's SeesAll) to one enterprise.
             if (scope.EnterpriseFilter is long entFilter) q = q.Where(EqualsLong<T>("EnterpriseId", entFilter));
             if (scope.SeesAll) return q;
+            var hasRead = scope.ReadAllEnterpriseIds.Count > 0;
             var hasPairs = scope.CostCenters.Count > 0;
             var hasUsers = scope.UserLogins.Count > 0;
-            if (!hasPairs && !hasUsers) return q.Where(_ => false); // no access
-            if (hasPairs) q = q.Where(BuildPairPredicate<T>(scope.CostCenters));
+            // An Enterprise Reader commonly holds NO cost-center pairs, so reader grants must be part
+            // of this test — otherwise a perfectly valid reader falls through to "no access".
+            if (!hasRead && !hasPairs && !hasUsers) return q.Where(_ => false); // no access
+            if (hasRead || hasPairs) q = q.Where(BuildVisibilityPredicate<T>(scope.ReadAllEnterpriseIds, scope.CostCenters));
             if (hasUsers) q = q.Where(ContainsString<T>("UserLogin", scope.UserLogins));
             return q;
         }
@@ -218,14 +240,31 @@ namespace GhcpCreditVisibility.Services
         }
 
         /// <summary>
-        /// Builds the exact (enterprise, cost-center) pair filter as an OR of per-enterprise
-        /// id-list Contains clauses, so it translates to SQL. A flat Contains over bare cost-center
-        /// ids would be wider than the grant whenever an id existed in two enterprises.
+        /// Builds the viewer's visibility filter: enterprise-wide READER grants ORed with the exact
+        /// (enterprise, cost-center) pair grants.
+        ///
+        /// Everything is an OR of per-enterprise id-list Contains clauses so it translates to SQL. A
+        /// flat Contains over bare cost-center ids would be wider than the grant whenever an id
+        /// existed in two enterprises — and the reader branch is deliberately a whole-enterprise
+        /// clause, since an Enterprise Reader is defined as seeing every cost center within it,
+        /// including rows whose CostCenterId is NULL (unattributed spend a pair grant can never match).
         /// </summary>
-        private static Expression<Func<T, bool>> BuildPairPredicate<T>(IReadOnlyCollection<EnterpriseCostCenter> pairs)
+        private static Expression<Func<T, bool>> BuildVisibilityPredicate<T>(
+            IReadOnlyCollection<long> readAllEnterpriseIds,
+            IReadOnlyCollection<EnterpriseCostCenter> pairs)
         {
             var p = Expression.Parameter(typeof(T), "x");
             Expression? body = null;
+
+            if (readAllEnterpriseIds.Count > 0)
+            {
+                var entIds = readAllEnterpriseIds.Distinct().ToList();
+                body = Expression.Call(
+                    typeof(Enumerable), nameof(Enumerable.Contains), new[] { typeof(long) },
+                    Expression.Constant(entIds),
+                    Expression.Property(p, nameof(UsageSnapshot.EnterpriseId)));
+            }
+
             foreach (var g in pairs.GroupBy(x => x.EnterpriseId))
             {
                 var ids = g.Select(x => x.CostCenterId).ToList();
@@ -569,16 +608,19 @@ namespace GhcpCreditVisibility.Services
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
 
-            // ── Organization: different table, and ADMIN-ONLY ──
-            // OrgUsageSnapshot carries EnterpriseId but NO cost centre and NO user, so the scope
-            // filter cannot narrow it below the enterprise. Showing it to a cost-centre-scoped
+            // ── Organization: different table, and ENTERPRISE-GRAIN ONLY ──
+            // OrgUsageSnapshot carries EnterpriseId but NO cost center and NO user, so the scope
+            // filter cannot narrow it below the enterprise. Showing it to a cost-center-scoped
             // manager would therefore expose every OTHER team's spend in that enterprise — the exact
             // leak the access model exists to prevent. There is no partial version of this: without
-            // a cost-centre column there is nothing to filter on, so it is restricted to viewers who
-            // can already see everything. Revisit if org→cost-centre mapping ever becomes available.
+            // a cost-center column there is nothing to filter on.
+            //
+            // Enterprise Reader is exactly that grain, so it qualifies where a manager does not — but
+            // a reader for one enterprise must not see another's organizations, which is why
+            // BuildOrgSeriesAsync restricts the table rather than relying on this gate alone.
             if (dim == SeriesDimension.Organization)
             {
-                if (!scope.SeesAll) return Array.Empty<Series>();
+                if (!scope.HasEnterpriseRead) return Array.Empty<Series>();
                 return await BuildOrgSeriesAsync(db, gran, count, scope, topN, ct);
             }
 
@@ -719,7 +761,19 @@ namespace GhcpCreditVisibility.Services
             const string Unattributed = "Unattributed";
 
             var oq = db.OrgUsageSnapshots.AsQueryable();
-            if (scope.EnterpriseFilter is long entFilter) oq = oq.Where(x => x.EnterpriseId == entFilter);
+
+            // Restrict to the enterprises this viewer may read AT ALL, intersected with the UI's
+            // enterprise filter. Null means "no restriction" (a global reader with no filter); an
+            // EMPTY list means nothing may be shown — the two must not be conflated, or an
+            // Enterprise Reader whose filter selects an enterprise they lack would see everything.
+            var allowedEnterprises = scope.EnterpriseReadFilter();
+            if (allowedEnterprises is not null)
+            {
+                if (allowedEnterprises.Count == 0) return Array.Empty<Series>();
+                var allowedIds = allowedEnterprises.ToList();
+                oq = oq.Where(x => allowedIds.Contains(x.EnterpriseId));
+            }
+
             var orgRows = await oq.ToListAsync(ct);
             if (orgRows.Count == 0) return Array.Empty<Series>();
 

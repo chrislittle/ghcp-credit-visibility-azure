@@ -12,13 +12,15 @@ namespace GhcpCreditVisibility.Pages
         private readonly IUserScopeResolver _scopeResolver;
         private readonly BudgetService _budgets;
         private readonly IConfiguration _config;
+        private readonly IAppAdminChecker _admin;
 
-        public IndexModel(UsageQueryService query, IUserScopeResolver scopeResolver, BudgetService budgets, IConfiguration config)
+        public IndexModel(UsageQueryService query, IUserScopeResolver scopeResolver, BudgetService budgets, IConfiguration config, IAppAdminChecker admin)
         {
             _query = query;
             _scopeResolver = scopeResolver;
             _budgets = budgets;
             _config = config;
+            _admin = admin;
         }
 
         // Query-string driven controls (all optional; sensible defaults).
@@ -61,6 +63,16 @@ namespace GhcpCreditVisibility.Pages
         public int Year { get; private set; }
         public int Month { get; private set; }
         public bool SeesAll { get; private set; }
+
+        /// <summary>
+        /// The caller administers this deployment but has been granted no Enterprise Reader access,
+        /// so they legitimately see nothing. Distinguished from "no data yet" because the two look
+        /// identical on screen and lead to opposite conclusions — one is a grant to make, the other
+        /// is a job that has not run. Since Admin stopped implying see-all, this is the most likely
+        /// reason for an otherwise-inexplicable empty dashboard.
+        /// </summary>
+        public bool IsAdminWithoutReadAccess { get; private set; }
+
         public string ScopeLabel { get; private set; } = "";
         /// <summary>Full resolved cost-center list for the pill's tooltip when the label is summarized (null otherwise).</summary>
         public string? ScopeDetail { get; private set; }
@@ -139,6 +151,11 @@ namespace GhcpCreditVisibility.Pages
 
             var scope = await _scopeResolver.ResolveAsync(User, ct);
             SeesAll = scope.SeesAll;
+            // Only worth asking when the scope is genuinely empty — an admin who also holds a grant
+            // sees data and needs no explanation, and this costs a DB round trip.
+            IsAdminWithoutReadAccess =
+                !scope.SeesAll && scope.ReadAllEnterpriseIds.Count == 0 && scope.CostCenters.Count == 0
+                && await _admin.IsAdminAsync(User, ct);
             var scopeDesc = await _query.GetScopeDescriptionAsync(scope, ct);
             ScopeLabel = scopeDesc.Label;
             ScopeDetail = scopeDesc.Detail;

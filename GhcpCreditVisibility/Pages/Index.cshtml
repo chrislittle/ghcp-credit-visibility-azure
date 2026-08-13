@@ -52,7 +52,10 @@
         <div class="sub">GitHub Copilot AI-credit spend across your organization</div>
     </div>
     <div class="gh-headtools">
-        <span class="gh-scope" title="@Model.ScopeDetail"><span class="dot"></span> Scope: @Model.ScopeLabel@(Model.SeesAll ? " (Admin)" : "")</span>
+        @* The pill names what the viewer can SEE. It used to append "(Admin)", which conflated
+           administering the deployment with having visibility — the two are now separate grants,
+           and the label must not imply one from the other. *@
+        <span class="gh-scope" title="@Model.ScopeDetail"><span class="dot"></span> Scope: @Model.ScopeLabel</span>
         @if (Model.MultiEnterprise)
         {
             <form method="get" class="gh-mpick mb-0">
@@ -88,7 +91,18 @@
     </div>
 </div>
 
-@if (!Model.SeesAll && Model.UserCount == 0)
+@* An empty dashboard has THREE causes that look identical and mean different things. Administering
+   this deployment no longer grants visibility, so "you have no grant" is now the likeliest of them
+   — and the only one the viewer can act on themselves. *@
+@if (Model.IsAdminWithoutReadAccess)
+{
+    <div class="alert alert-warning py-2">
+        You administer this deployment but hold no <strong>Enterprise Reader</strong> grant, so there is no usage data in your scope.
+        Administration and data visibility are separate: grant yourself (or your Entra group) reader access on the
+        <a href="@Url.Page("/Admin/Mappings")">admin console</a>. Nothing is wrong with the data.
+    </div>
+}
+else if (!Model.SeesAll && Model.UserCount == 0)
 {
     <div class="alert alert-info py-2">No usage in your assigned scope yet — the snapshot job populates data on its next run.</div>
 }

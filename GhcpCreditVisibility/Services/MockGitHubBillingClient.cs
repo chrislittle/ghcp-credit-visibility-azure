@@ -348,7 +348,11 @@ namespace GhcpCreditVisibility.Services
                     Product = "copilot",
                     Sku = "ai_credits",
                     Model = model,
-                    UnitType = "credit",
+                    // "ai-credits" is what the live API returns (confirmed against a real enterprise)
+                    // and what the OrgUsageItem path above already used. This said "credit", so demo
+                    // data did not match production for anything that FILTERS on unit type — such as
+                    // the allowance pool, which would have summed nothing and read 0%.
+                    UnitType = Data.UsageUnitTypes.AiCredits,
                     PricePerUnit = price,
                     GrossQuantity = qty,
                     GrossAmount = gross,
@@ -441,7 +445,13 @@ namespace GhcpCreditVisibility.Services
                             Product = "copilot",
                             Sku = "ai_credits",
                             Model = model,
+                            // Both are needed by anything measuring CONSUMPTION rather than spend —
+                            // the allowance pool filters on UnitType and sums GrossQuantity. Omitting
+                            // them made fabricated history invisible to those features, which then
+                            // rendered as "no usage" beside a dashboard full of it.
+                            UnitType = Data.UsageUnitTypes.AiCredits,
                             NetQuantity = qty,
+                            GrossQuantity = qty,
                             NetAmount = net,
                             GrossAmount = net
                         });

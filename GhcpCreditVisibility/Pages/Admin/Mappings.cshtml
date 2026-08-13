@@ -404,7 +404,10 @@
 
 <!-- Admin principals -->
 <div class="gh-card">
-    <div class="ch"><h2>Administrators</h2><span class="hint">group or user — see all data + manage this console</span></div>
+    @* Administrators manage this console and NOTHING ELSE. Seeing data is a separate grant — see
+       the Enterprise readers card below. The hint used to say "see all data + manage this console",
+       which is what forced report consumers to be made administrators. *@
+    <div class="ch"><h2>Administrators</h2><span class="hint">group or user — manage this console (no data access)</span></div>
     <table>
         <thead><tr><th>Type</th><th>Principal</th><th>Object ID</th><th></th></tr></thead>
         <tbody>
@@ -449,6 +452,85 @@
                 <button class="btn btn-sm btn-primary w-100" type="submit">Add administrator</button>
             </div>
         </form>
+    </div>
+</div>
+
+<!-- Enterprise readers -->
+<div class="gh-card">
+    <div class="ch"><h2>Enterprise readers</h2><span class="hint">group or user — see everything in an enterprise (no console access)</span></div>
+    <table>
+        <thead><tr><th>Type</th><th>Principal</th><th>Object ID</th><th>Enterprise</th><th></th></tr></thead>
+        <tbody>
+            @foreach (var g in Model.ReaderGrants)
+            {
+                <tr>
+                    <td>@(g.PrincipalType == "User" ? "👤 User" : "👥 Group")</td>
+                    <td>@(g.PrincipalDisplayName ?? "—")</td>
+                    <td style="color:#66707d"><code>@g.PrincipalObjectId</code></td>
+                    <td>
+                        @if (g.EnterpriseId is long gid)
+                        {
+                            <text>🏢 @Model.EnterpriseNames.GetValueOrDefault(gid, $"enterprise {gid}")</text>
+                        }
+                        else
+                        {
+                            @* Deliberately distinct styling: an all-enterprises grant automatically
+                               covers enterprises registered in future, which a reader of this table
+                               must not have to infer. *@
+                            <span class="gh-badge ok" title="Covers every enterprise, including any registered later.">All enterprises</span>
+                        }
+                    </td>
+                    <td style="text-align:right">
+                        <form method="post" asp-page-handler="DeleteReader" class="js-confirm" data-confirm="Remove this reader grant?">
+                            <input type="hidden" name="id" value="@g.Id" />
+                            <button class="btn btn-sm btn-outline-danger" type="submit">Remove</button>
+                        </form>
+                    </td>
+                </tr>
+            }
+            @if (Model.ReaderGrants.Count == 0)
+            {
+                <tr><td colspan="5" style="text-align:center;color:#66707d;padding:22px 0;">No Enterprise Reader grants. (The Entra "Admin" app role still sees all data as a bootstrap.)</td></tr>
+            }
+        </tbody>
+    </table>
+    <div class="gh-cardbody" style="border-top:1px solid var(--gh-line);background:#fafbff;">
+        <form method="post" asp-page-handler="AddReader" class="row g-2 align-items-end">
+            <div class="col-md-2">
+                <label class="form-label mb-0 gh-note">Type</label>
+                <select name="principalType" class="form-select form-select-sm">
+                    <option value="Group">👥 Group</option>
+                    <option value="User">👤 User</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-0 gh-note">Object ID</label>
+                <input name="principalObjectId" class="form-control form-control-sm" placeholder="00000000-0000-0000-0000-000000000000" required />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label mb-0 gh-note">Name (label)</label>
+                <input name="principalName" class="form-control form-control-sm" placeholder="SG-GHCP-Finance" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label mb-0 gh-note">Enterprise</label>
+                <select name="enterpriseId" class="form-select form-select-sm">
+                    <option value="">All enterprises</option>
+                    @foreach (var kv in Model.EnterpriseNames.OrderBy(k => k.Value))
+                    {
+                        <option value="@kv.Key">@kv.Value</option>
+                    }
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-sm btn-primary w-100" type="submit">Grant reader</button>
+            </div>
+        </form>
+        <div class="gh-note mt-2">
+            An <strong>Enterprise Reader</strong> sees every cost center's spend, the organization breakdown and
+            enterprise-wide budgets — but <strong>only for the enterprises granted</strong>, and with no access to this console.
+            This is the role for finance and reporting users; it exists so they need not be made administrators.
+            Granting <strong>All enterprises</strong> replaces any per-enterprise grants that principal already had.
+        </div>
     </div>
 </div>
 

@@ -49,6 +49,8 @@ namespace GhcpCreditVisibility.Pages.Admin
         public bool IsAdmin { get; private set; }
         public IReadOnlyList<PrincipalCostCenterMapping> Mappings { get; private set; } = Array.Empty<PrincipalCostCenterMapping>();
         public IReadOnlyList<AdminPrincipal> AdminPrincipals { get; private set; } = Array.Empty<AdminPrincipal>();
+        /// <summary>Enterprise Reader grants — data visibility, granted independently of admin rights.</summary>
+        public IReadOnlyList<PrincipalEnterpriseGrant> ReaderGrants { get; private set; } = Array.Empty<PrincipalEnterpriseGrant>();
         public IReadOnlyList<AdminMappingService.CostCenterOption> CostCenters { get; private set; } = Array.Empty<AdminMappingService.CostCenterOption>();
         public IReadOnlyCollection<string> MyGroups { get; private set; } = Array.Empty<string>();
         public string? MyUserObjectId { get; private set; }
@@ -117,6 +119,7 @@ namespace GhcpCreditVisibility.Pages.Admin
             await _registry.EnsureBootstrapAsync(ct);
             Mappings = await _svc.GetMappingsAsync(ct);
             AdminPrincipals = await _svc.GetAdminPrincipalsAsync(ct);
+            ReaderGrants = await _svc.GetEnterpriseGrantsAsync(ct);
             CostCenters = await _svc.GetKnownCostCentersAsync(ct);
             MyGroups = GroupClaims.GetGroupObjectIds(User);
             MyUserObjectId = GroupClaims.GetUserObjectId(User);
@@ -388,6 +391,32 @@ namespace GhcpCreditVisibility.Pages.Admin
             if (!await _admin.IsAdminAsync(User, ct)) return Forbid();
             await _svc.DeleteAdminPrincipalAsync(id, ct);
             Message = "Admin principal removed.";
+            return RedirectToPage();
+        }
+
+        public async Task<IActionResult> OnPostAddReaderAsync(string principalType, string principalObjectId,
+            string? principalName, string? enterpriseId, CancellationToken ct)
+        {
+            if (!await _admin.IsAdminAsync(User, ct)) return Forbid();
+            try
+            {
+                // Empty string from the "All enterprises" <option> means NULL, not zero.
+                long? entId = string.IsNullOrWhiteSpace(enterpriseId) ? null : long.Parse(enterpriseId);
+                await _svc.AddEnterpriseGrantAsync(principalType, principalObjectId, principalName, entId, Actor, ct);
+                var where = entId is long id
+                    ? EnterpriseNames.GetValueOrDefault(id, $"enterprise {id}")
+                    : "all enterprises";
+                Message = $"Enterprise Reader granted to {principalType.ToLowerInvariant()} '{principalName ?? principalObjectId}' for {where}.";
+            }
+            catch (Exception ex) { Error = ex.Message; }
+            return RedirectToPage();
+        }
+
+        public async Task<IActionResult> OnPostDeleteReaderAsync(long id, CancellationToken ct)
+        {
+            if (!await _admin.IsAdminAsync(User, ct)) return Forbid();
+            await _svc.DeleteEnterpriseGrantAsync(id, ct);
+            Message = "Enterprise Reader grant removed.";
             return RedirectToPage();
         }
     }
