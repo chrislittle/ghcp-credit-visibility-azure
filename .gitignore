@@ -268,3 +268,9 @@ tfplan
 # themselves (PATs come from Key Vault or an env var at runtime), but they are throwaway
 # operator tooling, not shipped product — keep them out of the public repo.
 tools/local/
+
+# ── Local AI-assistant workspace ──
+# Per-developer scratch: launch configs, agent settings, and anything a tool drops here later.
+# Nothing in it is part of the build. Ignored so a blanket `git add .` cannot sweep it into a
+# PUBLIC repo — the risk is not today's contents but whatever a future tool decides to write.
+.claude/
