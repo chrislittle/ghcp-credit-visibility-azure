@@ -1,4 +1,4 @@
-# GHCP data-integrity checks
+﻿# GHCP data-integrity checks
 
 This is a billing/reporting app: **wrong numbers are worse than downtime**, and nothing in HTTP
 monitoring catches them. A snapshot can "succeed" and still write garbage. Run these when data is
@@ -240,10 +240,23 @@ SELECT e.Slug, COUNT(*) AS org_budgets
 FROM BudgetSnapshots b JOIN Enterprises e ON e.Id = b.EnterpriseId
 WHERE b.Scope = 'Org'
 GROUP BY e.Slug HAVING COUNT(*) > 1;
+
+-- LAPSING SOON: a user budget with an expiry date is a TEMPORARY override. On that date GitHub
+-- deletes it and the user drops to the next applicable limit, with no warning anywhere in the UI.
+SELECT e.Slug, b.UserLogin, b.Amount, b.ConsumedAmount, b.ExpiresAt
+FROM BudgetSnapshots b JOIN Enterprises e ON e.Id = b.EnterpriseId
+WHERE b.ExpiresAt IS NOT NULL
+ORDER BY b.ExpiresAt;
 ```
 
+`ExpiresAt` is settable only on user-scoped budgets (GitHub feature, GA 2026-09-01). NULL means the
+budget does not expire — the default, and not "not captured": budgets are refetched in full every
+cycle, so every row carries a real value after one run.
+
 A budget count dropping to zero for an enterprise still means budgets were deleted in GitHub, that
-enterprise's snapshot is failing, or the PAT lost billing permission.
+enterprise's snapshot is failing, or the PAT lost billing permission. **One caveat added by expiry:
+a USER budget disappearing on its `ExpiresAt` date is normal and requires no action** — check the
+date before reporting a missing budget as a fault.
 
 ## Check 5 — Intra-month history (`DailyUsageSnapshots`)
 

@@ -95,6 +95,9 @@ namespace GhcpCreditVisibility.Services
             row.Amount = b.BudgetAmount;
             row.ConsumedAmount = b.ConsumedAmount ?? 0m;
             row.PreventFurtherUsage = b.PreventFurtherUsage ?? false;
+            // Null-to-null on purpose: absent means "does not expire", which is a real answer and
+            // not a missing one, so there is nothing to default the way PreventFurtherUsage does.
+            row.ExpiresAt = b.ExpiresAt;
             row.SnapshotUtc = nowUtc;
         }
     }

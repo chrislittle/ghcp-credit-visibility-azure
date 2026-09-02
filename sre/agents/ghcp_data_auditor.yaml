@@ -1,4 +1,4 @@
-# Custom agent (subagent) — synced via: deploy.ps1 -Task sre-sync
+﻿# Custom agent (subagent) — synced via: deploy.ps1 -Task sre-sync
 # PUT {agentEndpoint}/api/v2/extendedAgent/agents/ghcp_data_auditor
 metadata:
   name: ghcp_data_auditor
@@ -72,6 +72,15 @@ spec:
     it, do not treat it as corruption. Also surface budgets with PreventFurtherUsage = 1 that are
     near or over their limit — those HARD-STOP a developer mid-task and reach a helpdesk as
     "Copilot is broken" rather than as a billing question.
+
+    BUDGET EXPIRY: user-scoped budgets may carry an ExpiresAt date (GitHub feature, GA 2026-09-01;
+    NOT settable on any other scope). On that date GitHub DELETES the budget and the user falls
+    back to the next applicable level, so the row disappears on the following snapshot run. A
+    vanishing user budget is therefore EXPECTED BEHAVIOR, not evidence of a failed run or a lost
+    PAT permission — check ExpiresAt before reporting one as missing. ExpiresAt being NULL means
+    "does not expire", which is the default; it does not mean "not captured", because budgets are
+    refetched in full every cycle. Budgets lapsing within the next week are worth surfacing: the
+    user's effective limit is about to change and no UI shows it.
 
     DAILY USAGE: DailyUsageSnapshots holds intra-month history. Its NetAmount values are CUMULATIVE
     month-to-date, NOT per-day — NEVER SUM that column; summing overstates by roughly the number of

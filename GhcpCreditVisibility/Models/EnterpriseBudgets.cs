@@ -54,6 +54,22 @@ namespace GhcpCreditVisibility.Models
         /// </summary>
         [JsonPropertyName("prevent_further_usage")]
         public bool? PreventFurtherUsage { get; set; }
+
+        /// <summary>
+        /// The date this budget lapses (GitHub sends a plain <c>YYYY-MM-DD</c> date, never a
+        /// timestamp — hence <see cref="DateOnly"/> and not <see cref="DateTime"/>, which would
+        /// pin an evening US expiry to the wrong calendar day anywhere east of Greenwich).
+        /// Null means the budget does not expire, which is the default and the only behavior that
+        /// existed before 2026-09-01.
+        ///
+        /// ONLY POPULATED FOR <c>budget_scope: user</c> — GitHub rejects it on every other scope.
+        /// On expiry GitHub DELETES the budget and the user falls back to the next applicable
+        /// level, so the snapshot job's stale-row cleanup makes the row vanish on the following
+        /// run. Capturing the date is the only way this app can ever warn that an override is
+        /// about to lapse: once GitHub drops it there is nothing left to read.
+        /// </summary>
+        [JsonPropertyName("expires_at")]
+        public DateOnly? ExpiresAt { get; set; }
     }
 
     /// <summary>

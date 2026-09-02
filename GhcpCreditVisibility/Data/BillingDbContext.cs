@@ -560,6 +560,19 @@ namespace GhcpCreditVisibility.Data
         /// the most consequential budget field, so it is captured even ahead of being surfaced.</summary>
         public bool PreventFurtherUsage { get; set; }
 
+        /// <summary>GitHub's <c>expires_at</c>: the date the budget lapses, after which GitHub
+        /// deletes it and the user falls back to the next applicable budget level. Null = never
+        /// expires (the default, and the only behavior that existed before 2026-09-01).
+        ///
+        /// A DATE, not a timestamp — GitHub sends <c>YYYY-MM-DD</c> and this is a calendar day in
+        /// no particular timezone, so storing it as a UTC <see cref="DateTime"/> would shift it.
+        ///
+        /// Set only on user-scoped budgets, which are stored but not displayed — so this is
+        /// captured for the same reason as <see cref="PreventFurtherUsage"/>: expiry silently
+        /// CHANGES a user's effective limit on a known future date, and the row is gone by the
+        /// time anyone could ask about it.</summary>
+        public DateOnly? ExpiresAt { get; set; }
+
         public DateTime SnapshotUtc { get; set; } = DateTime.UtcNow;
     }
 

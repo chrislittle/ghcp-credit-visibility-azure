@@ -1,4 +1,4 @@
-using GhcpCreditVisibility.Models;
+﻿using GhcpCreditVisibility.Models;
 
 namespace GhcpCreditVisibility.Services
 {
@@ -313,6 +313,24 @@ namespace GhcpCreditVisibility.Services
                     User = firstUser.Login,
                     BudgetAmount = 40m,
                     PreventFurtherUsage = true,   // a hard stop: blocks this developer mid-task
+                    // No ExpiresAt: a standing personal limit, which is the default and the only
+                    // shape that existed before GitHub added expiry on 2026-09-01.
+                });
+            }
+            if (seed.Users.Length > 1)
+            {
+                // A TEMPORARY override — the case budget expiry exists for. Dated relative to now
+                // so demo mode never drifts into showing an override that lapsed months ago.
+                var secondUser = seed.Users[1];
+                budgets.Add(new Budget
+                {
+                    Id = $"{enterprise}-budget-user-temp",
+                    BudgetProductSku = "ai_credits",
+                    BudgetScope = "user",
+                    BudgetEntityName = secondUser.Login,
+                    User = secondUser.Login,
+                    BudgetAmount = 120m,
+                    ExpiresAt = DateOnly.FromDateTime(DateTime.UtcNow.Date.AddDays(21)),
                 });
             }
             budgets.Add(new Budget
