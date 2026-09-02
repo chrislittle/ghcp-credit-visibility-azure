@@ -1,4 +1,4 @@
-using GhcpCreditVisibility.Data;
+﻿using GhcpCreditVisibility.Data;
 using GhcpCreditVisibility.Models;
 using GhcpCreditVisibility.Services;
 
@@ -195,6 +195,54 @@ namespace GhcpCreditVisibility.Tests
             {
                 Assert.True(s.Length <= 32, $"Scope '{s}' ({s.Length} chars) exceeds the column width.");
             }
+        }
+
+        /// <summary>
+        /// GitHub sends <c>expires_at</c> as a bare <c>YYYY-MM-DD</c> date. This asserts the WIRE
+        /// CONTRACT, not just the mapping: the client deserializes budgets with
+        /// <c>ReadFromJsonAsync</c> and default options, so a DateOnly that failed to bind would
+        /// throw at collection time on any enterprise using the feature — never in the mapper.
+        /// </summary>
+        [Fact]
+        public void ExpiresAt_binds_from_the_bare_date_GitHub_sends()
+        {
+            var json = """
+                {"budgets":[
+                  {"id":"b1","budget_scope":"user","user":"octocat","budget_amount":50,"expires_at":"2026-09-30"},
+                  {"id":"b2","budget_scope":"user","user":"hubot","budget_amount":50}
+                ]}
+                """;
+
+            var parsed = System.Text.Json.JsonSerializer.Deserialize<EnterpriseBudgets>(json)!;
+
+            Assert.Equal(new DateOnly(2026, 9, 30), parsed.Budgets[0].ExpiresAt);
+            // Absent means "does not expire" — the default, and the only behavior before 2026-09-01.
+            Assert.Null(parsed.Budgets[1].ExpiresAt);
+        }
+
+        /// <summary>
+        /// The expiry date must survive onto the row, and its absence must stay absent.
+        ///
+        /// It is worth capturing even though user-scoped budgets are not displayed: on expiry
+        /// GitHub DELETES the budget and the user silently falls back to the next applicable
+        /// level, so the snapshot job's stale-row cleanup removes the row on the following run.
+        /// After that there is nothing left to read — the date has to be captured beforehand or
+        /// not at all.
+        /// </summary>
+        [Fact]
+        public void Apply_carries_the_expiry_date_and_preserves_its_absence()
+        {
+            var expiring = Gh("b1", "user", entity: "octocat", user: "octocat");
+            expiring.ExpiresAt = new DateOnly(2026, 9, 30);
+
+            var expiringRow = new BudgetSnapshot();
+            BudgetScopeMapper.Apply(expiringRow, expiring, CostCenters, DateTime.UtcNow);
+            Assert.Equal(new DateOnly(2026, 9, 30), expiringRow.ExpiresAt);
+
+            var permanentRow = new BudgetSnapshot();
+            BudgetScopeMapper.Apply(permanentRow, Gh("b2", "user", user: "hubot"), CostCenters, DateTime.UtcNow);
+            // NOT defaulted the way PreventFurtherUsage is: null is GitHub's real answer here.
+            Assert.Null(permanentRow.ExpiresAt);
         }
     }
 }
