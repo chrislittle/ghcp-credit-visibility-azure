@@ -64,7 +64,9 @@ resource "azuread_application" "app" {
     }
   }
 
-  group_membership_claims = ["SecurityGroup"]
+  # Required by the app (see var.group_membership_claims). Switch to ApplicationGroup, don't remove,
+  # if users in many groups hit HTTP 431.
+  group_membership_claims = [var.group_membership_claims]
 }
 
 resource "azuread_service_principal" "sp" {

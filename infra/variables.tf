@@ -300,6 +300,16 @@ variable "admin_principal_object_id" {
   default     = ""
 }
 
+variable "group_membership_claims" {
+  type        = string
+  description = "Which Entra groups go into the sign-in token. The app NEEDS a groups claim: group-based Enterprise Reader grants, cost-center mappings and admin groups all read it. \"SecurityGroup\" (default) sends every security group the user is in; users in many groups can then hit HTTP 431 (headers too large). \"ApplicationGroup\" sends only groups assigned to this Enterprise App, which keeps the token small, but every group used in the app must then be assigned to the Enterprise App (Entra ID P1+, nested groups not expanded). Never remove the claim to fix 431: group access then fails silently."
+  default     = "SecurityGroup"
+  validation {
+    condition     = contains(["SecurityGroup", "ApplicationGroup"], var.group_membership_claims)
+    error_message = "group_membership_claims must be \"SecurityGroup\" or \"ApplicationGroup\"."
+  }
+}
+
 variable "additional_app_owner_object_ids" {
   type        = list(string)
   description = "Optional extra owner object IDs (users or service principals — NOT groups) added to the Entra app registration + service principal, in addition to the deploying principal. Use to give a platform/team account co-ownership so the app can always be cleaned up even if the original creator is unavailable. The deploying principal is ALWAYS added as owner automatically."

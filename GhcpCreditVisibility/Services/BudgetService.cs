@@ -125,7 +125,7 @@ namespace GhcpCreditVisibility.Services
             {
                 var orgQuery = db.OrgUsageSnapshots.Where(o => o.Year == year && o.Month == month);
 
-                // Same restriction as UsageQueryService.BuildOrgSeriesAsync, and for the same reason:
+                // Same restriction as UsageQueryService.BuildBillingFeedSeriesAsync, and for the same reason:
                 // this table has no cost center column, so the ONLY thing standing between an
                 // Enterprise Reader and another enterprise's organization spend is this filter.
                 // Null = no restriction (global reader); empty = show nothing.
@@ -140,7 +140,10 @@ namespace GhcpCreditVisibility.Services
                     }
                 }
 
+                // AI credits only: the table carries every product GitHub bills (Actions, GHAS, seats),
+                // and an AI-credit budget measured against Actions minutes reads as overspent.
                 byOrg = (await orgQuery
+                        .Where(CopilotBillingLines.IsAiCreditExpr)
                         .Where(o => o.OrganizationName != null)
                         .GroupBy(o => new { o.EnterpriseId, o.OrganizationName })
                         .Select(g => new { g.Key.EnterpriseId, g.Key.OrganizationName, Net = g.Sum(x => x.NetAmount) })

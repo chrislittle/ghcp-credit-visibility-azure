@@ -313,6 +313,11 @@ and whoever wires up the mappings need not be handed visibility of the whole com
   An administrator with no reader grant sees an empty dashboard, and the dashboard says exactly that
   rather than looking broken.
 - **Organization display name** and other light settings are also managed here.
+- **Group access depends on the `groups` claim in the sign-in token.** Never remove it: group-based
+  grants would stop matching and those users would just see empty pages. If users in many groups
+  hit **HTTP 431** (headers too large), set `group_membership_claims = "ApplicationGroup"` in
+  Terraform instead. The token then carries only the groups assigned to the Enterprise App, so
+  assign every group you use in the console there (Entra ID P1+, nested groups not expanded).
 
 See it in the [screenshot above](#screenshots), or read the full walkthrough in
 [infra/README.md](infra/README.md#the-admin-console-dbgroupmapping).

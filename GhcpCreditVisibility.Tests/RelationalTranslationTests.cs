@@ -130,7 +130,16 @@ namespace GhcpCreditVisibility.Tests
                 _ = await q.GetUserTotalsPagedAsync(2026, 8, s, null, 1, 25);
                 _ = await q.GetVisibleEnterprisesAsync(s);
                 _ = await q.GetScopeDescriptionAsync(s);
+                _ = await q.GetCopilotBillAsync(2026, 8, s);
             }
+
+            // Enterprise Reader takes the Contains-filtered path through the billing feed.
+            var reader = UserScope.Reader(1);
+            _ = await q.GetCopilotBillAsync(2026, 8, reader);
+            _ = await q.GetUserTotalsPagedAsync(2026, 8, reader, "dk", 1, 25);
+            foreach (var dim in new[] { UsageQueryService.SeriesDimension.Total, UsageQueryService.SeriesDimension.Enterprise, UsageQueryService.SeriesDimension.Organization })
+                _ = await q.GetSeriesAsync(dim, UsageQueryService.TimeGranularity.Month, 12, null, null, null, reader,
+                    basis: UsageQueryService.SpendBasis.CopilotBill);
         }
 
         /// <summary>An enterprise filter narrows every one of those; it uses a built expression too.</summary>
