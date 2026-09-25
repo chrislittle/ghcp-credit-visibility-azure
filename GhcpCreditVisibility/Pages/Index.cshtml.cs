@@ -140,6 +140,13 @@ namespace GhcpCreditVisibility.Pages
         public decimal TotalGrossSpend { get; private set; }
         public bool ShowGrossUsage { get; private set; }
 
+        /// <summary>Gross AI credits consumed this month (before the allowance) — consumption, not cost.</summary>
+        public decimal TotalCredits { get; private set; }
+
+        /// <summary>GitHub's Copilot bill (licenses + AI credits) for the enterprises this viewer can
+        /// read in full. Null for cost-center-scoped viewers and months with no billing rows.</summary>
+        public UsageQueryService.CopilotBill? CopilotBill { get; private set; }
+
         /// <summary>
         /// Consumed-vs-billable for the selected month. Deliberately NOT gated on
         /// <see cref="ShowGrossUsage"/>: that flag governs whether an EXTRA gross KPI is rendered,
@@ -254,6 +261,8 @@ namespace GhcpCreditVisibility.Pages
             // Headline KPIs derived from the scoped month (independent of search/paging).
             TotalSpend = userPage.TotalSpend;
             TotalGrossSpend = userPage.TotalGrossSpend;
+            TotalCredits = userPage.TotalCredits;
+            CopilotBill = await _query.GetCopilotBillAsync(Year, Month, scope, ct);
             UserCount = userPage.TotalUserCount;
             CostCenterCount = CostCenters.Count;
             AvgPerUser = UserCount > 0 ? TotalSpend / UserCount : 0m;

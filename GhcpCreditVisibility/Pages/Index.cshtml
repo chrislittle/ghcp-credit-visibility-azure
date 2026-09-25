@@ -111,7 +111,7 @@ else if (!Model.SeesAll && Model.UserCount == 0)
 <div class="gh-kpis">
     <div class="gh-kpi b1">
         <div class="ic">💳</div>
-        <div class="label">Total spend</div>
+        <div class="label">AI-credit spend <span title="Billable AI credits after the included allowance, attributed to users. Excludes Copilot seat licenses.">ⓘ</span></div>
         <div class="val">$@Model.TotalSpend.ToString("N2")</div>
         @* A $0 total means one of two very different things. Saying which is not optional:
            "nobody used Copilot" and "everyone did, and the allowance covered it" would otherwise
@@ -163,6 +163,21 @@ else if (!Model.SeesAll && Model.UserCount == 0)
             <div class="delta">Top: @(Model.TopUser.UserName ?? Model.TopUser.UserLogin) $@Model.TopUser.NetAmount.ToString("N2")</div>
         }
     </div>
+    <div class="gh-kpi b2">
+        <div class="ic">⚡</div>
+        <div class="label">AI credits used <span title="Gross AI credits consumed this month, before the included allowance. Shows real usage even when the allowance makes the bill $0.">ⓘ</span></div>
+        <div class="val">@Model.TotalCredits.ToString("N0")</div>
+        <div class="delta">before allowance</div>
+    </div>
+    @if (Model.CopilotBill is { } bill)
+    {
+        <div class="gh-kpi b3">
+            <div class="ic">🧾</div>
+            <div class="label">Copilot bill <span title="What GitHub bills for Copilot this month, from its billing feed: seat licenses plus AI credits, for the enterprises you can see in full. Can differ from AI-credit spend: licenses are never split by user, and the two feeds are collected separately.">ⓘ</span></div>
+            <div class="val">$@bill.Total.ToString("N2")</div>
+            <div class="delta">$@bill.Licenses.ToString("N2") licenses + $@((bill.AiCredits + bill.OtherCopilot).ToString("N2")) AI</div>
+        </div>
+    }
     @if (Model.PrimaryPool is not null)
     {
         var p = Model.PrimaryPool;
@@ -234,7 +249,7 @@ else if (!Model.SeesAll && Model.UserCount == 0)
             <table>
                 <thead>
                     <tr>
-                        <th>User</th><th>Cost center</th><th class="num">% of total</th><th class="num" title="Change vs the same user's total last month. A move of ±@((int)IndexModel.BigMoveThresholdPct)% or more is highlighted; 'new' = no spend last month.">vs @Model.PrevMonthLabel</th><th class="num">Net&nbsp;($)</th>
+                        <th>User</th><th>Cost center</th><th class="num" title="Gross AI credits consumed, before the allowance.">Credits</th><th class="num" title="Share of all AI credits consumed.">% of credits</th><th class="num" title="Share of billable AI-credit spend.">% of spend</th><th class="num" title="Change vs the same user's total last month. A move of ±@((int)IndexModel.BigMoveThresholdPct)% or more is highlighted; 'new' = no spend last month.">vs @Model.PrevMonthLabel</th><th class="num">Net&nbsp;($)</th>
                         @if (Model.ShowGrossUsage)
                         {
                             <th class="num">Gross&nbsp;($)</th>
@@ -246,6 +261,7 @@ else if (!Model.SeesAll && Model.UserCount == 0)
                     {
                         var col = ColorFor(u.EnterpriseId, u.CostCenterId, u.CostCenterName);
                         var sharePct = Model.TotalSpend > 0 ? (double)(u.NetAmount / Model.TotalSpend) * 100 : 0;
+                        var creditPct = Model.TotalCredits > 0 ? (double)(u.Credits / Model.TotalCredits) * 100 : 0;
                         var ccName = CcLabel(u.CostCenterName, u.CostCenterId, u.EnterpriseName);
                         <tr>
                             <td>
@@ -255,6 +271,8 @@ else if (!Model.SeesAll && Model.UserCount == 0)
                                 </div>
                             </td>
                             <td><span class="gh-ccpill" style="background:@(col)1a;color:@col">@ccName</span></td>
+                            <td class="num">@u.Credits.ToString("N0")</td>
+                            <td class="num">@creditPct.ToString("N1")%</td>
                             <td class="num">@sharePct.ToString("N1")%</td>
                             <td class="num">
                                 @if (!Model.HasPrevUserDeltas)
@@ -307,7 +325,7 @@ else if (!Model.SeesAll && Model.UserCount == 0)
                            history is NOT backfilled — GitHub is only ever asked for the current
                            month — so a newly onboarded enterprise is legitimately blank until usage
                            accrues, and saying so is the difference between "working" and "broken". *@
-                        <tr><td colspan="5" style="text-align:center;color:#66707d;padding:22px 0;">
+                        <tr><td colspan="7" style="text-align:center;color:#66707d;padding:22px 0;">
                             @if (Model.SelectedMonthPrecedesCollection && Model.CollectingSince is DateOnly before)
                             {
                                 <text>No data for @Model.MonthLabel — this deployment started collecting on <strong>@before.ToString("d MMM yyyy")</strong>.</text>
@@ -326,20 +344,22 @@ else if (!Model.SeesAll && Model.UserCount == 0)
                     }
                     else if (Model.MatchingUserCount == 0)
                     {
-                        <tr><td colspan="5" style="text-align:center;color:#66707d;padding:22px 0;">No users match "@Model.UserSearch".</td></tr>
+                        <tr><td colspan="7" style="text-align:center;color:#66707d;padding:22px 0;">No users match "@Model.UserSearch".</td></tr>
                     }
                 </tbody>
                 @if (Model.UserCount > 0)
                 {
                     <tfoot>
                         <tr>
-                            <td colspan="4">
+                            <td colspan="2">
                                 Total — @Model.UserCount users
                                 @if (!string.IsNullOrWhiteSpace(Model.UserSearch))
                                 {
                                     <text> (@Model.MatchingUserCount match "@Model.UserSearch")</text>
                                 }
                             </td>
+                            <td class="num">@Model.TotalCredits.ToString("N0")</td>
+                            <td colspan="3"></td>
                             <td class="num">$@Model.TotalSpend.ToString("N2")</td>
                             @if (Model.ShowGrossUsage)
                             {

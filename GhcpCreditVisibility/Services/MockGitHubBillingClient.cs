@@ -270,6 +270,27 @@ namespace GhcpCreditVisibility.Services
                 });
             }
 
+            // Copilot SEAT charges and a non-Copilot product, both as the live feed carries them: seats
+            // are enterprise-level (no org) in prorated user-months, and Actions sits alongside
+            // Copilot. Without them the demo cannot show license cost, nor prove that Copilot
+            // figures leave Actions out.
+            var seats = seed.Users.Count();
+            items.Add(new OrgUsageItem
+            {
+                Date = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc),
+                Product = "Copilot", Sku = "Copilot Business", UnitType = "UserMonths",
+                Quantity = seats, PricePerUnit = 19m,
+                GrossAmount = seats * 19m, DiscountAmount = 0m, NetAmount = seats * 19m,
+            });
+            items.Add(new OrgUsageItem
+            {
+                Date = new DateTime(year, month, 1, 0, 0, 0, DateTimeKind.Utc),
+                Product = "Actions", Sku = "Actions Linux", UnitType = "Minutes",
+                Quantity = 5000, PricePerUnit = 0.008m,
+                GrossAmount = 40m, DiscountAmount = 0m, NetAmount = 40m,
+                OrganizationName = orgs[0], RepositoryName = $"{orgs[0]}/repo-1",
+            });
+
             IReadOnlyList<OrgUsageItem> result = items;
             return Task.FromResult(result);
         }

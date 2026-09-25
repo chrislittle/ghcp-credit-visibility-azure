@@ -21,7 +21,7 @@ namespace GhcpCreditVisibility.Services
         /// <summary>PrevMonthNetAmount: the same (enterprise, login)'s total for the previous month —
         /// null when the user had no rows then. Only populated by the paged dashboard query, and only
         /// meaningful when the page reports the previous month has data at all.</summary>
-        public sealed record UserMonthTotal(string UserLogin, string? UserName, string? CostCenterId, string? CostCenterName, decimal NetAmount, decimal GrossAmount = 0m, long EnterpriseId = 0, string? EnterpriseName = null, decimal? PrevMonthNetAmount = null);
+        public sealed record UserMonthTotal(string UserLogin, string? UserName, string? CostCenterId, string? CostCenterName, decimal NetAmount, decimal GrossAmount = 0m, long EnterpriseId = 0, string? EnterpriseName = null, decimal? PrevMonthNetAmount = null, decimal Credits = 0m);
         public sealed record CostCenterTotal(string? CostCenterId, string? CostCenterName, decimal NetAmount, decimal GrossAmount = 0m, long EnterpriseId = 0, string? EnterpriseName = null);
         public sealed record ModelTotal(string Model, decimal NetAmount, decimal GrossAmount = 0m);
         public sealed record TrendPoint(int Year, int Month, decimal NetAmount);
@@ -334,7 +334,9 @@ namespace GhcpCreditVisibility.Services
             // False when the previous month has no rows in scope at all (first month of a
             // deployment / newly onboarded enterprise): per-user deltas would then flag EVERY
             // user as "new", which is noise — the UI renders em-dashes instead.
-            bool HasPrevMonthData = false);
+            bool HasPrevMonthData = false,
+            // Gross AI credits consumed (before the allowance) — consumption, not cost.
+            decimal TotalCredits = 0m);
 
         /// <summary>
         /// Search + page the per-user monthly breakdown entirely in the database: the GROUP BY, search
@@ -360,7 +362,8 @@ namespace GhcpCreditVisibility.Services
                     g.Key.CostCenterId,
                     g.Key.CostCenterName,
                     NetAmount = g.Sum(v => v.NetAmount),
-                    GrossAmount = g.Sum(v => v.GrossAmount)
+                    GrossAmount = g.Sum(v => v.GrossAmount),
+                    Credits = g.Sum(v => v.UnitType == UsageUnitTypes.AiCredits ? (v.GrossQuantity ?? 0m) : 0m)
                 });
 
             var filtered = grouped;
@@ -408,7 +411,8 @@ namespace GhcpCreditVisibility.Services
                 .Select(r => new UserMonthTotal(r.UserLogin, r.UserName, r.CostCenterId,
                     ResolveName(currentNames, r.EnterpriseId, r.CostCenterId, r.CostCenterName),
                     r.NetAmount, r.GrossAmount, r.EnterpriseId, entNames.GetValueOrDefault(r.EnterpriseId),
-                    prevByUser.TryGetValue((r.EnterpriseId, r.UserLogin), out var prevNet) ? prevNet : null))
+                    prevByUser.TryGetValue((r.EnterpriseId, r.UserLogin), out var prevNet) ? prevNet : null,
+                    r.Credits))
                 .ToList();
 
             // Month-level KPIs (total spend, top user, distinct user count) are independent of the
@@ -416,6 +420,9 @@ namespace GhcpCreditVisibility.Services
             // queries so they never require materializing the whole per-user list.
             var totalSpend = await scoped.SumAsync(x => x.NetAmount, ct);
             var totalGrossSpend = await scoped.SumAsync(x => x.GrossAmount, ct);
+            var totalCredits = await scoped
+                .Where(x => x.UnitType == UsageUnitTypes.AiCredits)
+                .SumAsync(x => x.GrossQuantity ?? 0m, ct);
             // Distinct (enterprise, login): the same login in two enterprises is two billed seats.
             var totalUserCount = await scoped.Select(x => new { x.EnterpriseId, x.UserLogin }).Distinct().CountAsync(ct);
             var maxUserNet = totalUserCount > 0
@@ -426,9 +433,10 @@ namespace GhcpCreditVisibility.Services
                 ? null
                 : new UserMonthTotal(topRow.UserLogin, topRow.UserName, topRow.CostCenterId,
                     ResolveName(currentNames, topRow.EnterpriseId, topRow.CostCenterId, topRow.CostCenterName),
-                    topRow.NetAmount, topRow.GrossAmount, topRow.EnterpriseId, entNames.GetValueOrDefault(topRow.EnterpriseId));
+                    topRow.NetAmount, topRow.GrossAmount, topRow.EnterpriseId, entNames.GetValueOrDefault(topRow.EnterpriseId),
+                    Credits: topRow.Credits);
 
-            return new UserMonthPage(items, matchingUserCount, totalUserCount, totalSpend, totalGrossSpend, maxUserNet, topUser, hasPrevMonthData);
+            return new UserMonthPage(items, matchingUserCount, totalUserCount, totalSpend, totalGrossSpend, maxUserNet, topUser, hasPrevMonthData, totalCredits);
         }
 
         public async Task<IReadOnlyList<CostCenterTotal>> GetCostCenterTotalsAsync(int year, int month, UserScope scope, CancellationToken ct = default)
@@ -466,6 +474,54 @@ namespace GhcpCreditVisibility.Services
             var q = ApplyScope(db.UsageSnapshots.Where(x => x.Year == year && x.Month == month), scope);
             var rows = await q.Select(x => x.NetAmount).ToListAsync(ct);
             return rows.Sum();
+        }
+
+        /// <summary>
+        /// GitHub's own Copilot bill for a month, from the enterprise billing feed: seat licenses plus
+        /// AI credits (plus any other Copilot SKU). Net amounts — what GitHub actually charges.
+        ///
+        /// This can legitimately differ from the per-user AI-credit total: licenses exist only here
+        /// (GitHub never attributes them to a user, model or cost center), and the two feeds are
+        /// collected separately. The Usage page shows both side by side rather than merging them.
+        /// </summary>
+        public sealed record CopilotBill(decimal Licenses, decimal AiCredits, decimal OtherCopilot)
+        {
+            public decimal Total => Licenses + AiCredits + OtherCopilot;
+        }
+
+        /// <summary>Null when the viewer lacks enterprise-grain read (the feed has no cost center to
+        /// narrow by) or the month has no Copilot billing rows.</summary>
+        public async Task<CopilotBill?> GetCopilotBillAsync(int year, int month, UserScope scope, CancellationToken ct = default)
+        {
+            if (!scope.HasEnterpriseRead) return null;
+            await using var db = await _dbFactory.CreateDbContextAsync(ct);
+            var oq = RestrictToReadableEnterprises(db.OrgUsageSnapshots.Where(o => o.Year == year && o.Month == month), scope);
+            if (oq is null) return null;
+
+            var rows = await oq.Select(o => new { o.Product, o.Sku, o.UnitType, o.NetAmount }).ToListAsync(ct);
+            decimal lic = 0, ai = 0, other = 0;
+            var any = false;
+            foreach (var r in rows)
+            {
+                switch (CopilotBillingLines.Classify(r.Product, r.Sku, r.UnitType))
+                {
+                    case CopilotLineKind.License: lic += r.NetAmount; any = true; break;
+                    case CopilotLineKind.AiCredits: ai += r.NetAmount; any = true; break;
+                    case CopilotLineKind.OtherCopilot: other += r.NetAmount; any = true; break;
+                }
+            }
+            return any ? new CopilotBill(lic, ai, other) : null;
+        }
+
+        /// <summary>Restricts an enterprise-grain table to the enterprises the viewer may read, honouring
+        /// the UI's enterprise filter. Returns null when nothing may be shown.</summary>
+        private static IQueryable<OrgUsageSnapshot>? RestrictToReadableEnterprises(IQueryable<OrgUsageSnapshot> q, UserScope scope)
+        {
+            var allowed = scope.EnterpriseReadFilter();
+            if (allowed is null) return q;
+            if (allowed.Count == 0) return null;
+            var ids = allowed.ToList();
+            return q.Where(o => ids.Contains(o.EnterpriseId));
         }
 
         // ── Included-allowance pool ─────────────────────────────────────────────────────────────
@@ -757,6 +813,14 @@ namespace GhcpCreditVisibility.Services
         public enum SeriesDimension { Total, User, Model, CostCenter, Enterprise, Organization }
         public enum TimeGranularity { Day, Week, Month }
 
+        /// <summary>
+        /// What a report's dollars mean. <see cref="AiCredits"/> is per-user attribution (the default,
+        /// available at every grain). <see cref="CopilotBill"/> is GitHub's billing feed — licenses +
+        /// AI credits — and exists only at Total / Enterprise / Organization grain, because GitHub
+        /// does not allocate license cost to users, models or cost centers.
+        /// </summary>
+        public enum SpendBasis { AiCredits, CopilotBill }
+
         public sealed record SeriesPoint(DateOnly BucketStart, string Label, decimal NetAmount);
         public sealed record Series(string Key, IReadOnlyList<SeriesPoint> Points, decimal Total);
         public sealed record UserOption(string Login, string? Name);
@@ -871,9 +935,18 @@ namespace GhcpCreditVisibility.Services
         public async Task<IReadOnlyList<Series>> GetSeriesAsync(
             SeriesDimension dim, TimeGranularity gran, int count,
             string? filterUser, string? filterModel, string? filterCostCenter,
-            UserScope scope, int topN = 8, CancellationToken ct = default)
+            UserScope scope, int topN = 8, CancellationToken ct = default, SpendBasis basis = SpendBasis.AiCredits)
         {
             await using var db = await _dbFactory.CreateDbContextAsync(ct);
+
+            // ── Copilot bill: GitHub's billing feed, licenses included ──
+            // Same enterprise-grain rule as Organization below, and for the same reason: the feed has
+            // no cost center or user, so nothing narrower than an enterprise can be shown from it.
+            if (basis == SpendBasis.CopilotBill && dim is SeriesDimension.Total or SeriesDimension.Enterprise)
+            {
+                if (!scope.HasEnterpriseRead) return Array.Empty<Series>();
+                return await BuildBillingFeedSeriesAsync(db, dim, gran, count, scope, topN, includeLicenses: true, ct);
+            }
 
             // ── Organization: different table, and ENTERPRISE-GRAIN ONLY ──
             // OrgUsageSnapshot carries EnterpriseId but NO cost center and NO user, so the scope
@@ -884,11 +957,12 @@ namespace GhcpCreditVisibility.Services
             //
             // Enterprise Reader is exactly that grain, so it qualifies where a manager does not — but
             // a reader for one enterprise must not see another's organizations, which is why
-            // BuildOrgSeriesAsync restricts the table rather than relying on this gate alone.
+            // BuildBillingFeedSeriesAsync restricts the table rather than relying on this gate alone.
             if (dim == SeriesDimension.Organization)
             {
                 if (!scope.HasEnterpriseRead) return Array.Empty<Series>();
-                return await BuildOrgSeriesAsync(db, gran, count, scope, topN, ct);
+                return await BuildBillingFeedSeriesAsync(db, dim, gran, count, scope, topN,
+                    includeLicenses: basis == SpendBasis.CopilotBill, ct);
             }
 
             var q = ApplyScope(db.UsageSnapshots, scope);
@@ -1010,7 +1084,8 @@ namespace GhcpCreditVisibility.Services
         }
 
         /// <summary>
-        /// Series grouped by GitHub ORGANIZATION, built from <see cref="OrgUsageSnapshot"/>.
+        /// Series from GitHub's billing feed (<see cref="OrgUsageSnapshot"/>), grouped by organization,
+        /// enterprise, or as one total. Copilot rows only; licenses only when <paramref name="includeLicenses"/>.
         ///
         /// Callers must have already established that the viewer can see everything — see the gate
         /// in <see cref="GetSeriesAsync"/>; this method does not re-check.
@@ -1022,27 +1097,31 @@ namespace GhcpCreditVisibility.Services
         ///    15 of 37) and are surfaced as "Unattributed" rather than dropped, so the series still
         ///    reconciles to the enterprise total.
         /// </summary>
-        private async Task<IReadOnlyList<Series>> BuildOrgSeriesAsync(
-            BillingDbContext db, TimeGranularity gran, int count, UserScope scope, int topN, CancellationToken ct)
+        private async Task<IReadOnlyList<Series>> BuildBillingFeedSeriesAsync(
+            BillingDbContext db, SeriesDimension dim, TimeGranularity gran, int count, UserScope scope, int topN,
+            bool includeLicenses, CancellationToken ct)
         {
             const string Unattributed = "Unattributed";
-
-            var oq = db.OrgUsageSnapshots.AsQueryable();
 
             // Restrict to the enterprises this viewer may read AT ALL, intersected with the UI's
             // enterprise filter. Null means "no restriction" (a global reader with no filter); an
             // EMPTY list means nothing may be shown — the two must not be conflated, or an
             // Enterprise Reader whose filter selects an enterprise they lack would see everything.
-            var allowedEnterprises = scope.EnterpriseReadFilter();
-            if (allowedEnterprises is not null)
-            {
-                if (allowedEnterprises.Count == 0) return Array.Empty<Series>();
-                var allowedIds = allowedEnterprises.ToList();
-                oq = oq.Where(x => allowedIds.Contains(x.EnterpriseId));
-            }
+            var oq = RestrictToReadableEnterprises(db.OrgUsageSnapshots, scope);
+            if (oq is null) return Array.Empty<Series>();
 
-            var orgRows = await oq.ToListAsync(ct);
+            // Copilot only. The feed carries every product GitHub bills (Actions, storage, GHAS…),
+            // which have no place in a Copilot report. Licenses only when the caller asked for them.
+            var orgRows = (await oq.ToListAsync(ct))
+                .Where(r => CopilotBillingLines.Classify(r) switch
+                {
+                    CopilotLineKind.AiCredits => true,
+                    CopilotLineKind.License or CopilotLineKind.OtherCopilot => includeLicenses,
+                    _ => false,
+                })
+                .ToList();
             if (orgRows.Count == 0) return Array.Empty<Series>();
+            var entNames = dim == SeriesDimension.Enterprise ? await LoadEnterpriseNamesAsync(db, ct) : new Dictionary<long, string>();
 
             // Project onto UsageSnapshot so the shared bucketing/labelling applies unchanged.
             var rows = orgRows.Select(r => new UsageSnapshot
@@ -1066,7 +1145,13 @@ namespace GhcpCreditVisibility.Services
                 return new Series(key, pts, pts.Sum(p => p.NetAmount));
             }
 
-            var series = win.GroupBy(b => b.Row.OrganizationName ?? Unattributed)
+            if (dim == SeriesDimension.Total)
+                return new[] { Build("Total", win) };
+
+            Func<UsageSnapshot, string> keySel = dim == SeriesDimension.Enterprise
+                ? r => entNames.GetValueOrDefault(r.EnterpriseId, $"enterprise {r.EnterpriseId}")
+                : r => r.OrganizationName ?? Unattributed;
+            var series = win.GroupBy(b => keySel(b.Row))
                 .Select(g => Build(g.Key, g))
                 .OrderByDescending(s => s.Total)
                 .ToList();

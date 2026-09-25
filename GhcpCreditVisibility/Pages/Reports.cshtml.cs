@@ -30,6 +30,7 @@ namespace GhcpCreditVisibility.Pages
         [BindProperty(SupportsGet = true)] public string? FilterCostCenter { get; set; }         // enterprise-qualified key "<enterpriseId>:<ccId>"
         [BindProperty(SupportsGet = true)] public long? Ent { get; set; }                        // enterprise filter (null = all in scope)
         [BindProperty(SupportsGet = true)] public string View { get; set; } = "chart";           // chart | table
+        [BindProperty(SupportsGet = true)] public string Basis { get; set; } = "ai";             // ai | bill
 
         public bool SeesAll { get; private set; }
         public string ScopeLabel { get; private set; } = "";
@@ -82,22 +83,31 @@ namespace GhcpCreditVisibility.Pages
         /// back and the warning would be wrong.
         /// </summary>
         public bool RangeExceedsHistory =>
-            !IsOrganization && CollectingSince is DateOnly since && Range > 0 &&
+            !IsOrganization && !IsBill && CollectingSince is DateOnly since && Range > 0 &&
             (Gran switch
             {
                 "day" => DateTime.UtcNow.Date.AddDays(-Range),
                 "week" => DateTime.UtcNow.Date.AddDays(-7 * Range),
                 _ => DateTime.UtcNow.Date.AddMonths(-Range),
             }) < new DateTime(since.Year, since.Month, since.Day);
+        /// <summary>
+        /// Whether "Copilot bill (licenses + AI credits)" may be offered. Only at Total / Enterprise /
+        /// Organization grain — GitHub does not allocate license cost to users, models or cost
+        /// centers, so offering it there would mean inventing an allocation — and only to viewers with
+        /// enterprise-grain read, since the billing feed cannot be narrowed below an enterprise.
+        /// </summary>
+        public bool ShowBasisOption { get; private set; }
+        public bool IsBill => Basis == "bill";
+
         public string GranLabel => Gran switch { "day" => "day", "week" => "week", _ => "month" };
         public bool IsTotal => Dim == "total";
 
         // Contextual filters: only offer filters that can't collapse the breakdown to a trivial 100%.
         // (A user maps to exactly one cost center, so a user filter collapses a cost-center breakdown;
         // an enterprise filter collapses an enterprise breakdown the same way.)
-        public bool ShowUserFilter => !IsOrganization && Dim is "model" or "total" or "enterprise";
-        public bool ShowModelFilter => !IsOrganization && Dim is "costcenter" or "user" or "total" or "enterprise";
-        public bool ShowCostCenterFilter => !IsOrganization && Dim is "user" or "model" or "total";
+        public bool ShowUserFilter => !IsOrganization && !IsBill && Dim is "model" or "total" or "enterprise";
+        public bool ShowModelFilter => !IsOrganization && !IsBill && Dim is "costcenter" or "user" or "total" or "enterprise";
+        public bool ShowCostCenterFilter => !IsOrganization && !IsBill && Dim is "user" or "model" or "total";
         public bool ShowEnterpriseFilter => Dim is not "enterprise" && MultiEnterprise;
 
         public string PeriodLabel
@@ -138,7 +148,7 @@ namespace GhcpCreditVisibility.Pages
             // stops nobody from requesting ?Dim=organization by hand.
             //
             // This only decides whether the dimension is OFFERED. Which enterprises' organizations
-            // appear is enforced inside UsageQueryService.BuildOrgSeriesAsync, because the scope here
+            // appear is enforced inside UsageQueryService.BuildBillingFeedSeriesAsync, because the scope here
             // may cover several enterprises and this flag cannot express "these but not those".
             ShowOrganizationDim = scope.HasEnterpriseRead;
             if (string.Equals(Dim, "organization", StringComparison.OrdinalIgnoreCase) && !ShowOrganizationDim)
@@ -164,9 +174,15 @@ namespace GhcpCreditVisibility.Pages
                 "organization" => SeriesDimension.Organization,
                 _ => SeriesDimension.Total
             };
+            ShowBasisOption = scope.HasEnterpriseRead && Dim is "total" or "enterprise" or "organization";
+            if (!ShowBasisOption || Basis != "bill") Basis = "ai";
+            // Billing-feed data has no user, model or cost center, so those filters cannot apply.
+            if (IsBill) { FilterUser = null; FilterModel = null; FilterCostCenter = null; }
+
             var granularity = Gran switch { "day" => TimeGranularity.Day, "week" => TimeGranularity.Week, _ => TimeGranularity.Month };
 
-            SeriesList = await _query.GetSeriesAsync(dimension, granularity, Range, FilterUser, FilterModel, FilterCostCenter, scope, 8, ct);
+            SeriesList = await _query.GetSeriesAsync(dimension, granularity, Range, FilterUser, FilterModel, FilterCostCenter, scope, 8, ct,
+                IsBill ? SpendBasis.CopilotBill : SpendBasis.AiCredits);
             Buckets = SeriesList.Count > 0 ? SeriesList[0].Points.Select(p => p.Label).ToList() : Array.Empty<string>();
             GrandTotal = SeriesList.Sum(s => s.Total);
         }
