@@ -483,14 +483,26 @@ namespace GhcpCreditVisibility.Services
         /// This can legitimately differ from the per-user AI-credit total: licenses exist only here
         /// (GitHub never attributes them to a user, model or cost center), and the two feeds are
         /// collected separately. The Usage page shows both side by side rather than merging them.
+        ///
+        /// <see cref="OtherProducts"/> is everything else on the same feed (Actions, Advanced
+        /// Security, Codespaces, LFS…). It is carried SEPARATELY and never added to <see cref="Total"/>:
+        /// it exists so the page can reconcile to GitHub's whole invoice, not to inflate a figure
+        /// labelled Copilot.
         /// </summary>
-        public sealed record CopilotBill(decimal Licenses, decimal AiCredits, decimal OtherCopilot)
+        public sealed record CopilotBill(decimal Licenses, decimal AiCredits, decimal OtherCopilot,
+            IReadOnlyList<ProductSpend>? OtherProducts = null)
         {
+            /// <summary>Copilot only.</summary>
             public decimal Total => Licenses + AiCredits + OtherCopilot;
+            public decimal OtherProductsTotal => OtherProducts?.Sum(p => p.NetAmount) ?? 0m;
+            /// <summary>Copilot plus every other product — what GitHub's billing page shows.</summary>
+            public decimal GitHubTotal => Total + OtherProductsTotal;
         }
 
+        public sealed record ProductSpend(string Product, decimal NetAmount);
+
         /// <summary>Null when the viewer lacks enterprise-grain read (the feed has no cost center to
-        /// narrow by) or the month has no Copilot billing rows.</summary>
+        /// narrow by) or the month has no billing rows at all.</summary>
         public async Task<CopilotBill?> GetCopilotBillAsync(int year, int month, UserScope scope, CancellationToken ct = default)
         {
             if (!scope.HasEnterpriseRead) return null;
@@ -499,18 +511,26 @@ namespace GhcpCreditVisibility.Services
             if (oq is null) return null;
 
             var rows = await oq.Select(o => new { o.Product, o.Sku, o.UnitType, o.NetAmount }).ToListAsync(ct);
+            if (rows.Count == 0) return null;
+
             decimal lic = 0, ai = 0, other = 0;
-            var any = false;
+            var otherProducts = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
             foreach (var r in rows)
             {
                 switch (CopilotBillingLines.Classify(r.Product, r.Sku, r.UnitType))
                 {
-                    case CopilotLineKind.License: lic += r.NetAmount; any = true; break;
-                    case CopilotLineKind.AiCredits: ai += r.NetAmount; any = true; break;
-                    case CopilotLineKind.OtherCopilot: other += r.NetAmount; any = true; break;
+                    case CopilotLineKind.License: lic += r.NetAmount; break;
+                    case CopilotLineKind.AiCredits: ai += r.NetAmount; break;
+                    case CopilotLineKind.OtherCopilot: other += r.NetAmount; break;
+                    default:
+                        var name = string.IsNullOrWhiteSpace(r.Product) ? "Other" : r.Product;
+                        otherProducts[name] = otherProducts.GetValueOrDefault(name) + r.NetAmount;
+                        break;
                 }
             }
-            return any ? new CopilotBill(lic, ai, other) : null;
+            return new CopilotBill(lic, ai, other,
+                otherProducts.Select(kv => new ProductSpend(kv.Key, kv.Value))
+                    .OrderByDescending(p => p.NetAmount).ToList());
         }
 
         /// <summary>Restricts an enterprise-grain table to the enterprises the viewer may read, honouring

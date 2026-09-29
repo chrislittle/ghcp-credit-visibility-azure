@@ -91,6 +91,20 @@ namespace GhcpCreditVisibility.Tests
             Assert.Equal(230m, bill.Total);   // Actions (500) and GHAS (300) excluded
         }
 
+        /// <summary>Other products are reported beside the Copilot bill so the page reconciles to
+        /// GitHub's invoice — but they must never leak into the Copilot total.</summary>
+        [Fact]
+        public async Task Other_products_are_reported_separately_and_never_counted_as_copilot()
+        {
+            var f = await SeededAsync();
+            var bill = (await new UsageQueryService(f).GetCopilotBillAsync(2026, 8, UserScope.Reader(1)))!;
+
+            Assert.Equal(230m, bill.Total);
+            Assert.Equal(800m, bill.OtherProductsTotal);
+            Assert.Equal(1030m, bill.GitHubTotal);
+            Assert.Equal(new[] { "Actions", "GHAS" }, bill.OtherProducts!.Select(p => p.Product));
+        }
+
         [Fact]
         public async Task Copilot_bill_is_restricted_to_readable_enterprises()
         {
