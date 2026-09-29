@@ -177,6 +177,17 @@ else if (!Model.SeesAll && Model.UserCount == 0)
             <div class="val">$@bill.Total.ToString("N2")</div>
             <div class="delta">$@bill.Licenses.ToString("N2") licenses + $@((bill.AiCredits + bill.OtherCopilot).ToString("N2")) AI</div>
         </div>
+        @* A separate tile, never folded into the Copilot figure: it is here so the page reconciles
+           to GitHub's whole invoice without making "Copilot" mean Actions minutes too. *@
+        @if (bill.OtherProductsTotal != 0)
+        {
+            <div class="gh-kpi b4">
+                <div class="ic">📦</div>
+                <div class="label">Other GitHub products <span title="Not Copilot, and not included in any Copilot figure. Shown so the total matches GitHub's billing page. @string.Join(" · ", bill.OtherProducts!.Select(x => $"{x.Product} ${x.NetAmount:N2}"))">ⓘ</span></div>
+                <div class="val">$@bill.OtherProductsTotal.ToString("N2")</div>
+                <div class="delta">Total GitHub bill $@bill.GitHubTotal.ToString("N2")</div>
+            </div>
+        }
     }
     @if (Model.PrimaryPool is not null)
     {
